@@ -129,6 +129,14 @@ App.state = new O.Router({
         );
     },
 
+    // --- Agenda ---
+
+    showAgenda: false,
+
+    toggleAgenda: function () {
+        this.toggle( 'showAgenda' );
+    },
+
     // --- Refresh ---
 
     refresh: function () {

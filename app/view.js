@@ -38,6 +38,70 @@ var contentSplitController = new O.SplitViewController({
         App.views.mainWindow.get( 'pxWidth' ) - 700 )
 });
 
+var today = new Date();
+today = new Date(Date.UTC(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate()
+));
+
+var agendaView = new O.View({
+    positioning: 'absolute',
+    layout: {
+        top: 0,
+        bottom: 0,
+        right: 15,
+        width: 250
+    },
+    className: 'v-Agenda',
+    date: today,
+    events: function () {
+        var date = this.get( 'date' );
+        return JMAP.calendar.getEventsForDate( date, 0 );
+    }.property( 'date' ),
+    cleanupEvents: function ( _, __, oldEvents ) {
+        if ( oldEvents ) {
+            oldEvents.destroy();
+        }
+    }.observes( 'events' ),
+    draw: function ( layer, Element, el ) {
+        return [
+            el( 'div.v-Agenda-header', [
+                this._prev = el( 'a.v-Agenda-prev', [
+                    'Previous day',
+                    el( 'b.v-Agenda-arrow' )
+                ]),
+                this._now = el( 'a.v-Agenda-when', {
+                    text: O.bind( this, 'date', function ( date ) {
+                        return date.format( '%a, %d %b %Y', true );
+                    })
+                }),
+                this._next = el( 'a.v-Agenda-next', [
+                    'Next day',
+                    el( 'b.v-Agenda-arrow' )
+                ])
+            ]),
+            new O.ListView({
+                content: O.bind( this, 'events' ),
+                ItemView: App.EventItemView
+            })
+        ];
+    },
+    changeDate: function ( event ) {
+        var target = event.target;
+        var date = this.get( 'date' );
+        var contains = O.Element.contains;
+
+        if ( contains( this._prev, target ) ) {
+            this.set( 'date', new Date( date ).subtract( 1, 'day' ) );
+        } else if ( contains( this._next, target ) ) {
+            this.set( 'date', new Date( date ).add( 1, 'day' ) );
+        } else if ( contains( this._now, target ) ) {
+            this.set( 'date', today );
+        }
+    }.on( 'click' )
+});
+
 var mailboxView = new O.ScrollView({
     className: 'app-list',
     layout: O.bind( contentSplitController, 'topLeftLayout' ),
@@ -103,7 +167,11 @@ var threadView = new O.ScrollView({
                     value: 'No Conversation Selected'
                 }),
                 new O.View({
-                    className: 'v-Thread',
+                    className: O.bind( App.state, 'showAgenda',
+                    function ( showAgenda ) {
+                        return 'v-Thread' +
+                            ( showAgenda ? ' v-Thread--withAgenda' : '' );
+                    }),
                     childViews: [
                         new O.LabelView({
                             allowTextSelection: true,
@@ -114,7 +182,10 @@ var threadView = new O.ScrollView({
                         new O.ListView({
                             content: O.bind( App.state, 'threadMessageList' ),
                             ItemView: App.ThreadMessageView
-                        })
+                        }),
+                        O.Element.when( App.state, 'showAgenda' ).show([
+                            agendaView
+                        ]).end()
                     ]
                 }),
                 new O.LabelView({
@@ -195,6 +266,16 @@ var main = new O.View({
                                 label: 'Undo',
                                 target: JMAP.mail.undoManager,
                                 method: 'undo'
+                            }),
+                            new O.ButtonView({
+                                positioning: 'absolute',
+                                layout: {
+                                    right: 15
+                                },
+                                label: 'Agenda',
+                                isActive: O.bind( App.state, 'showAgenda' ),
+                                target: App.state,
+                                method: 'toggleAgenda'
                             })
                         ];
                     }
