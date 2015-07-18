@@ -1,0 +1,362 @@
+html {
+    overflow: hidden;
+    font-family: 'Source Sans Pro', sans-serif;
+    color: #494f50;
+}
+
+.v-SplitDivider {
+  z-index: 8;
+  cursor: ew-resize;
+}
+
+.v-Empty {
+    top: 40%;
+    left: 15px;
+    right: 15px;
+    color: #a1a8aa;
+    font-size: 27px;
+    text-align: center;
+}
+
+.app-toolbar {
+    box-sizing: border-box;
+    border-bottom: 1px solid rgba(0,0,0,0.4);
+    background: #e74c3c;
+    color: #fff;
+    cursor: default;
+}
+
+.app-list {
+    border-left: 1px solid #282828;
+}
+
+.app-content {
+    background: #f6f6f8;
+    border-left: 1px solid #e3e6e6;
+}
+
+/* --- Sidebar --- */
+
+.v-Sidebar {
+    padding-top: 15px;
+    background: #505050;
+    color: #fff;
+}
+
+.v-MailboxSource {
+    display: flex;
+    padding: 0 15px;
+    line-height: 2.1;
+    font-size: 17px;
+    font-weight: 300;
+    cursor: pointer;
+}
+.v-MailboxSource.is-selected,
+.v-MailboxSource.is-underDrag,
+.v-MailboxSource:hover {
+    background: rgba(0,0,0,0.3);
+}
+.v-MailboxSource.is-selected {
+    cursor: auto;
+}
+
+.v-MailboxSource-name {
+    flex: auto;
+}
+
+.v-MailboxSource-count {
+    flex: none;
+    padding-left: 5px;
+}
+
+/* --- Toolbar Heading --- */
+
+.v-MailboxTitle {
+    box-sizing: border-box;
+    display: flex;
+    align-items: baseline;
+    padding: 0 15px;
+    line-height: 49px;
+    font-size: 24px;
+    font-weight: 300;
+}
+
+.v-MailboxTitle-name {
+    flex: auto;
+}
+.v-MailboxTitle-total {
+    flex: none;
+}
+
+.v-MailboxTitle:after {
+    content: "";
+    position: absolute;
+    top: 13px;
+    bottom: 13px;
+    right: -1px;
+    width: 1px;
+    background: rgba(256,256,256,0.3);
+}
+
+/* --- Toolbar Actions --- */
+
+.v-Toolbar {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    padding: 0 15px;
+}
+
+.v-Toolbar .v-Button {
+    background: none;
+    border: none;
+    padding: 15px;
+    font-size: 17px;
+    font-weight: 300;
+    cursor: pointer;
+}
+.v-Toolbar .v-Button:hover {
+    background: rgba(0,0,0,0.15);
+}
+
+.v-Toolbar .v-Button > .icon {
+    margin-right: 5px;
+}
+
+/* --- Mailbox Listing --- */
+
+.v-MailboxItem {
+    right: 0;
+    line-height: 17px;
+    height: 96px;
+    font-size: 13px;
+    cursor: pointer;
+}
+.v-MailboxItem.is-selected {
+    background: #e3e6e6;
+}
+
+.v-MailboxItem.is-selected:before {
+    content: "";
+    position: absolute;
+    z-index: 1;
+    top: -1px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: #e3e6e6;
+}
+
+.v-MailboxItem:after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 15px;
+    right: 15px;
+    height: 1px;
+    background: #e3e6e6;
+}
+
+.v-MailboxItem-name,
+.v-MailboxItem-time,
+.v-MailboxItem-subject,
+.v-MailboxItem-total,
+.v-MailboxItem-preview {
+    position: absolute;
+    overflow: hidden;
+    left: 15px;
+    right: 15px;
+    text-overflow: ellipsis;
+}
+
+.v-MailboxItem-name {
+    top: 11px;
+    right: 100px;
+    white-space: nowrap;
+}
+.v-MailboxItem.is-unread .v-MailboxItem-name {
+    font-weight: 700;
+    padding-left: 15px;
+}
+.v-MailboxItem.is-unread .v-MailboxItem-name:before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 0;
+    border-radius: 5px;
+    width: 10px;
+    height: 10px;
+    background: #5776f5;
+}
+
+.v-MailboxItem-time {
+    color: #a1a8aa;
+    top: 11px;
+    left: auto;
+    width: 85px;
+    font-weight: 300;
+    text-align: right;
+}
+
+.v-MailboxItem-subject {
+    top: 31px;
+    right: 40px;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.v-MailboxItem-total {
+    top: 61px;
+    left: auto;
+    border-radius: 4px;
+    padding: 3px 7px;
+    background: #f6f6f8;
+}
+
+.v-MailboxItem-preview {
+    bottom: 11px;
+    height: 34px;
+    color: #a1a8aa;
+    font-weight: 300;
+}
+.v-MailboxItem-total + .v-MailboxItem-preview {
+    right: 42px;
+}
+
+.v-MailboxItem-flagButton {
+    position: absolute;
+    top: 30px;
+    right: 15px;
+    border: none;
+    background: none;
+    font-size: 16px;
+    color: #fff;
+    -webkit-text-stroke: 1px rgba(0,0,0,0.15);
+    cursor: pointer;
+}
+.v-MailboxItem-flagButton:hover {
+    -webkit-text-stroke-color: #999;
+}
+.v-MailboxItem.is-flagged .v-MailboxItem-flagButton {
+    color: #fde16b;
+}
+
+.v-MailboxItem-drag {
+    padding: 5px 10px;
+    box-shadow: 0 0 5px rgba(0,0,0,0.2);
+    background: #fff;
+    font-weight: 600;
+}
+
+/* --- Thread/Message View --- */
+
+.v-Thread {
+    padding: 0 30px;
+}
+
+.v-Thread-title {
+    padding: 18px 0;
+    font-size: 32px;
+    font-weight: 300;
+}
+
+.v-Message {
+    margin-bottom: 15px;
+    background: #fff;
+    font-size: 15px;
+}
+
+.v-Message-header {
+    height: 70px;
+}
+.v-Message:not(.is-last) .v-Message-header {
+    cursor: pointer;
+}
+
+.v-Message-avatar {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    border-radius: 25px;
+    width: 50px;
+    height: 50px;
+}
+
+.v-Message-first {
+    display: flex;
+    position: absolute;
+    top: 16px;
+    left: 75px;
+    right: 15px;
+}
+
+.v-Message-from {
+    flex: auto;
+    overflow: hidden;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.v-Message-mailboxes,
+.v-Message-time {
+    flex: none;
+    padding-left: 10px;
+}
+
+.v-Message-time {
+    color: #a1a8aa;
+    font-weight: 300;
+}
+
+.v-Message-preview,
+.v-Message-to {
+    position: absolute;
+    overflow: hidden;
+    top: 36px;
+    left: 75px;
+    right: 40px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.v-Message-preview {
+    color: #a1a8aa;
+}
+
+.v-Message-flagButton {
+    top: 36px;
+    right: 15px;
+    border: none;
+    background: none;
+    font-size: 16px;
+    color: #fff;
+    -webkit-text-stroke: 1px rgba(0,0,0,0.15);
+    cursor: pointer;
+}
+.v-Message-flagButton:hover {
+    -webkit-text-stroke-color: #999;
+}
+.v-Message-flagButton.is-flagged {
+    color: #fde16b;
+}
+
+.v-Message-body {
+    position: relative;
+    overflow: hidden;
+    margin: 5px 15px 15px;
+    border-top: 1px solid #e3e6e6;
+    padding: 15px 0;
+}
+
+.v-Message-body blockquote {
+    margin-left: 2px;
+    border-left: 3px solid #5776f5;
+    padding-left: 10px;
+}
+
+.v-Message.is-expanded .v-Message-preview,
+.v-Message.is-collapsed .v-Message-to,
+.v-Message.is-collapsed .v-Message-body {
+    display: none;
+}
