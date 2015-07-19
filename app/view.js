@@ -48,6 +48,7 @@ today = new Date(Date.UTC(
 var agendaView = new O.View({
     positioning: 'absolute',
     layout: {
+        overflow: 'hidden',
         top: 0,
         bottom: 0,
         right: 15,
@@ -83,7 +84,8 @@ var agendaView = new O.View({
             ]),
             new O.ListView({
                 content: O.bind( this, 'events' ),
-                ItemView: App.EventItemView
+                ItemView: App.EventItemView,
+                destroyItemView: function () {}
             })
         ];
     },

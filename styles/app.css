@@ -430,8 +430,11 @@ html {
 /* --- */
 
 .v-EventItem {
-    padding: 10px 0 10px 55px;
+    left: 0;
+    right: 0;
+    height: 39px;
     border-bottom: 1px solid #e3e6e6;
+    padding: 10px 0 10px 55px;
     list-style: none;
     font-size: 15px;
 }
