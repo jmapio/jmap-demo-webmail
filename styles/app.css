@@ -413,7 +413,7 @@ html {
     margin: auto;
     opacity: 0.8;
     border-style: solid;
-    border-color: transparent inherit;
+    border-color: transparent #494f50;
     border-width: 10px 19px 10px 0;
 }
 .v-Agenda-next:hover > .v-Agenda-arrow,
@@ -437,6 +437,13 @@ html {
     padding: 10px 0 10px 55px;
     list-style: none;
     font-size: 15px;
+}
+
+.v-EventItem-summary,
+.v-EventItem-location {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .v-EventItem-time {
