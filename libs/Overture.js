@@ -8023,7 +8023,9 @@ var GlobalKeyboardShortcuts = NS.Class({
         handler = this.getHandlerForKey( key );
         if ( handler ) {
             handler[0][ handler[1] ]( event );
-            event.preventDefault();
+            if ( !event.doDefault ) {
+                event.preventDefault();
+            }
         }
     }.on( 'keydown', 'keypress' )
 });
@@ -9642,15 +9644,12 @@ var Record = NS.Class({
             propKey = attrs[ attrKey ];
             if ( propKey ) {
                 attribute = this[ propKey ];
-                if ( !( attrKey in data ) ) {
+                if ( !( attrKey in data ) && !attribute.noSync ) {
                     defaultValue = attribute.defaultValue;
                     if ( defaultValue !== undefined ) {
                         data[ attrKey ] = defaultValue && defaultValue.toJSON ?
                             defaultValue.toJSON() : NS.clone( defaultValue );
                     }
-                }
-                if ( attribute.willCreateInStore ) {
-                    attribute.willCreateInStore( this, propKey, storeKey );
                 }
             }
         }
@@ -13270,6 +13269,21 @@ var Store = NS.Class({
     */
     getTypeStatus: function ( Type ) {
         return this._typeToStatus[ guid( Type ) ] || EMPTY;
+    },
+
+    /**
+        Method: O.Store#getTypeState
+
+        Get the current client state token for a type.
+
+        Parameters:
+            Type - {O.Class} The record type.
+
+        Returns:
+            {String|null} The client's current state token for the type.
+    */
+    getTypeState: function ( Type ) {
+        return this._typeToClientState[ guid( Type ) ] || null;
     },
 
     /**
@@ -20051,18 +20065,19 @@ var HttpRequest = NS.Class({
             headers = this.get( 'headers' ),
             transport =
                 ( data instanceof FormData && NS.FormUploader !== NS.XHR ) ?
-                    new NS.FormUploader() : getXhr();
+                    new NS.FormUploader() : getXhr(),
+            contentType;
 
         if ( data && method === 'GET' ) {
             url += ( url.contains( '?' ) ? '&' : '?' ) + data;
             data = null;
         }
-        if ( method === 'POST' && !headers[ 'Content-type' ] ) {
-            // All XMLHttpRequest data is sent as UTF-8 by the browser.
+        contentType = headers[ 'Content-type' ];
+        if ( contentType && method === 'POST' && typeof data === 'string' &&
+                contentType.indexOf( ';' ) === -1 ) {
+            // All string data is sent as UTF-8 by the browser.
             // This cannot be altered.
-            headers = NS.clone( headers );
-            headers[ 'Content-type' ] =
-                this.get( 'contentType' ) + ';charset=utf-8';
+            headers[ 'Content-type' ] += ';charset=utf-8';
         }
 
         // Send the request
@@ -26155,15 +26170,14 @@ var RichTextView = NS.Class({
             className: 'v-ColourMenu',
             showFilter: false,
             options: (
-                '000000 444444 666666 cccccc eeeeee f3f3f3 ffffff ' +
-                'fc0c1b 660000 990000 cc0000 e06666 ea9999 f4cccc ' +
-                'ff9900 783f04 b45f06 e69138 f6b26b f9cb9c fce5cd ' +
-                'ffff00 7f6000 bf9000 f1c232 ffd966 ffe599 fff2cc ' +
-                '00ff00 274e13 38761d 6aa84f 93c47d b6d7a8 d9ead3 ' +
-                '00ffff 0c343d 134f5c 45818e 76a5af a2c4c9 d0e0e3 ' +
-                '0000ff 073763 0b5394 3d85c6 6fa8dc 9fc5e8 cfe2f3 ' +
-                '9900ff 20124d 351c75 674ea7 8e7cc3 b4a7d6 d9d2e9 ' +
-                'ff00ff 4c1130 741b47 a64d79 c27ba0 d5a6bd ead1dc' )
+                '000000 b22222 ff0000 ffa07a fff0f5 ' +
+                '800000 a52a2a ff8c00 ffa500 faebd7 ' +
+                '8b4513 daa520 ffd700 ffff00 ffffe0 ' +
+                '2f4f4f 006400 008000 00ff00 f0fff0 ' +
+                '008080 40e0d0 00ffff afeeee f0ffff ' +
+                '000080 0000cd 0000ff add8e6 f0f8ff ' +
+                '4b0082 800080 ee82ee dda0dd e6e6fa ' +
+                '696969 808080 a9a9a9 d3d3d3 ffffff' )
                 .split( ' ' )
                 .map( function ( colour ) {
                     colour = '#' + colour;

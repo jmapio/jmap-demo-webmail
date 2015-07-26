@@ -410,7 +410,7 @@ var Connection = O.Class({
             JMAP.auth.connectionFailed( this, 30 );
         } else {
             if ( serverFailed ) {
-                alert( O.loc( 529 ) );
+                alert( O.loc( 'FEEDBACK_SERVER_FAILED' ) );
             }
             this.receive(
                 [], this._inFlightCallbacks, this._inFlightRemoteCalls );
@@ -1511,7 +1511,7 @@ var Calendar = O.Class({
         validate: function ( propValue/*, propKey, record*/ ) {
             if ( !propValue ) {
                 return new O.ValidationError( O.ValidationError.REQUIRED,
-                    O.loc( 1 )
+                    O.loc( 'S_LABEL_REQUIRED' )
                 );
             }
             return null;
@@ -2702,6 +2702,7 @@ JMAP.calendar.handle( CalendarEvent, {
     refresh: function ( _, state ) {
         this.callMethod( 'getCalendarEventUpdates', {
             sinceState: state,
+            maxChanges: 100,
             fetchRecords: true
         });
     },
@@ -2723,6 +2724,12 @@ JMAP.calendar.handle( CalendarEvent, {
     },
     calendarEventUpdates: function ( args ) {
         this.didFetchUpdates( CalendarEvent, args );
+        if ( args.hasMoreUpdates ) {
+            this.get( 'store' ).fetchAll( CalendarEvent, true );
+        }
+    },
+    error_getCalendarEventUpdates_cannotCalculateChanges: function () {
+        JMAP.calendar.flushCache();
     },
     calendarEventsSet: function ( args ) {
         this.didCommit( CalendarEvent, args );
@@ -3320,9 +3327,6 @@ JMAP.calendar.handle( null, {
     calendarEventList: function () {
         // We don't care about the list, we only use it to fetch the
         // events we want. This may change with search in the future!
-    },
-    error_getCalendarEventUpdates_cannotCalculateChanges: function () {
-        JMAP.calendar.flushCache();
     }
 });
 
@@ -3730,6 +3734,7 @@ JMAP.contacts.handle( Contact, {
     refresh: function ( _, state ) {
         this.callMethod( 'getContactUpdates', {
             sinceState: state,
+            maxChanges: 100,
             fetchRecords: true
         });
     },
@@ -3740,6 +3745,9 @@ JMAP.contacts.handle( Contact, {
     },
     contactUpdates: function ( args ) {
         this.didFetchUpdates( Contact, args );
+        if ( args.hasMoreUpdates ) {
+            this.get( 'store' ).fetchAll( Contact, true );
+        }
     },
     error_getContactUpdates_cannotCalculateChanges: function () {
         // All our data may be wrong. Refetch everything.
@@ -3782,7 +3790,7 @@ var ContactGroup = O.Class({
         validate: function ( propValue/*, propKey, record*/ ) {
             if ( !propValue ) {
                 return new ValidationError( REQUIRED,
-                    O.loc( 1 )
+                    O.loc( 'S_LABEL_REQUIRED' )
                 );
             }
             return null;
@@ -3937,12 +3945,12 @@ var Mailbox = O.Class({
         validate: function ( propValue/*, propKey, record*/ ) {
             if ( !propValue ) {
                 return new ValidationError( REQUIRED,
-                    O.loc( 1 )
+                    O.loc( 'S_LABEL_REQUIRED' )
                 );
             }
             if ( propValue.length > 256 ) {
                 return new ValidationError( TOO_LONG,
-                    O.loc( 43, 256 )
+                    O.loc( 'S_MAIL_ERROR_MAX_CHARS', 256 )
                 );
             }
             return null;
@@ -3965,13 +3973,34 @@ var Mailbox = O.Class({
 
     // ---
 
-    mustBeOnlyMailbox: attr( Boolean ),
-    mayReadItems: attr( Boolean ),
-    mayAddItems: attr( Boolean ),
-    mayRemoveItems: attr( Boolean ),
-    mayCreateChild: attr( Boolean ),
-    mayRename: attr( Boolean ),
-    mayDelete: attr( Boolean ),
+    mustBeOnlyMailbox: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
+    mayReadItems: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
+    mayAddItems: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
+    mayRemoveItems: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
+    mayCreateChild: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
+    mayRename: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
+    mayDelete: attr( Boolean, {
+        defaultValue: true,
+        noSync: true
+    }),
 
     // ---
 
@@ -4231,11 +4260,11 @@ var Message = O.Class({
         if ( status !== undefined ) {
             return status;
         }
-        if ( this.get( 'rawUrl' ) || this.is( NEW ) ) {
+        if ( this.get( 'blobId' ) || this.is( NEW ) ) {
             return READY;
         }
         return EMPTY;
-    }.property( 'rawUrl' ),
+    }.property( 'blobId' ),
 
     fetchDetails: function () {
         if ( this.get( 'detailsStatus' ) === EMPTY ) {
@@ -4243,9 +4272,9 @@ var Message = O.Class({
         }
     },
 
-    inReplyToMessageId: attr( String ),
+    blobId: attr( String ),
 
-    rawUrl: attr( String ),
+    inReplyToMessageId: attr( String ),
 
     headers: attr( Object, {
         defaultValue: {}
@@ -4278,8 +4307,8 @@ var Message = O.Class({
         'preview'
     ],
     detailsProperties: [
+        'blobId',
         'inReplyToMessageId',
-        'rawUrl',
         'headers.List-Id',
         'headers.List-Post',
         'cc',
@@ -4302,6 +4331,8 @@ JMAP.mail.handle( MessageDetails, {
     }
 });
 
+JMAP.mail.messageUpdateFetchRecords = true;
+JMAP.mail.messageUpdateMaxChanges = 50;
 JMAP.mail.handle( Message, {
     fetch: function ( ids ) {
         this.callMethod( 'getMessages', {
@@ -4323,11 +4354,13 @@ JMAP.mail.handle( Message, {
                 ]
             });
         } else {
+            var messageUpdateFetchRecords = this.messageUpdateFetchRecords;
             this.callMethod( 'getMessageUpdates', {
                 sinceState: state,
-                maxChanges: 50,
-                fetchRecords: true,
-                fetchRecordProperties: Message.headerProperties
+                maxChanges: this.messageUpdateMaxChanges,
+                fetchRecords: messageUpdateFetchRecords,
+                fetchRecordProperties: messageUpdateFetchRecords ?
+                    Message.headerProperties : null
             });
         }
     },
@@ -4349,24 +4382,47 @@ JMAP.mail.handle( Message, {
                 .sourceDidFetchPartialRecords( Message, updates );
         }
     },
-    messageUpdates: function ( args ) {
+    messageUpdates: function ( args, _, reqArgs ) {
         this.didFetchUpdates( Message, args );
+        if ( !reqArgs.fetchRecords ) {
+            this.recalculateAllFetchedWindows();
+        }
+        if ( args.hasMoreUpdates ) {
+            var messageUpdateMaxChanges = this.messageUpdateMaxChanges;
+            if ( messageUpdateMaxChanges < 150 ) {
+                if ( messageUpdateMaxChanges === 50 ) {
+                    // Keep fetching updates, just without records
+                    this.messageUpdateFetchRecords = false;
+                    this.messageUpdateMaxChanges = 100;
+                } else {
+                    this.messageUpdateMaxChanges = 150;
+                }
+                this.get( 'store' ).fetchAll( Message, true );
+                return;
+            } else {
+                // We've fetched 300 updates and there's still more. Let's give
+                // up and reset.
+                this.response
+                    .error_getMessageUpdates_cannotCalculateChanges
+                    .call( this, args );
+            }
+        }
+        this.messageUpdateFetchRecords = true;
+        this.messageUpdateMaxChanges = 50;
     },
-    error_getMessageUpdates_cannotCalculateChanges: function () {
-        this.response.error_getMessageUpdates_tooManyChanges.call( this );
-    },
-    error_getMessageUpdates_tooManyChanges: function () {
+    error_getMessageUpdates_cannotCalculateChanges: function ( args ) {
         var store = this.get( 'store' );
         // All our data may be wrong. Mark all messages as obsolete.
+        // The garbage collector will eventually clean up any messages that
+        // no longer exist
         store.getAll( Message ).forEach( function ( message ) {
             message.setObsolete();
         });
-        // Mark all message lists as needing to recheck if window is fetched.
-        store.getAllRemoteQueries().forEach( function ( query ) {
-            if ( query instanceof JMAP.MessageList ) {
-                query.recalculateFetchedWindows();
-            }
-        });
+        this.recalculateAllFetchedWindows();
+        // Tell the store we're now in the new state.
+        store.sourceDidFetchUpdates(
+            Message, null, null, store.getTypeState( Message ), args.newState );
+
     },
     messagesSet: function ( args ) {
         this.didCommit( Message, args );
@@ -4490,6 +4546,8 @@ var Thread = O.Class({
     }.property( 'messages' ).nocache()
 });
 
+JMAP.mail.threadUpdateFetchRecords = true;
+JMAP.mail.threadUpdateMaxChanges = 30;
 JMAP.mail.handle( Thread, {
     fetch: function ( ids ) {
         this.callMethod( 'getThreads', {
@@ -4504,8 +4562,8 @@ JMAP.mail.handle( Thread, {
         } else {
             this.callMethod( 'getThreadUpdates', {
                 sinceState: state,
-                maxChanges: 30,
-                fetchRecords: true
+                maxChanges: this.threadUpdateMaxChanges,
+                fetchRecords: this.threadUpdateFetchRecords
             });
         }
     },
@@ -4513,13 +4571,35 @@ JMAP.mail.handle( Thread, {
     threads: function ( args ) {
         this.didFetch( Thread, args );
     },
-    threadUpdates: function ( args ) {
+    threadUpdates: function ( args, _, reqArgs ) {
         this.didFetchUpdates( Thread, args );
+        if ( !reqArgs.fetchRecords ) {
+            this.recalculateAllFetchedWindows();
+        }
+        if ( args.hasMoreUpdates ) {
+            var threadUpdateMaxChanges = this.threadUpdateMaxChanges;
+            if ( threadUpdateMaxChanges < 120 ) {
+                if ( threadUpdateMaxChanges === 30 ) {
+                    // Keep fetching updates, just without records
+                    this.threadUpdateFetchRecords = false;
+                    this.threadUpdateMaxChanges = 100;
+                } else {
+                    this.threadUpdateMaxChanges = 120;
+                }
+                this.get( 'store' ).fetchAll( Thread, true );
+                return;
+            } else {
+                // We've fetched 250 updates and there's still more. Let's give
+                // up and reset.
+                this.response
+                    .error_getThreadUpdates_cannotCalculateChanges
+                    .call( this, args );
+            }
+        }
+        this.threadUpdateFetchRecords = true;
+        this.threadUpdateMaxChanges = 30;
     },
-    error_getThreadUpdates_cannotCalculateChanges: function () {
-        this.response.error_getThreadUpdates_tooManyChanges.call( this );
-    },
-    error_getThreadUpdates_tooManyChanges: function () {
+    error_getThreadUpdates_cannotCalculateChanges: function ( args ) {
         var store = this.get( 'store' );
         // All our data may be wrong. Unload if possible, otherwise mark
         // obsolete.
@@ -4528,12 +4608,10 @@ JMAP.mail.handle( Thread, {
                 thread.setObsolete();
             }
         });
-        // Mark all message lists as needing to recheck if window is fetched.
-        store.getAllRemoteQueries().forEach( function ( query ) {
-            if ( query instanceof JMAP.MessageList ) {
-                query.recalculateFetchedWindows();
-            }
-        });
+        this.recalculateAllFetchedWindows();
+        // Tell the store we're now in the new state.
+        store.sourceDidFetchUpdates(
+            Thread, null, null, store.getTypeState( Thread ), args.newState );
     }
 });
 
@@ -4571,8 +4649,22 @@ var EMPTY_SNIPPET = {
     body: ' '
 };
 
+var stringifySorted = function ( item ) {
+    if ( !item || ( typeof item !== 'object' ) ) {
+        return JSON.stringify( item );
+    }
+    if ( item instanceof Array ) {
+        return '[' + item.map( stringifySorted ).join( ',' ) + ']';
+    }
+    var keys = Object.keys( item );
+    keys.sort();
+    return '{' + keys.map( function ( key ) {
+        return '"' + key + '":' + stringifySorted( item[ key ] );
+    }).join( ',' ) + '}';
+};
+
 var getId = function ( args ) {
-    return 'ml:' + JSON.stringify( args.filter ) +
+    return 'ml:' + stringifySorted( args.filter ) +
         ( args.collapseThreads ? '+' : '-' );
 };
 
@@ -4853,6 +4945,15 @@ JMAP.mail.handle( MessageList, {
         }
     }
 });
+
+JMAP.mail.recalculateAllFetchedWindows = function () {
+    // Mark all message lists as needing to recheck if window is fetched.
+    this.get( 'store' ).getAllRemoteQueries().forEach( function ( query ) {
+        if ( query instanceof MessageList ) {
+            query.recalculateFetchedWindows();
+        }
+    });
+};
 
 MessageList.getId = getId;
 
