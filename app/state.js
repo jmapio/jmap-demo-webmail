@@ -21,6 +21,7 @@ var Status = O.Status,
 App.state = new O.Router({
 
     useHash: true,
+    baseUrl: '/client/',
 
     routes: [
         // Selected conversation
