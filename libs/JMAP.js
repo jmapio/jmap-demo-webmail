@@ -1620,8 +1620,9 @@ JMAP.calendar.handle( Calendar, {
     },
     commit: 'setCalendars',
     // Response handlers
-    calendars: function ( args ) {
-        this.didFetch( Calendar, args );
+    calendars: function ( args, reqMethod, reqArgs ) {
+        this.didFetch( Calendar, args,
+            reqMethod === 'getCalendars' && !reqArgs.ids );
     },
     calendarUpdates: function ( args ) {
         this.didFetchUpdates( Calendar, args );
@@ -3740,8 +3741,9 @@ JMAP.contacts.handle( Contact, {
     },
     commit: 'setContacts',
     // Response handlers
-    contacts: function ( args ) {
-        this.didFetch( Contact, args );
+    contacts: function ( args, reqMethod, reqArgs ) {
+        this.didFetch( Contact, args,
+            reqMethod === 'getContacts' && !reqArgs.ids );
     },
     contactUpdates: function ( args ) {
         this.didFetchUpdates( Contact, args );
@@ -3839,8 +3841,9 @@ JMAP.contacts.handle( ContactGroup, {
     },
     commit: 'setContactGroups',
     // Response handlers
-    contactGroups: function ( args ) {
-        this.didFetch( ContactGroup, args );
+    contactGroups: function ( args, reqMethod, reqArgs ) {
+        this.didFetch( ContactGroup, args,
+            reqMethod === 'getContactGroups' && !reqArgs.ids );
     },
     contactGroupUpdates: function ( args ) {
         this.didFetchUpdates( ContactGroup, args );
@@ -4138,15 +4141,9 @@ JMAP.mail.handle( Mailbox, {
 
     // ---
 
-    mailboxes: function ( args, requestName, requestArgs ) {
-        // If we get a cannotCalculateChanges error, we refetch everything.
-        // We need to tell the store explicitly it is everything so it
-        // destroys any other Mailboxes it has in its cache.
-        if ( requestName === 'getMailboxes' && !requestArgs.ids ) {
-            this.didFetch( Mailbox, args, true );
-        } else {
-            this.didFetch( Mailbox, args );
-        }
+    mailboxes: function ( args, reqMethod, reqArgs ) {
+        this.didFetch( Mailbox, args,
+            reqMethod === 'getMailboxes' && !reqArgs.ids );
     },
 
     mailboxUpdates: function ( args ) {
