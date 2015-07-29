@@ -1104,10 +1104,15 @@ var Connection = O.Class({
         }
     },
 
-    didFetchUpdates: function ( Type, args ) {
+    didFetchUpdates: function ( Type, args, reqArgs ) {
+        var hasDataForChanged = reqArgs.fetchRecords;
         this.get( 'store' )
-            .sourceDidFetchUpdates( Type, args.changed, args.removed,
-                args.oldState, args.newState );
+            .sourceDidFetchUpdates( Type,
+                hasDataForChanged ? null : args.changed,
+                args.removed,
+                args.oldState,
+                args.newState
+            );
     },
 
     didCommit: function ( Type, args ) {
@@ -1624,8 +1629,8 @@ JMAP.calendar.handle( Calendar, {
         this.didFetch( Calendar, args,
             reqMethod === 'getCalendars' && !reqArgs.ids );
     },
-    calendarUpdates: function ( args ) {
-        this.didFetchUpdates( Calendar, args );
+    calendarUpdates: function ( args, _, reqArgs ) {
+        this.didFetchUpdates( Calendar, args, reqArgs );
     },
     error_getCalendarUpdates_cannotCalculateChanges: function () {
         // All our data may be wrong. Refetch everything.
@@ -2723,8 +2728,8 @@ JMAP.calendar.handle( CalendarEvent, {
         this.didFetch( CalendarEvent, args, this.replaceEvents );
         this.replaceEvents = false;
     },
-    calendarEventUpdates: function ( args ) {
-        this.didFetchUpdates( CalendarEvent, args );
+    calendarEventUpdates: function ( args, _, reqArgs ) {
+        this.didFetchUpdates( CalendarEvent, args, reqArgs );
         if ( args.hasMoreUpdates ) {
             this.get( 'store' ).fetchAll( CalendarEvent, true );
         }
@@ -3745,8 +3750,8 @@ JMAP.contacts.handle( Contact, {
         this.didFetch( Contact, args,
             reqMethod === 'getContacts' && !reqArgs.ids );
     },
-    contactUpdates: function ( args ) {
-        this.didFetchUpdates( Contact, args );
+    contactUpdates: function ( args, _, reqArgs ) {
+        this.didFetchUpdates( Contact, args, reqArgs );
         if ( args.hasMoreUpdates ) {
             this.get( 'store' ).fetchAll( Contact, true );
         }
@@ -3845,8 +3850,8 @@ JMAP.contacts.handle( ContactGroup, {
         this.didFetch( ContactGroup, args,
             reqMethod === 'getContactGroups' && !reqArgs.ids );
     },
-    contactGroupUpdates: function ( args ) {
-        this.didFetchUpdates( ContactGroup, args );
+    contactGroupUpdates: function ( args, _, reqArgs ) {
+        this.didFetchUpdates( ContactGroup, args, reqArgs );
     },
     error_getContactGroupUpdates_cannotCalculateChanges: function () {
         // All our data may be wrong. Refetch everything.
@@ -4146,8 +4151,8 @@ JMAP.mail.handle( Mailbox, {
             reqMethod === 'getMailboxes' && !reqArgs.ids );
     },
 
-    mailboxUpdates: function ( args ) {
-        this.didFetchUpdates( Mailbox, args );
+    mailboxUpdates: function ( args, _, reqArgs ) {
+        this.didFetchUpdates( Mailbox, args, reqArgs );
     },
     error_getMailboxUpdates_cannotCalculateChanges: function () {
         // All our data may be wrong. Refetch everything.
@@ -4380,7 +4385,7 @@ JMAP.mail.handle( Message, {
         }
     },
     messageUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Message, args );
+        this.didFetchUpdates( Message, args, reqArgs );
         if ( !reqArgs.fetchRecords ) {
             this.recalculateAllFetchedWindows();
         }
@@ -4569,7 +4574,7 @@ JMAP.mail.handle( Thread, {
         this.didFetch( Thread, args );
     },
     threadUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Thread, args );
+        this.didFetchUpdates( Thread, args, reqArgs );
         if ( !reqArgs.fetchRecords ) {
             this.recalculateAllFetchedWindows();
         }
