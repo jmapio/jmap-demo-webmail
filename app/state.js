@@ -269,10 +269,10 @@ App.kbshortcuts
 
 var userPath = ( /k=([0-9a-f\-]+)/.exec( location.href ) || [ '', '' ] )[1];
 JMAP.auth.didAuthenticate( '', '', {
-    apiUrl: 'https://proxy.jmap.io/jmap/' + userPath,
-    eventSourceUrl: 'https://proxy.jmap.io/events/' + userPath,
-    uploadUrl: 'https://proxy.jmap.io/upload/' + userPath,
-    downloadUrl: 'https://proxy.jmap.io/raw/' + userPath + '/{blobId}/{name}'
+    apiUrl:         '/jmap/'   + userPath,
+    eventSourceUrl: '/events/' + userPath,
+    uploadUrl:      '/upload/' + userPath,
+    downloadUrl:    '/raw/'    + userPath + '/{blobId}/{name}'
 });
 
 // --- Connect to the push service ---
