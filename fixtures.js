@@ -203,7 +203,7 @@ var API = {
             }) :
             result.push({
                 id: list[i],
-                rawUrl: 'http://messages/' + list[i],
+                blobId: 'blob' + list[i],
                 cc: [],
                 bcc: [],
                 htmlBody: null,
@@ -231,7 +231,7 @@ var API = {
                             isUnread: false,
                             isAnswered: false,
                             hasAttachment: false,
-                            rawUrl: 'http://'
+                            blobId: '1234'
                         });
                     }
                     return arr;
