@@ -16,18 +16,18 @@ var NO = 0;
 var TO_THREAD = 1;
 var TO_MAILBOX = 2;
 
-var doAction = function ( ids, expand, action ) {
+var doAction = function ( storeKeys, expand, action ) {
     var mailboxMessageList = App.state.get( 'mailboxMessageList' ),
-        i, messageToThreadId, mailboxId, mailbox, actionTheMessages, sequence;
+        i, messageToThreadSK, mailboxId, mailbox, actionTheMessages, sequence;
 
     if ( !mailboxMessageList ) {
         return;
     }
-    if ( !ids || !( ids instanceof Array ) ) {
-        ids = App.state.selection.get( 'selectedIds' );
+    if ( !storeKeys || !( storeKeys instanceof Array ) ) {
+        storeKeys = App.state.selection.get( 'selectedStoreKeys' );
     }
 
-    messageToThreadId = mailboxMessageList.messageToThreadId;
+    messageToThreadSK = mailboxMessageList.messageToThreadSK;
     mailboxId = ( mailboxMessageList.get( 'filter' ).inMailboxes || [] )[0];
     mailbox = mailboxId ?
         JMAP.store.getRecord( JMAP.Mailbox, mailboxId ) : null;
@@ -37,10 +37,10 @@ var doAction = function ( ids, expand, action ) {
     };
 
     sequence = new JMAP.Sequence();
-    for ( i = 0; i < ids.length; i += 50 ) {
+    for ( i = 0; i < storeKeys.length; i += 50 ) {
         sequence
             .then( JMAP.mail.getMessages.bind( null,
-                ids.slice( i, i + 50 ), expand, mailbox, messageToThreadId
+                storeKeys.slice( i, i + 50 ), expand, mailbox, messageToThreadSK
             )).then( actionTheMessages );
     }
     sequence.afterwards = function () {
@@ -83,9 +83,8 @@ var actions = {
 
     archive: function ( messageIds ) {
         doAction( messageIds, TO_MAILBOX, function ( messages ) {
-            var systemMailboxIds = JMAP.mail.systemMailboxIds,
-                archiveId = systemMailboxIds.get( 'archive' ),
-                inboxId = systemMailboxIds.get( 'inbox' );
+            var archiveId = JMAP.mail.getMailboxIdForRole( 'archive' ),
+                inboxId = JMAP.mail.getMailboxIdForRole( 'inbox' );
             JMAP.mail
                 .setUnread( messages, false, true )
                 .move( messages, archiveId, inboxId, true );
@@ -96,14 +95,14 @@ var actions = {
     deleteToTrash: function ( messageIds ) {
         doAction( messageIds, TO_THREAD, function ( messages ) {
             JMAP.mail.move( messages,
-                JMAP.mail.systemMailboxIds.get( 'trash' ), null, true );
+                JMAP.mail.getMailboxIdForRole( 'trash' ), null, true );
         });
         return this;
     },
 
     move: function ( messageIds, destinationId ) {
         doAction( messageIds, TO_MAILBOX, function ( messages ) {
-            var spamId = JMAP.mail.systemMailboxIds.get( 'spam' );
+            var spamId = JMAP.mail.getMailboxIdForRole( 'spam' );
             if ( destinationId === spamId ) {
                 JMAP.mail.report( messages, true, true );
             }

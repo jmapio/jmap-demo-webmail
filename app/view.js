@@ -132,7 +132,7 @@ var mailboxView = new O.ScrollView({
         })
     ],
     selectNone: function () {
-        App.state.selection.selectAll( false );
+        App.state.selection.selectNone();
         App.state.selectedMessage.set( 'record', null );
     }.on( 'click' )
 });
@@ -328,7 +328,7 @@ var sidebar = new O.View({
             }, O.View.LAYOUT_FILL_PARENT, true ),
             childViews: [
                 new O.ListView({
-                    content: JMAP.mail.allMailboxes,
+                    content: App.state.allMailboxes,
                     ItemView: App.MailboxSourceView
                 })
             ]

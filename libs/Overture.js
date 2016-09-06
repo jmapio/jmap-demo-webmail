@@ -3016,7 +3016,9 @@ NS.BoundProps = {
             {O.BoundProps} Returns self.
     */
     registerBinding: function ( binding ) {
-        meta( this ).bindings[ bindingKey + NS.guid( binding ) ] = binding;
+        var metadata = meta( this );
+        metadata.bindings[ bindingKey + NS.guid( binding ) ] = binding;
+        metadata.inits.Bindings = ( metadata.inits.Bindings || 0 ) + 1;
         return this;
     },
 
@@ -3030,9 +3032,13 @@ NS.BoundProps = {
             {O.BoundProps} Returns self.
     */
     deregisterBinding: function ( binding ) {
-        var bindings = meta( this ).bindings,
-            key = Object.keyOf( bindings, binding );
-        delete bindings[ key ];
+        var metadata = meta( this );
+        var bindings = metadata.bindings;
+        var key = Object.keyOf( bindings, binding );
+        if ( key ) {
+            bindings[ key ] = null;
+            metadata.inits.Bindings -= 1;
+        }
         return this;
     },
 
@@ -3463,8 +3469,7 @@ NS.Enumerable = Enumerable;
 
 var meta = NS.meta,
     slice = Array.prototype.slice,
-    eventPrefix = '__event__',
-    toString = Object.prototype.toString;
+    eventPrefix = '__event__';
 
 Function.implement({
     /**
@@ -3651,7 +3656,7 @@ NS.EventTarget = {
             handler, handlers, length;
 
         if ( !event || !( event instanceof Event ) ) {
-            if ( event && /Event\]$/.test( toString.call( event ) ) ) {
+            if ( event && /Event\]$/.test( event.toString() ) ) {
                 event.stopPropagation = function () {
                     this.propagationStopped = true;
                     return this;
@@ -5762,24 +5767,32 @@ NS.Transform = {
 
 var ua = navigator.userAgent.toLowerCase(),
     other = [ 'other', '0' ],
-    platform = /ip(?:ad|hone|od)/.test( ua ) ? 'ios' : (
+    platform = /windows phone/.test( ua ) ? 'winphone' :
+        /ip(?:ad|hone|od)/.test( ua ) ? 'ios' : (
         /android|webos/.exec( ua ) ||
         /mac|win|linux/.exec( navigator.platform.toLowerCase() ) ||
         other
     )[0],
-    browser = ( /chrome|opera|safari|firefox|msie/.exec( ua ) || other )[0],
-    version = parseFloat(
-        ( /(?:version\/|chrome\/|firefox\/|msie\s|os )(\d+(?:[._]\d+)?)/.exec( ua )|| other )[1].replace( '_', '.' )
-    ),
-    cssPrefixes = {
-        chrome: '-webkit-',
+    browser = (
+        /firefox|edge|msie|iemobile|opr\//.exec( ua ) ||
+        /chrome|safari|opera/.exec( ua ) ||
+        other
+    )[0],
+    version = parseFloat((
+        /(?:; rv:|edge\/|version\/|firefox\/|opr\/|msie\s|os )(\d+(?:[._]\d+)?)/.exec( ua ) ||
+        /chrome\/(\d+\.\d+)/.exec( ua ) ||
+        other
+    )[1].replace( '_', '.' ) ),
+    prefix = {
         firefox: '-moz-',
         msie: '-ms-',
-        opera: '-o-',
-        safari: '-webkit-',
-        other: '-webkit-'
-    },
+        opera: '-o-'
+    }[ browser ] || '-webkit-',
     cssProps = {};
+
+if ( browser === 'opr/' ) {
+    browser = 'opera';
+}
 
 ( function () {
     var el = document.createElement( 'div' ),
@@ -5810,7 +5823,6 @@ var ua = navigator.userAgent.toLowerCase(),
                 value: 'none'
             }
         },
-        prefix = cssPrefixes[ browser ],
         prop, test, css;
 
     for ( prop in props ) {
@@ -5892,7 +5904,13 @@ NS.UA = {
         True if running on iOS.
     */
     isIOS: platform === 'ios',
+    /**
+        Property: O.UA.isWKWebView
+        Type: Boolean
 
+        True if running on WKWebView in iOS.
+    */
+    isWKWebView: platform === 'ios' && !!window.indexedDB,
     /**
         Property: O.UA.isAndroid
         Type: Boolean
@@ -5900,13 +5918,20 @@ NS.UA = {
         True if running on Android.
     */
     isAndroid: platform === 'android',
+    /**
+        Property: O.UA.isWinPhone
+        Type: Boolean
+
+        True if running on Windows Phone.
+    */
+    isWinPhone: platform === 'winphone',
 
     /**
         Property: O.UA.browser
         Type: String
 
-        The browser being run. "chrome", "firefox", "msie" or "opera" or
-        "safari".
+        The browser being run. "chrome", "firefox", "msie", "edge", "opera",
+        "safari" or "iemobile".
     */
     browser: browser,
     /**
@@ -5927,6 +5952,13 @@ NS.UA = {
     */
     chrome: browser === 'chrome' ? version : 0,
     /**
+        Property: O.UA.safari
+        Type: Number
+
+        If running Safari, this will be the version number running. Otherwise 0.
+    */
+    safari: browser === 'safari' ? version : 0,
+    /**
         Property: O.UA.firefox
         Type: Number
 
@@ -5934,6 +5966,14 @@ NS.UA = {
         0.
     */
     firefox: browser === 'firefox' ? version : 0,
+    /**
+        Property: O.UA.edge
+        Type: Number
+
+        If running Edge, this will be the version number running. Otherwise
+        0.
+    */
+    edge: browser === 'edge' ? version : 0,
     /**
         Property: O.UA.msie
         Type: Number
@@ -5943,19 +5983,20 @@ NS.UA = {
     */
     msie: browser === 'msie' ? version : 0,
     /**
+        Property: O.UA.iemobile
+        Type: Number
+
+        If running Mobile Internet Explorer, this will be the version number
+        running. Otherwise 0.
+    */
+    iemobile: browser === 'iemobile' ? version : 0,
+    /**
         Property: O.UA.opera
         Type: Number
 
         If running Opera, this will be the version number running. Otherwise 0.
     */
     opera: browser === 'opera' ? version : 0,
-    /**
-        Property: O.UA.safari
-        Type: Number
-
-        If running Safari, this will be the version number running. Otherwise 0.
-    */
-    safari: browser === 'safari' ? version : 0,
     /**
         Property: O.UA.operaMobile
         Type: Number
@@ -5992,7 +6033,7 @@ NS.UA = {
 
         The CSS prefix to use for this browser.
     */
-    cssPrefix: cssPrefixes[ browser ],
+    cssPrefix: prefix,
 
     /**
         Property: O.UA.canTouch
@@ -6000,7 +6041,17 @@ NS.UA = {
 
         Does the browser support touch events?
     */
-    canTouch: 'ontouchstart' in document.documentElement
+    canTouch: 'ontouchstart' in document.documentElement,
+
+    /**
+        Property: O.UA.canU2F
+        Type: Boolean
+
+        Does the browser support U2F?
+    */
+    // TODO: Find a way of detecting this rather than hardcoding
+    // For now, referencing http://caniuse.com/#feat=u2f
+    canU2F: browser === 'chrome' && version >= 41
 };
 
 }( O ) );
@@ -6016,65 +6067,7 @@ NS.UA = {
 
 ( function ( NS ) {
 
-/**
-    Function (private): O.Easing-cubicBezier
-
-    Returns a function that, for the given cubic bezier control points, returns
-    the y position given an x position. p0 is presumed to be (0,0) and p3 is
-    presumed to be (1,1).
-
-    Parameters:
-        p1x - {Number} The x-coordinate for point 1.
-        p1y - {Number} The y-coordinate for point 1.
-        p2x - {Number} The x-coordinate for point 2.
-        p2y - {Number} The y-coordinate for point 2.
-
-    Returns:
-        {Function} A function representing the cubic bezier with the points
-        given.
-*/
-var cubicBezier = function ( p1x, p1y, p2x, p2y ) {
-    // Calculate constants in parametric bezier formular
-    // http://www.moshplant.com/direct-or/bezier/math.html
-    var cX = 3 * p1x,
-        bX = 3 * ( p2x - p1x ) - cX,
-        aX = 1 - cX - bX,
-
-        cY = 3 * p1y,
-        bY = 3 * ( p2y - p1y ) - cY,
-        aY = 1 - cY - bY;
-
-    // Functions for calculating x, x', y for t
-    var bezierX = function ( t ) {
-        return t * ( cX + t * ( bX + t * aX ) );
-    };
-    var bezierXDerivative = function ( t ) {
-        return cX + t * ( 2 * bX + 3 * aX * t );
-    };
-
-    // Use Newton-Raphson method to find t for a given x.
-    // Since x = a*t^3 + b*t^2 + c*t, we find the root for
-    // a*t^3 + b*t^2 + c*t - x = 0, and thus t.
-    var newtonRaphson = function ( x ) {
-        var prev,
-            // Initial estimation is linear
-            t = x;
-        do {
-            prev = t;
-            t = t - ( ( bezierX( t ) - x ) / bezierXDerivative( t ) );
-        } while ( Math.abs( t - prev ) > 1e-4 );
-
-        return t;
-    };
-
-    return function ( x ) {
-        var t = newtonRaphson( x );
-        // This is y given t on the bezier curve.
-        return t * ( cY + t * ( bY + t * aY ) );
-    }.extend({
-        cssName: 'cubic-bezier(' + p1x + ',' + p1y + ',' + p2x + ',' + p2y + ')'
-    });
-};
+var cubicBezier;
 
 /**
     Object: O.Easing
@@ -6082,6 +6075,68 @@ var cubicBezier = function ( p1x, p1y, p2x, p2y ) {
     Holds functions emulating the standard CSS easing functions.
 */
 NS.Easing = {
+    /**
+        Function: O.Easing.cubicBezier
+
+        Returns an easing function that, for the given cubic bezier control
+        points, returns the y position given an x position. p0 is presumed to
+        be (0,0) and p3 is presumed to be (1,1).
+
+        Parameters:
+            p1x - {Number} The x-coordinate for point 1.
+            p1y - {Number} The y-coordinate for point 1.
+            p2x - {Number} The x-coordinate for point 2.
+            p2y - {Number} The y-coordinate for point 2.
+
+        Returns:
+            {Function} A function representing the cubic bezier with the points
+            given.
+    */
+
+    cubicBezier: cubicBezier = function ( p1x, p1y, p2x, p2y ) {
+        // Calculate constants in parametric bezier formular
+        // http://www.moshplant.com/direct-or/bezier/math.html
+        var cX = 3 * p1x,
+            bX = 3 * ( p2x - p1x ) - cX,
+            aX = 1 - cX - bX,
+
+            cY = 3 * p1y,
+            bY = 3 * ( p2y - p1y ) - cY,
+            aY = 1 - cY - bY;
+
+        // Functions for calculating x, x', y for t
+        var bezierX = function ( t ) {
+            return t * ( cX + t * ( bX + t * aX ) );
+        };
+        var bezierXDerivative = function ( t ) {
+            return cX + t * ( 2 * bX + 3 * aX * t );
+        };
+
+        // Use Newton-Raphson method to find t for a given x.
+        // Since x = a*t^3 + b*t^2 + c*t, we find the root for
+        // a*t^3 + b*t^2 + c*t - x = 0, and thus t.
+        var newtonRaphson = function ( x ) {
+            var prev,
+                // Initial estimation is linear
+                t = x;
+            do {
+                prev = t;
+                t = t - ( ( bezierX( t ) - x ) / bezierXDerivative( t ) );
+            } while ( Math.abs( t - prev ) > 1e-4 );
+
+            return t;
+        };
+
+        return function ( x ) {
+            var t = newtonRaphson( x );
+            // This is y given t on the bezier curve.
+            return t * ( cY + t * ( bY + t * aY ) );
+        }.extend({
+            cssName: 'cubic-bezier(' + p1x + ',' + p1y + ',' +
+                p2x + ',' + p2y + ')'
+        });
+    },
+
     /**
         Function: O.Easing#linear
 
@@ -6210,10 +6265,11 @@ var nextFrame = function () {
                         // Normalised position along timeline [0..1].
                         animation.ease( animTime / duration ),
                         // Normalised time animation has been running.
-                        animTime
+                        animTime,
+                        false
                     );
                 } else {
-                    animation.drawFrame( 1, duration );
+                    animation.drawFrame( 1, duration, true );
                     animation.stop();
                 }
             }
@@ -6402,11 +6458,11 @@ NS.Animation = NS.Class({
                        function (the easing function may cause the number to go
                        beyond 0 and 1).
     */
-    drawFrame: function ( position/*, time*/ ) {
+    drawFrame: function ( position, time, isLastFrame ) {
         // And interpolate to find new value.
-        var value = position < 1 ?
-            this.startValue + ( position * this.deltaValue ) :
-            this.endValue;
+        var value = isLastFrame ?
+            this.endValue :
+            this.startValue + ( position * this.deltaValue );
 
         this.object.set( this.property, value );
     },
@@ -6873,10 +6929,37 @@ NS.CSSStyleAnimation = CSSStyleAnimation;
 
 ( function ( NS ) {
 
-var transformSplitter = /(\-?\d*\.\d+|\-?\d+)/;
-var numbersToNumber = function ( item, index ) {
-    return index & 1 ? parseFloat( item ) : item;
+var splitTransform = function ( transform ) {
+    var result = [];
+    var i = 0;
+    var l = transform.length;
+    var next = 0;
+
+    while ( true ) {
+        // Gather text part
+        while ( next < l && /^[^,(]$/.test( transform.charAt( next ) ) ) {
+            next += 1;
+        }
+        if ( next < l ) {
+            next += 1;
+            result.push( transform.slice( i, next ) );
+            i = next;
+        } else {
+            result.push( transform.slice( i ) );
+            return result;
+        }
+
+        // Gather number
+        while ( /^[\s\d\-\.]$/.test( transform.charAt( next ) ) ) {
+            next += 1;
+        }
+        result.push( parseFloat( transform.slice( i, next ) ) );
+        i = next;
+    }
 };
+
+var numbersRe = /[\.\-\d]/g;
+
 var styleAnimators = {
     display: {
         calcDelta: function ( startValue, endValue ) {
@@ -6888,12 +6971,8 @@ var styleAnimators = {
     },
     transform: {
         calcDelta: function ( startValue, endValue ) {
-            var start = startValue
-                    .split( transformSplitter )
-                    .map( numbersToNumber ),
-                end = endValue
-                    .split( transformSplitter )
-                    .map( numbersToNumber );
+            var start = splitTransform( startValue ),
+                end = splitTransform( endValue );
             if ( start.length !== end.length ) {
                 start = [ startValue ];
                 end = [ endValue ];
@@ -6999,9 +7078,9 @@ var StyleAnimation = NS.Class({
                     } else {
                         units[ property ] =
                             ( typeof start === 'string' &&
-                                start.replace( /[\.\-\d]/g, '' ) ) ||
+                                start.replace( numbersRe, '' ) ) ||
                             ( typeof end === 'string' &&
-                                end.replace( /[\.\-\d]/g, '' ) ) ||
+                                end.replace( numbersRe, '' ) ) ||
                             // If no unit specified, using 0 will ensure
                             // the value passed to setStyle is a number, so
                             // it will add 'px' if appropriate.
@@ -7086,7 +7165,7 @@ NS.StyleAnimation = StyleAnimation;
 */
 var DOMEvent = {
     /**
-        Property: O.DomEvent.keys
+        Property: O.DOMEvent.keys
         Type: Object
 
         Maps the names of special keys to their key code.
@@ -7114,7 +7193,7 @@ var DOMEvent = {
     },
 
     /**
-        Function: O.DomEvent.lookupKey
+        Function: O.DOMEvent.lookupKey
 
         Determines which key was pressed to generate the event supplied as an
         argument.
@@ -7161,6 +7240,22 @@ var DOMEvent = {
         }
 
         return modifiers + key;
+    },
+
+    /**
+        Function: O.DOMEvent.isClickModified
+
+        Determines if a secondary mouse button was pressed, or a modifier key was held down while the mouse was clicked.
+
+        Parameters:
+            event - {MouseEvent} The W3C DOM click event object.
+
+        Returns:
+            {Boolean} Was a secondary button clicked or modifier held down?
+    */
+    isClickModified: function ( event ) {
+        return !!event.button ||
+            event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
     }
 };
 
@@ -7694,14 +7789,21 @@ NS.Element = {
 
         Returns:
             {Object} The offset in pixels of the element relative to the
-            given ancestor or the whole page. Has two properties:
-            `{ top: Number, left: Number }`.
+            given ancestor or the whole page, plus the height and width.
+            Has four properties:
+
+            - top: `Number`
+            - left: `Number`
+            - width: `Number`
+            - height: `Number`
     */
     getPosition: getPosition = function ( el, ancestor ) {
         var rect = el.getBoundingClientRect(),
             position = {
                 top: rect.top,
-                left: rect.left
+                left: rect.left,
+                width: rect.right - rect.left, // IE8 doesn't return width
+                height: rect.bottom - rect.top // IE8 doesn't return height
             };
         if ( ancestor ) {
             rect = getPosition( ancestor );
@@ -8411,11 +8513,16 @@ var ThemeManager = NS.Class({
 
         if ( data ) {
             // Substitute in images.
-            data = data.replace( /url\(([^)]+)\)/g, function ( url, img ) {
-                return 'url(' +
-                    ( images[ img ] || themeIndependentImages[ img ] ||
-                        NS.loc( img ) || img ) +
-                ')';
+            data = data.replace( /url\(([^)]+)\)/g, function ( url, src ) {
+                var imageData =
+                        images[ src ] ||
+                        themeIndependentImages[ src ] ||
+                        NS.loc( src );
+                if ( /\.svg$/.test( src ) ) {
+                    imageData = 'data:image/svg+xml;charset=UTF-8,' +
+                        encodeURI( imageData );
+                }
+                return 'url(' + ( imageData || src ) + ')';
             });
             NS.Stylesheet.create( theme + '-' + id, data );
             active[ id ] = ( active[ id ] || 0 ) + 1;
@@ -8480,7 +8587,7 @@ NS.ThemeManager = ThemeManager;
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global window, document, localStorage */
+/*global JSON, window, document, localStorage */
 
 ( function ( NS, window, document, localStorage ) {
 
@@ -8723,6 +8830,31 @@ var WindowController = NS.Class({
             );
         } catch ( error ) {}
     }
+}).extend({
+    openExternal: function ( href ) {
+        var newWindow = window.open( '', '_blank' );
+        var htmlHref = href;
+        if ( newWindow ) {
+            // From goog.window.open; IE has trouble if there's a
+            // semi-colon in the URL apparently.
+            if ( NS.UA.msie && href.indexOf( ';' ) > -1 ) {
+                htmlHref = "'" + htmlHref.replace( /'/g, '%27' ) + "'";
+            }
+            htmlHref = htmlHref.escapeHTML().replace( /"/g, '&quot;' );
+            try {
+                newWindow.opener = null;
+                newWindow.document.write(
+                    '<META HTTP-EQUIV="refresh" content="0; url=' +
+                        htmlHref +
+                    '">'
+                );
+                newWindow.document.close();
+            } catch ( error ) {
+                newWindow.location.href = href;
+            }
+        }
+        return newWindow;
+    }
 });
 
 NS.WindowController = WindowController;
@@ -8949,30 +9081,23 @@ var LiveQuery = NS.Class({
     */
 
     /**
-        Method: O.LiveQuery#indexOfId
+        Method: O.LiveQuery#indexOfStoreKey
 
         Finds the index of an id in the query. If the id is not found, the index
         returned will be -1.
 
         Parameters:
-            id       - {String} The record id to find.
+            storeKey - {String} The record store key to find.
             from     - {Number} The first index to start the search from.
                        Specify 0 to search the whole list.
-            callback - {Function} (optional) A callback to make with the id. For
-                       compatibility with <O.RemoteQuery>.
+            callback - {Function} (optional) A callback to make with the store
+                       key. For compatibility with <O.RemoteQuery>.
 
         Returns:
-            {Number} The index of the id, or -1 if not found.
+            {Number} The index of the store key, or -1 if not found.
     */
-    indexOfId: function ( id, from, callback ) {
-        var record = this.get( 'store' ).getRecord( this.get( 'Type' ), id ),
-            index = -1,
-            storeKey;
-
-        if ( record.is( READY ) ) {
-            storeKey = record.get( 'storeKey' );
-            index = this._storeKeys.indexOf( storeKey, from );
-        }
+    indexOfStoreKey: function ( storeKey, from, callback ) {
+        var index = this._storeKeys.indexOf( storeKey, from );
         if ( callback ) {
             callback( index );
         }
@@ -9063,10 +9188,6 @@ var LiveQuery = NS.Class({
             removed = [], removedIndexes = [],
             oldLength = this.get( 'length' ),
             store = this.get( 'store' ),
-            storeKeyToId = function ( storeKey ) {
-                return store.getIdFromStoreKey( storeKey ) ||
-                    ( '#' + storeKey );
-            },
             i, l, storeKey, index, shouldBeInQuery,
             newStoreKeys, oi, ri, ai, a, b,
             addedLength, removedLength, newLength, maxLength;
@@ -9193,9 +9314,9 @@ var LiveQuery = NS.Class({
                 )
                 .endPropertyChanges()
                 .fire( 'query:updated', {
-                    removed: removed.map( storeKeyToId ),
+                    removed: removed,
                     removedIndexes: removedIndexes,
-                    added: added.map( storeKeyToId ),
+                    added: added,
                     addedIndexes: addedIndexes
                 });
             return true;
@@ -9204,54 +9325,51 @@ var LiveQuery = NS.Class({
     },
 
     /**
-        Method: O.LiveQuery#getIdsForObjectsInRange
+        Method: O.LiveQuery#getStoreKeysForObjectsInRange
 
-        Get a callback with an array of the id properties for all objects in the
-        range given.
+        Get a callback with an array of the store keys for all objects in the
+        given range.
 
         Parameters:
-            start    - {Number} The index of the first object to get an id for.
-            end      - {Number} One past the index of the last object to get an
-                       id for.
-            callback - {Function} This will be called with the array of ids as
-                       the first argument, the index of the first returned
-                       result as the second argument, and one past the index
-                       of the last result as the third argument.
+            start    - {Number} The index of the first object to get the store
+                       key for.
+            end      - {Number} One past the index of the last object to get the
+                       store key for.
+            callback - {Function} This will be called with the array of store
+                       keys as the first argument, the index of the first
+                       returned result as the second argument, and one past the
+                       index of the last result as the third argument.
 
         Returns:
             {Boolean} Always false. Represents whether the data is still loading
             (i.e. whether the callback has yet to be fired).
     */
-    getIdsForObjectsInRange: function ( start, end, callback ) {
+    getStoreKeysForObjectsInRange: function ( start, end, callback ) {
         start = Math.max( 0, start );
         end = Math.min( this.get( 'length' ), end );
-        var store = this.get( 'store' );
-        callback( this._storeKeys.slice( start, end )
-                                 .map( function ( storeKey ) {
-            return store.getIdFromStoreKey( storeKey ) || ( '#' + storeKey );
-        }), start, end );
+        callback( this._storeKeys.slice( start, end ), start, end );
         return false;
     },
 
     /**
-        Method: O.LiveQuery#getIdsForAllObjects
+        Method: O.LiveQuery#getStoreKeysForAllObjects
 
-        Get a callback with an array of the id properties for all objects in the
+        Get a callback with an array of the store keys for all objects in the
         array.
 
         Parameters:
-            callback - {Function} This will be called with the array of ids as
-                       the first argument, the index of the first returned
-                       result as the second argument, and one past the index
-                       of the last result as the third argument.
+            callback - {Function} This will be called with the array of store
+                       keys as the first argument, the index of the first
+                       returned result as the second argument, and one past the
+                       index of the last result as the third argument.
 
         Returns:
             {Boolean} Always false. Represents whether the data is still loading
             (i.e. whether the callback has yet to be fired).
     */
-    getIdsForAllObjects: function ( callback ) {
+    getStoreKeysForAllObjects: function ( callback ) {
         // 0x7fffffff is the largest positive signed 32-bit number.
-        return this.getIdsForObjectsInRange( 0, 0x7fffffff, callback );
+        return this.getStoreKeysForObjectsInRange( 0, 0x7fffffff, callback );
     }
 });
 
@@ -9338,7 +9456,7 @@ NS.RecordArray = RecordArray;
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-( function ( NS ) {
+( function ( NS, undefined ) {
 
 /**
     Class: O.Record-AttributeErrors
@@ -9505,6 +9623,41 @@ var Record = NS.Class({
     },
 
     /**
+        Method: O.Record#clone
+
+        Creates a new instance of the record with the same attributes. Does
+        not call <O.Record#saveToStore>.
+
+        Parameters:
+            store - {O.Store} The store to create the record in.
+
+        Returns:
+            {O.Record} The new record.
+    */
+    clone: function ( store ) {
+        var Type = this.constructor;
+        var prototype = Type.prototype;
+        var clone = new Type( store );
+        var attrs = NS.meta( this ).attrs;
+        var attrKey, propKey, value;
+        for ( attrKey in attrs ) {
+            propKey = attrs[ attrKey ];
+            if ( prototype[ propKey ].noSync ) {
+                continue;
+            }
+            value = this.get( propKey );
+            if ( value instanceof Record ) {
+                value = value.getDoppelganger( store );
+            }
+            if ( value !== undefined ) {
+                clone.set( propKey, value );
+            }
+        }
+
+        return clone;
+    },
+
+    /**
         Property: O.Record#store
         Type: O.Store
 
@@ -9646,7 +9799,7 @@ var Record = NS.Class({
                 attribute = this[ propKey ];
                 if ( !( attrKey in data ) && !attribute.noSync ) {
                     defaultValue = attribute.defaultValue;
-                    if ( defaultValue !== undefined ) {
+                    if ( defaultValue !== undefined && !attribute.noSync ) {
                         data[ attrKey ] = defaultValue && defaultValue.toJSON ?
                             defaultValue.toJSON() : NS.clone( defaultValue );
                     }
@@ -9829,6 +9982,27 @@ var Record = NS.Class({
     errorForAttribute: function () {
         return new AttributeErrors( this );
     }.property()
+}).extend({
+    getClientSettableAttributes: function ( Type ) {
+        var clientSettableAttributes = Type.clientSettableAttributes;
+        var prototype, attrs, attrKey, propKey, attribute;
+        if ( !clientSettableAttributes ) {
+            prototype = Type.prototype;
+            attrs = NS.meta( prototype ).attrs;
+            clientSettableAttributes = {};
+            for ( attrKey in attrs ) {
+                propKey = attrs[ attrKey ];
+                if ( propKey ) {
+                    attribute = prototype[ propKey ];
+                    if ( !attribute.noSync ) {
+                        clientSettableAttributes[ attrKey ] = true;
+                    }
+                }
+            }
+            Type.clientSettableAttributes = clientSettableAttributes;
+        }
+        return clientSettableAttributes;
+    }
 });
 
 /**
@@ -10123,6 +10297,8 @@ var RemoteQuery = NS.Class({
     */
     getObjectAt: function ( index, doNotFetch ) {
         var length = this.get( 'length' );
+        var storeKey;
+
         if ( length === null || index < 0 || index >= length ) {
             return undefined;
         }
@@ -10131,10 +10307,10 @@ var RemoteQuery = NS.Class({
             doNotFetch = this.fetchDataForObjectAt( index );
         }
 
-        var id = this._list[ index ];
-        return id ?
+        storeKey = this._list[ index ];
+        return storeKey ?
             this.get( 'store' )
-                .getRecord( this.get( 'Type' ), id, doNotFetch ) :
+                .getRecord( this.get( 'Type' ), '#' + storeKey, doNotFetch ) :
             null;
     },
 
@@ -10167,29 +10343,29 @@ var RemoteQuery = NS.Class({
     */
 
     /**
-        Method: O.RemoteQuery#indexOfId
+        Method: O.RemoteQuery#indexOfStoreKey
 
-        Finds the index of an id in the query. Since the entire list may not be
-        loaded, this data may have to be loaded from the server so you should
-        rely on the callback if you need an accurate result. If the id is not
-        found, the index returned will be -1.
+        Finds the index of a store key in the query. Since the entire list may
+        not be loaded, this data may have to be loaded from the server so you
+        should rely on the callback if you need an accurate result. If the id
+        is not found, the index returned will be -1.
 
         Parameters:
-            id       - {String} The record id to find.
+            storeKey - {String} The record store key to find.
             from     - {Number} The first index to start the search from.
                        Specify 0 to search the whole list.
-            callback - {Function} (optional) A callback to make with the id
-                       when found.
+            callback - {Function} (optional) A callback to make with the store
+                       key when found.
 
         Returns:
-            {Number} The index of the id, or -1 if not found.
+            {Number} The index of the store key, or -1 if not found.
     */
-    indexOfId: function ( id, from, callback ) {
-        var index = this._list.indexOf( id, from );
+    indexOfStoreKey: function ( storeKey, from, callback ) {
+        var index = this._list.indexOf( storeKey, from );
         if ( callback ) {
             if ( this.get( 'length' ) === null ) {
                 this.get( 'source' ).fetchQuery( this, function () {
-                    callback( this._list.indexOf( id, from ) );
+                    callback( this._list.indexOf( storeKey, from ) );
                 }.bind( this ) );
             } else {
                 callback( index );
@@ -10199,7 +10375,7 @@ var RemoteQuery = NS.Class({
     },
 
     /**
-        Method: O.RemoteQuery#getIdsForObjectsInRange
+        Method: O.RemoteQuery#getStoreKeysForObjectsInRange
 
         Makes a callback with a subset of the ids for records in this query.
 
@@ -10226,7 +10402,7 @@ var RemoteQuery = NS.Class({
             callback was not fired synchronously, but rather will be called
             asynchronously at a later point.)
     */
-    getIdsForObjectsInRange: function ( start, end, callback ) {
+    getStoreKeysForObjectsInRange: function ( start, end, callback ) {
         var length = this.get( 'length' );
 
         if ( length === null ) {
@@ -10243,39 +10419,40 @@ var RemoteQuery = NS.Class({
     },
 
     /**
-        Method: O.RemoteQuery#getIdsForAllObjects
+        Method: O.RemoteQuery#getStoreKeysForAllObjects
 
-        Get a callback with an array of the id properties for all records in the
+        Get a callback with an array of the store keys for all records in the
         query.
 
         Parameters:
-            callback - {Function} This will be called with the array of ids as
-                       the first argument, the index of the first returned
-                       result as the second argument, and one past the index
-                       of the last result as the third argument.
+            callback - {Function} This will be called with the array of store
+                       keys as the first argument, the index of the first
+                       returned result as the second argument, and one past the
+                       index of the last result as the third argument.
 
         Returns:
             {Boolean} Is the data still loading? (i.e. this is true if the
             callback was not fired synchronously, but rather will be called
             asynchronously at a later point.)
     */
-    getIdsForAllObjects: function ( callback ) {
+    getStoreKeysForAllObjects: function ( callback ) {
         // 0x7fffffff is the largest positive signed 32-bit number.
-        return this.getIdsForObjectsInRange( 0, 0x7fffffff, callback );
+        return this.getStoreKeysForObjectsInRange( 0, 0x7fffffff, callback );
     },
 
     /**
         Method (private): O.RemoteQuery#_adjustIdFetches
 
         Modifies the id range to be returned in the callback to
-        <O.RemoteQuery#getIdsForObjectsInRange> in response to an update from
-        the server.
+        <O.RemoteQuery#getStoreKeysForObjectsInRange> in response to an update
+        from the server.
 
         We adjust the range being fetched mainly so that new records that are
         inserted at the top of the list during a selection are not selected.
-        Otherwise you may hit select all then as soon as it's selected hit
-        delete, but in the meantime a new record arrives at the top of the list;
-        if this were included in the selection it may be accidentally deleted.
+        Otherwise you may hit select all then hit delete as soon as it's
+        selected, but in the meantime a new record arrives at the top of the
+        list; if this were included in the selection it may be accidentally
+        deleted.
 
         Parameters:
             removed - {Number[]} The list of indexes which were removed.
@@ -10283,10 +10460,10 @@ var RemoteQuery = NS.Class({
                        were addded.
     */
     _adjustIdFetches: function ( event ) {
-        var added = event.addedIndexes,
-            removed = event.removedIndexes,
-            awaitingIdFetch = this._awaitingIdFetch,
-            i, l, call, start, end, j, ll, index;
+        var added = event.addedIndexes;
+        var removed = event.removedIndexes;
+        var awaitingIdFetch = this._awaitingIdFetch;
+        var i, l, call, start, end, j, ll, index;
         for ( i = 0, l = awaitingIdFetch.length; i < l; i += 1 ) {
             call = awaitingIdFetch[i];
             start = call[0];
@@ -10321,10 +10498,10 @@ var RemoteQuery = NS.Class({
     _idsWereFetched: function () {
         var awaitingIdFetch = this._awaitingIdFetch;
         if ( awaitingIdFetch.length ) {
+            this._awaitingIdFetch = [];
             awaitingIdFetch.forEach( function ( call ) {
-                this.getIdsForObjectsInRange( call[0], call[1], call[2] );
+                this.getStoreKeysForObjectsInRange( call[0], call[1], call[2] );
             }, this );
-            awaitingIdFetch.length = 0;
         }
     }.queue( 'before' ).on( 'query:idsLoaded' ),
 
@@ -10383,19 +10560,21 @@ var RemoteQuery = NS.Class({
 
         // Could use a proper diffing algorithm to calculate added/removed
         // arrays, but probably not worth it.
-        var oldList = this._list,
-            list = this._list = args.idList,
-            oldTotal = this.get( 'length' ),
-            total = list.length,
-            removedIndexes = [],
-            removedIds = [],
-            addedIndexes = [],
-            addedIds = [],
-            firstChange = 0,
-            lastChangeNew = total - 1,
-            lastChangeOld = ( oldTotal || 0 ) - 1,
-            l = Math.min( total, oldTotal || 0 ),
-            i;
+        var store = this.get( 'store' );
+        var toStoreKey = store.getStoreKey.bind( store, this.get( 'Type' ) );
+        var oldList = this._list;
+        var list = this._list = args.idList.map( toStoreKey );
+        var oldTotal = this.get( 'length' );
+        var total = list.length;
+        var removedIndexes = [];
+        var removedStoreKeys = [];
+        var addedIndexes = [];
+        var addedStoreKeys = [];
+        var firstChange = 0;
+        var lastChangeNew = total - 1;
+        var lastChangeOld = ( oldTotal || 0 ) - 1;
+        var l = Math.min( total, oldTotal || 0 );
+        var i;
 
         // Initial fetch, oldTotal === null
         if ( oldTotal !== null ) {
@@ -10412,12 +10591,12 @@ var RemoteQuery = NS.Class({
 
             for ( i = firstChange; i <= lastChangeOld; i += 1 ) {
                 removedIndexes.push( i );
-                removedIds.push( oldList[i] );
+                removedStoreKeys.push( oldList[i] );
             }
 
             for ( i = firstChange; i <= lastChangeNew; i += 1 ) {
                 addedIndexes.push( i );
-                addedIds.push( list[i] );
+                addedStoreKeys.push( list[i] );
             }
         }
 
@@ -10434,9 +10613,9 @@ var RemoteQuery = NS.Class({
 
         if ( oldTotal !== null && firstChange < lastChangeNew ) {
             this.fire( 'query:updated', {
-                removed: removedIds,
+                removed: removedStoreKeys,
                 removedIndexes: removedIndexes,
-                added: addedIds,
+                added: addedStoreKeys,
                 addedIndexes: addedIndexes
             });
         }
@@ -10459,18 +10638,18 @@ NS.RemoteQuery = RemoteQuery;
 
 ( function ( NS, undefined ) {
 
-var Status = NS.Status,
-    EMPTY = Status.EMPTY,
-    READY = Status.READY,
-    // DIRTY => A preemptive update has been applied since the last fetch of
-    // updates from the server was *initiated*. Therefore, any update we receive
-    // may not cover all of the preemptives.
-    DIRTY = Status.DIRTY,
-    // LOADING => An *update* is being fetched from the server
-    LOADING = Status.LOADING,
-    // OBSOLETE => The data on the server may have changed since the last update
-    // was requested.
-    OBSOLETE = Status.OBSOLETE;
+var Status = NS.Status;
+var EMPTY = Status.EMPTY;
+var READY = Status.READY;
+// DIRTY => A preemptive update has been applied since the last fetch of
+// updates from the server was *initiated*. Therefore, any update we receive
+// may not cover all of the preemptives.
+var DIRTY = Status.DIRTY;
+// LOADING => An *update* is being fetched from the server
+var LOADING = Status.LOADING;
+// OBSOLETE => The data on the server may have changed since the last update
+// was requested.
+var OBSOLETE = Status.OBSOLETE;
 
 /**
     Enum: O.WindowedRemoteQuery-WindowState
@@ -10487,13 +10666,13 @@ var Status = NS.Status,
     WINDOW_RECORDS_LOADING   - The records in the window are loading.
     WINDOW_RECORDS_READY     - The records in the window are ready.
 */
-var WINDOW_EMPTY = 0,
-    WINDOW_REQUESTED = 1,
-    WINDOW_LOADING = 2,
-    WINDOW_READY = 4,
-    WINDOW_RECORDS_REQUESTED = 8,
-    WINDOW_RECORDS_LOADING = 16,
-    WINDOW_RECORDS_READY = 32;
+var WINDOW_EMPTY = 0;
+var WINDOW_REQUESTED = 1;
+var WINDOW_LOADING = 2;
+var WINDOW_READY = 4;
+var WINDOW_RECORDS_REQUESTED = 8;
+var WINDOW_RECORDS_LOADING = 16;
+var WINDOW_RECORDS_READY = 32;
 
 /**
     Method: O.WindowedRemoteQuery-sortLinkedArrays
@@ -10522,21 +10701,21 @@ var sortLinkedArrays = function ( a1, a2 ) {
     });
 };
 
-var mapIndexes = function ( list, ids ) {
+var mapIndexes = function ( list, storeKeys ) {
     var indexOf = {},
         indexes = [],
         listLength = list.length,
-        idsLength = ids.length,
+        storeKeysLength = storeKeys.length,
         id, index, i;
     // Since building the map will be O(n log n), only bother if we're trying to
-    // find the index for more than log(n) ids.
+    // find the index for more than log(n) store keys.
     // The +1 ensures it is always at least 1, so that in the degenerative case
-    // where idsLength == 0, we never bother building the map
+    // where storeKeysLength == 0, we never bother building the map
     // When listLength == 0, Math.log( 0 ) == -Infinity, which is converted to 0
     // by ~~ integer conversion.
-    if ( idsLength < ~~Math.log( listLength ) + 1 ) {
-        for ( i = 0; i < idsLength; i += 1 ) {
-            indexes.push( list.indexOf( ids[i] ) );
+    if ( storeKeysLength < ~~Math.log( listLength ) + 1 ) {
+        for ( i = 0; i < storeKeysLength; i += 1 ) {
+            indexes.push( list.indexOf( storeKeys[i] ) );
         }
     } else {
         for ( i = 0; i < listLength; i += 1 ) {
@@ -10545,8 +10724,8 @@ var mapIndexes = function ( list, ids ) {
                 indexOf[ id ] = i;
             }
         }
-        for ( i = 0; i < idsLength; i += 1 ) {
-            index = indexOf[ ids[i] ];
+        for ( i = 0; i < storeKeysLength; i += 1 ) {
+            index = indexOf[ storeKeys[i] ];
             indexes.push( index === undefined ? -1 : index );
         }
     }
@@ -10588,10 +10767,9 @@ var mergeSortedLinkedArrays = function ( a1, a2, b1, b2 ) {
     return [ rA, rB ];
 };
 
-var adjustIndexes =
-        function ( removed, added, removedBefore, ids, removedBeforeIds ) {
+var adjustIndexes = function ( removed, added, removedBefore, storeKeys, removedBeforeStoreKeys ) {
     var resultIndexes = [],
-        resultIds = [],
+        resultStoreKeys = [],
         i, l, index, position, j, ll;
     for ( i = 0, l = removed.length; i < l; i += 1 ) {
         // Take the item removed in the second update
@@ -10601,8 +10779,8 @@ var adjustIndexes =
         position = added.binarySearch( index );
         // If there was an item added in the first update at the exact same
         // position, we don't need to do anything as they cancel each other out.
-        // Since update 2 is from the state left by update 1, the ids MUST be
-        // the same.
+        // Since update 2 is from the state left by update 1, the storeKeys
+        // MUST be the same.
         if ( index === added[ position ] ) {
             continue;
         }
@@ -10618,25 +10796,25 @@ var adjustIndexes =
         }
         // Now we have the correct index.
         resultIndexes.push( index );
-        resultIds.push( ids[i] );
+        resultStoreKeys.push( storeKeys[i] );
     }
     return mergeSortedLinkedArrays(
-        removedBefore, resultIndexes, removedBeforeIds, resultIds );
+        removedBefore, resultIndexes, removedBeforeStoreKeys, resultStoreKeys );
 };
 
 var composeUpdates = function ( u1, u2 ) {
     var removed = adjustIndexes(
             u2.removedIndexes, u1.addedIndexes,  u1.removedIndexes,
-            u2.removedIds, u1.removedIds ),
+            u2.removedStoreKeys, u1.removedStoreKeys ),
         added = adjustIndexes(
             u1.addedIndexes, u2.removedIndexes, u2.addedIndexes,
-            u1.addedIds, u2.addedIds );
+            u1.addedStoreKeys, u2.addedStoreKeys );
 
     return {
         removedIndexes: removed[0],
-        removedIds: removed[1],
+        removedStoreKeys: removed[1],
         addedIndexes: added[0],
-        addedIds: added[1],
+        addedStoreKeys: added[1],
         truncateAtFirstGap:
             u1.truncateAtFirstGap || u2.truncateAtFirstGap,
         total: u2.total,
@@ -10649,11 +10827,11 @@ var invertUpdate = function ( u ) {
     u.removedIndexes = u.addedIndexes;
     u.addedIndexes = array;
 
-    array = u.removedIds;
-    u.removedIds = u.addedIds;
-    u.addedIds = array;
+    array = u.removedStoreKeys;
+    u.removedStoreKeys = u.addedStoreKeys;
+    u.addedStoreKeys = array;
 
-    u.total = u.total + u.addedIds.length - u.removedIds.length;
+    u.total = u.total + u.addedStoreKeys.length - u.removedStoreKeys.length;
 
     return u;
 };
@@ -10769,8 +10947,8 @@ var WindowedRemoteQuery = NS.Class({
         Type: Boolean
 
         This is set to true when an explicit request is made to fetch ids (e.g.
-        through <O.RemoteQuery#getIdsForObjectsInRange>). This prevents the
-        query from optimising away the request when it corresponds to a
+        through <O.RemoteQuery#getStoreKeysForObjectsInRange>). This prevents
+        the query from optimising away the request when it corresponds to a
         non-observed range in the query.
     */
 
@@ -10796,9 +10974,22 @@ var WindowedRemoteQuery = NS.Class({
         WindowedRemoteQuery.parent.reset.call( this, _, _key );
     }.observes( 'sort', 'filter' ),
 
-    indexOfId: function ( id, from, callback ) {
-        var index = this._list.indexOf( id, from ),
-            windows, l;
+    // We keep a local cache so that we can handle records changing ids.
+    // There may be old ids in the "removed" array, which need to alias to the
+    // current store key.
+    _toStoreKey: function () {
+        var store = this.get( 'store' );
+        var Type = this.get( 'Type' );
+        var cache = {};
+        return function ( id ) {
+            return cache[ id ] ||
+                ( cache[ id ] = store.getStoreKey( Type, id ) );
+        };
+    }.property(),
+
+    indexOfStoreKey: function ( storeKey, from, callback ) {
+        var index = this._list.indexOf( storeKey, from );
+        var windows, l, id;
         if ( callback ) {
             // If we have a callback and haven't found it yet, we need to keep
             // searching.
@@ -10821,9 +11012,13 @@ var WindowedRemoteQuery = NS.Class({
                 }
                 // We're missing part of the list, so it may be in the missing
                 // bit.
-                this._indexOfRequested.push( [ id, function () {
-                    callback( this._list.indexOf( id, from ) );
-                }.bind( this ) ] );
+                id = this.get( 'store' ).getIdFromStoreKey( storeKey );
+                this._indexOfRequested.push([
+                    id,
+                    function () {
+                        callback( this._list.indexOf( storeKey, from ) );
+                    }.bind( this )
+                ]);
                 this.get( 'source' ).fetchQuery( this );
             } else {
                 callback( index );
@@ -10832,10 +11027,10 @@ var WindowedRemoteQuery = NS.Class({
         return index;
     },
 
-    getIdsForObjectsInRange: function ( start, end, callback ) {
-        var length = this.get( 'length' ),
-            isComplete = true,
-            windows, windowSize, i, l;
+    getStoreKeysForObjectsInRange: function ( start, end, callback ) {
+        var length = this.get( 'length' );
+        var isComplete = true;
+        var windows, windowSize, i, l;
 
         if ( length !== null ) {
             if ( start < 0 ) { start = 0; }
@@ -10871,15 +11066,15 @@ var WindowedRemoteQuery = NS.Class({
     // well.
     fetchDataForObjectAt: function ( index ) {
         // Load all headers in window containing index.
-        var windowSize = this.get( 'windowSize' ),
-            trigger = this.get( 'triggerPoint' ),
-            windowIndex = Math.floor( index / windowSize ),
-            withinWindowIndex = index % windowSize;
+        var windowSize = this.get( 'windowSize' );
+        var trigger = this.get( 'triggerPoint' );
+        var windowIndex = Math.floor( index / windowSize );
+        var withinWindowIndex = index % windowSize;
 
         this.fetchWindow( windowIndex, true );
 
         // If within trigger distance of end of window, load next window
-        // Otherwise, just fetch Ids for next window.
+        // Otherwise, just fetch ids for the next window.
         if ( withinWindowIndex < trigger ) {
             this.fetchWindow( windowIndex - 1, true );
         }
@@ -10907,10 +11102,10 @@ var WindowedRemoteQuery = NS.Class({
             {O.WindowedRemoteQuery} Returns self.
     */
     fetchWindow: function ( index, fetchRecords, prefetch ) {
-        var status = this.get( 'status' ),
-            windows = this._windows,
-            doFetch = false,
-            i, l;
+        var status = this.get( 'status' );
+        var windows = this._windows;
+        var doFetch = false;
+        var i, l;
 
         if ( status & OBSOLETE ) {
             this.refresh();
@@ -10949,14 +11144,13 @@ var WindowedRemoteQuery = NS.Class({
 
     // Precondition: all ids are known
     checkIfWindowIsFetched: function ( index ) {
-        var store = this.get( 'store' ),
-            Type = this.get( 'Type' ),
-            windowSize = this.get( 'windowSize' ),
-            list = this._list,
-            i = index * windowSize,
-            l = Math.min( i + windowSize, this.get( 'length' ) );
+        var store = this.get( 'store' );
+        var windowSize = this.get( 'windowSize' );
+        var list = this._list;
+        var i = index * windowSize;
+        var l = Math.min( i + windowSize, this.get( 'length' ) );
         for ( ; i < l; i += 1 ) {
-            if ( store.getRecordStatus( Type, list[i] ) & (EMPTY|OBSOLETE) ) {
+            if ( store.getStatus( list[i] ) & (EMPTY|OBSOLETE) ) {
                 return false;
             }
             return true;
@@ -10984,14 +11178,14 @@ var WindowedRemoteQuery = NS.Class({
         if ( !start ) { start = 0; }
         if ( length === undefined ) { length = this.get( 'length' ); }
 
-        var windowSize = this.get( 'windowSize' ),
-            windows = this._windows,
-            list = this._list,
-            // Start at last window index
-            windowIndex = Math.floor( ( length - 1 ) / windowSize ),
-            // And last list index
-            listIndex = length - 1,
-            target, status;
+        var windowSize = this.get( 'windowSize' );
+        var windows = this._windows;
+        var list = this._list;
+        // Start at last window index
+        var windowIndex = Math.floor( ( length - 1 ) / windowSize );
+        // And last list index
+        var listIndex = length - 1;
+        var target, status;
 
         // Convert start from list index to window index.
         start = Math.floor( start / windowSize );
@@ -11029,15 +11223,15 @@ var WindowedRemoteQuery = NS.Class({
     // ---- Updates ---
 
     _normaliseUpdate: function ( update ) {
-        var list = this._list,
-            removedIds = update.removed || [],
-            removedIndexes = mapIndexes( list, removedIds ),
-            addedIds = [],
-            addedIndexes = [],
-            added = update.added || [],
-            i, j, l, item, index, id;
+        var list = this._list;
+        var removedStoreKeys = update.removed || [];
+        var removedIndexes = mapIndexes( list, removedStoreKeys );
+        var addedStoreKeys = [];
+        var addedIndexes = [];
+        var added = update.added || [];
+        var i, j, l, item, index, storeKey;
 
-        sortLinkedArrays( removedIndexes, removedIds );
+        sortLinkedArrays( removedIndexes, removedStoreKeys );
         for ( i = 0; removedIndexes[i] === -1; i += 1 ) {
             // Do nothing (we just want to find the first index of known
             // position).
@@ -11046,30 +11240,30 @@ var WindowedRemoteQuery = NS.Class({
         if ( i ) {
             // Ignore them.
             removedIndexes = removedIndexes.slice( i );
-            removedIds = removedIds.slice( i );
+            removedStoreKeys = removedStoreKeys.slice( i );
         }
         // But truncate at first gap.
         update.truncateAtFirstGap = !!i;
         update.removedIndexes = removedIndexes;
-        update.removedIds = removedIds;
+        update.removedStoreKeys = removedStoreKeys;
 
         for ( i = 0, l = added.length; i < l; i += 1 ) {
             item = added[i];
             index = item[0];
-            id = item[1];
-            j = removedIds.indexOf( id );
+            storeKey = item[1];
+            j = removedStoreKeys.indexOf( storeKey );
 
             if ( j > -1 &&
                     removedIndexes[j] - j + addedIndexes.length === index ) {
                 removedIndexes.splice( j, 1 );
-                removedIds.splice( j, 1 );
+                removedStoreKeys.splice( j, 1 );
             } else {
                 addedIndexes.push( index );
-                addedIds.push( id );
+                addedStoreKeys.push( storeKey );
             }
         }
         update.addedIndexes = addedIndexes;
-        update.addedIds = addedIds;
+        update.addedStoreKeys = addedStoreKeys;
 
         if ( !( 'total' in update ) ) {
             update.total = this.get( 'length' ) -
@@ -11080,18 +11274,18 @@ var WindowedRemoteQuery = NS.Class({
     },
 
     _applyUpdate: function ( args ) {
-        var removedIndexes = args.removedIndexes,
-            removedIds = args.removedIds,
-            removedLength = removedIds.length,
-            addedIndexes = args.addedIndexes,
-            addedIds = args.addedIds,
-            addedLength = addedIds.length,
-            list = this._list,
-            recalculateFetchedWindows = !!( addedLength || removedLength ),
-            oldLength = this.get( 'length' ),
-            newLength = args.total,
-            firstChange = oldLength,
-            i, l, index, id, listLength;
+        var removedIndexes = args.removedIndexes;
+        var removedStoreKeys = args.removedStoreKeys;
+        var removedLength = removedStoreKeys.length;
+        var addedIndexes = args.addedIndexes;
+        var addedStoreKeys = args.addedStoreKeys;
+        var addedLength = addedStoreKeys.length;
+        var list = this._list;
+        var recalculateFetchedWindows = !!( addedLength || removedLength );
+        var oldLength = this.get( 'length' );
+        var newLength = args.total;
+        var firstChange = oldLength;
+        var i, l, index, storeKey, listLength;
 
         // --- Remove items from list ---
 
@@ -11120,12 +11314,12 @@ var WindowedRemoteQuery = NS.Class({
         listLength = list.length;
         for ( i = 0, l = addedLength; i < l; i += 1 ) {
             index = addedIndexes[i];
-            id = addedIds[i];
+            storeKey = addedStoreKeys[i];
             if ( index >= listLength ) {
-                list[ index ] = id;
+                list[ index ] = storeKey;
                 listLength = index + 1;
             } else {
-                list.splice( index, 0, id );
+                list.splice( index, 0, storeKey );
                 listLength += 1;
             }
             if ( index < firstChange ) { firstChange = index; }
@@ -11170,9 +11364,9 @@ var WindowedRemoteQuery = NS.Class({
         // which were removed. Also, keyboard indicator will need to know the
         // indexes of those removed or added.
         this.fire( 'query:updated', {
-            removed: removedIds,
+            removed: removedStoreKeys,
             removedIndexes: removedIndexes,
-            added: addedIds,
+            added: addedStoreKeys,
             addedIndexes: addedIndexes
         });
 
@@ -11184,11 +11378,11 @@ var WindowedRemoteQuery = NS.Class({
     },
 
     _applyWaitingPackets: function () {
-        var didDropPackets = false,
-            waitingPackets = this._waitingPackets,
-            l = waitingPackets.length,
-            state = this.get( 'state' ),
-            packet;
+        var didDropPackets = false;
+        var waitingPackets = this._waitingPackets;
+        var l = waitingPackets.length;
+        var state = this.get( 'state' );
+        var packet;
 
         while ( l-- ) {
             packet = waitingPackets.shift();
@@ -11208,12 +11402,10 @@ var WindowedRemoteQuery = NS.Class({
     },
 
     _fetchObservedWindows: function () {
-        var ranges = NS.meta( this ).rangeObservers,
-            length = this.get( 'length' ),
-            windowSize = this.get( 'windowSize' ),
-            observerStart, observerEnd,
-            firstWindow, lastWindow,
-            range, l;
+        var ranges = NS.meta( this ).rangeObservers;
+        var length = this.get( 'length' );
+        var windowSize = this.get( 'windowSize' );
+        var observerStart, observerEnd, firstWindow, lastWindow, range, l;
         if ( ranges ) {
             l = ranges.length;
             while ( l-- ) {
@@ -11240,9 +11432,10 @@ var WindowedRemoteQuery = NS.Class({
         happened next time an update arrives. If it turns out to be wrong the
         list will be reset, but in most cases it should appear more efficient.
 
-        removed - {String[]} (optional) The ids of all records to delete.
-        added   - {[Number,String][]} (optional) A list of [ index, id ] pairs,
-                  in ascending order of index, for all records to be inserted.
+        removed - {String[]} (optional) The store keys of all records to delete.
+        added   - {[Number,String][]} (optional) A list of [ index, storeKey ]
+                  pairs, in ascending order of index, for all records to be
+                  inserted.
 
         Parameters:
             update - {Object} The removed/added updates to make.
@@ -11302,17 +11495,18 @@ var WindowedRemoteQuery = NS.Class({
         var updateIsEqual = function ( u1, u2 ) {
             return u1.total === u2.total &&
                 equalArrays( u1.addedIndexes, u2.addedIndexes ) &&
-                equalArrays( u1.addedIds, u2.addedIds ) &&
+                equalArrays( u1.addedStoreKeys, u2.addedStoreKeys ) &&
                 equalArrays( u1.removedIndexes, u2.removedIndexes ) &&
-                equalArrays( u1.removedIds, u2.removedIds );
+                equalArrays( u1.removedStoreKeys, u2.removedStoreKeys );
         };
 
         return function ( update ) {
-            var state = this.get( 'state' ),
-                status = this.get( 'status' ),
-                preemptives = this._preemptiveUpdates,
-                l = preemptives.length,
-                allPreemptives, composed, i;
+            var state = this.get( 'state' );
+            var status = this.get( 'status' );
+            var preemptives = this._preemptiveUpdates;
+            var l = preemptives.length;
+            var store, toStoreKey;
+            var allPreemptives, composed, i;
 
             // We've got an update, so we're no longer in the LOADING state.
             this.set( 'status', status & ~LOADING );
@@ -11338,6 +11532,15 @@ var WindowedRemoteQuery = NS.Class({
             // Set new state
             this.set( 'state', update.newState );
 
+            // Map ids to store keys
+            store = this.get( 'store' );
+            toStoreKey = this.get( '_toStoreKey' );
+            update.removed = update.removed.map( toStoreKey );
+            update.added.forEach( function ( tuple ) {
+                tuple[1] = toStoreKey( tuple[1] );
+            });
+            update.upto = update.upto && toStoreKey( update.upto );
+
             if ( !l ) {
                 this._applyUpdate( this._normaliseUpdate( update ) );
             } else {
@@ -11351,7 +11554,7 @@ var WindowedRemoteQuery = NS.Class({
 
                 // 2. Normalise the update from the server. This is trickier
                 // than normal, as we need to determine what the indexes of the
-                // removed ids were in the previous state.
+                // removed store keys were in the previous state.
                 var normalisedUpdate = this._normaliseUpdate({
                     added: update.added,
                     total: update.total,
@@ -11360,32 +11563,32 @@ var WindowedRemoteQuery = NS.Class({
 
                 // Find the removedIndexes for our update. If they were removed
                 // in the composed preemptive, we have the index. Otherwise, we
-                // need to search for the id in the current list then compose
-                // the result with the preemptive in order to get the original
-                // index.
-                var removed = update.removed,
-                    _indexes = [],
-                    _ids = [],
-                    removedIndexes = [],
-                    removedIds = [],
-                    addedIndexes, addedIds,
-                    list = this._list,
-                    wasSuccessfulPreemptive = false,
-                    id, index;
+                // need to search for the store key in the current list then
+                // compose the result with the preemptive in order to get the
+                // original index.
+                var removed = update.removed;
+                var _indexes = [];
+                var _storeKeys = [];
+                var removedIndexes = [];
+                var removedStoreKeys = [];
+                var addedIndexes, addedStoreKeys;
+                var list = this._list;
+                var wasSuccessfulPreemptive = false;
+                var storeKey, index;
 
                 allPreemptives = composed[ l - 1 ];
                 for ( i = 0, l = removed.length; i < l; i += 1 ) {
-                    id = removed[i];
-                    index = allPreemptives.removedIds.indexOf( id );
+                    storeKey = removed[i];
+                    index = allPreemptives.removedStoreKeys.indexOf( storeKey );
                     if ( index > -1 ) {
                         removedIndexes.push(
                             allPreemptives.removedIndexes[ index ] );
-                        removedIds.push( id );
+                        removedStoreKeys.push( storeKey );
                     } else {
-                        index = list.indexOf( id );
+                        index = list.indexOf( storeKey );
                         if ( index > -1 ) {
                             _indexes.push( index );
-                            _ids.push( id );
+                            _storeKeys.push( storeKey );
                         } else {
                             normalisedUpdate.truncateAtFirstGap = true;
                         }
@@ -11394,14 +11597,15 @@ var WindowedRemoteQuery = NS.Class({
                 if ( _indexes.length ) {
                     var x = composeUpdates( allPreemptives, {
                         removedIndexes: _indexes,
-                        removedIds: _ids,
+                        removedStoreKeys: _storeKeys,
                         addedIndexes: [],
-                        addedIds: []
+                        addedStoreKeys: []
                     }), ll;
-                    _indexes = _ids.reduce( function ( indexes, id ) {
+                    _indexes = _storeKeys.reduce(
+                    function ( indexes, storeKey ) {
                         // If the id was added in a preemptive add it won't be
                         // in the list of removed ids.
-                        var i = x.removedIds.indexOf( id );
+                        var i = x.removedStoreKeys.indexOf( storeKey );
                         if ( i > -1 ) {
                             indexes.push( x.removedIndexes[i] );
                         }
@@ -11410,30 +11614,30 @@ var WindowedRemoteQuery = NS.Class({
                     ll = removedIndexes.length;
                     for ( i = 0, l = _indexes.length; i < l; i += 1 ) {
                         removedIndexes[ ll ] = _indexes[i];
-                        removedIds[ ll ] = _ids[i];
+                        removedStoreKeys[ ll ] = _storeKeys[i];
                         ll += 1;
                     }
                 }
 
-                sortLinkedArrays( removedIndexes, removedIds );
+                sortLinkedArrays( removedIndexes, removedStoreKeys );
 
                 normalisedUpdate.removedIndexes = removedIndexes;
-                normalisedUpdate.removedIds = removedIds;
+                normalisedUpdate.removedStoreKeys = removedStoreKeys;
 
                 // Now remove any idempotent operations
                 addedIndexes = normalisedUpdate.addedIndexes;
-                addedIds = normalisedUpdate.addedIds;
+                addedStoreKeys = normalisedUpdate.addedStoreKeys;
                 l = addedIndexes.length;
 
                 while ( l-- ) {
-                    id = addedIds[l];
-                    i = removedIds.indexOf( id );
+                    storeKey = addedStoreKeys[l];
+                    i = removedStoreKeys.indexOf( storeKey );
                     if ( i > -1 &&
                             removedIndexes[i] - i + l === addedIndexes[l] ) {
                         removedIndexes.splice( i, 1 );
-                        removedIds.splice( i, 1 );
+                        removedStoreKeys.splice( i, 1 );
                         addedIndexes.splice( l, 1 );
-                        addedIds.splice( l, 1 );
+                        addedStoreKeys.splice( l, 1 );
                     }
                 }
 
@@ -11448,7 +11652,7 @@ var WindowedRemoteQuery = NS.Class({
 
                 // If nothing actually changed in this update, we're done,
                 // but we can apply any waiting packets.
-                if ( !removedIds.length && !addedIds.length ) {
+                if ( !removedStoreKeys.length && !addedStoreKeys.length ) {
                     wasSuccessfulPreemptive = true;
                 } else {
                     l = composed.length;
@@ -11525,25 +11729,25 @@ var WindowedRemoteQuery = NS.Class({
         // value on the object is the right one, so if data doesn't match, just
         // ignore it.
         if ( !NS.isEqual( args.sort, this.get( 'sort' ) ) ||
-                    !NS.isEqual( args.filter, this.get( 'filter' ) ) ) {
-                return this;
-            }
+                !NS.isEqual( args.filter, this.get( 'filter' ) ) ) {
+            return this;
+        }
 
-        var state = this.get( 'state' ),
-            status = this.get( 'status' ),
-            oldLength = this.get( 'length' ) || 0,
-            canGetDeltaUpdates = this.get( 'canGetDeltaUpdates' ),
-            position = args.position,
-            total = args.total,
-            ids = args.idList,
-            length = ids.length,
-            list = this._list,
-            windows = this._windows,
-            preemptives = this._preemptiveUpdates,
-            informAllRangeObservers = false,
-            beginningOfWindowIsFetched = true,
-            end, i, l;
-
+        var state = this.get( 'state' );
+        var status = this.get( 'status' );
+        var oldLength = this.get( 'length' ) || 0;
+        var canGetDeltaUpdates = this.get( 'canGetDeltaUpdates' );
+        var position = args.position;
+        var total = args.total;
+        var ids = args.idList;
+        var length = ids.length;
+        var list = this._list;
+        var windows = this._windows;
+        var preemptives = this._preemptiveUpdates;
+        var informAllRangeObservers = false;
+        var beginningOfWindowIsFetched = true;
+        var storeKeys, toStoreKey;
+        var end, i, l, windowSize, windowIndex, withinWindowIndex;
 
         // If the state does not match, the list has changed since we last
         // queried it, so we must get the intervening updates first.
@@ -11558,12 +11762,16 @@ var WindowedRemoteQuery = NS.Class({
         }
         this.set( 'state', args.state );
 
+        // Map ids to store keys
+        toStoreKey = this.get( '_toStoreKey' );
+        storeKeys = ids.map( toStoreKey );
+
         // Need to adjust for preemptive updates
         if ( preemptives.length ) {
-            // Adjust ids, position, length
+            // Adjust store keys, position, length
             var allPreemptives = preemptives.reduce( composeUpdates ),
                 addedIndexes = allPreemptives.addedIndexes,
-                addedIds = allPreemptives.addedIds,
+                addedStoreKeys = allPreemptives.addedStoreKeys,
                 removedIndexes = allPreemptives.removedIndexes,
                 index;
 
@@ -11573,7 +11781,7 @@ var WindowedRemoteQuery = NS.Class({
                     index = removedIndexes[l] - position;
                     if ( index < length ) {
                         if ( index >= 0 ) {
-                            ids.splice( index, 1 );
+                            storeKeys.splice( index, 1 );
                             length -= 1;
                         } else {
                             position -= 1;
@@ -11585,7 +11793,7 @@ var WindowedRemoteQuery = NS.Class({
                     if ( index <= 0 ) {
                         position += 1;
                     } else if ( index < length ) {
-                        ids.splice( index, 0, addedIds[i] );
+                        storeKeys.splice( index, 0, addedStoreKeys[i] );
                         length += 1;
                     } else {
                         break;
@@ -11603,15 +11811,15 @@ var WindowedRemoteQuery = NS.Class({
         // Calculate end index, as length will be destroyed later
         end = position + length;
 
-        // Insert ids into list
+        // Insert store keys into list
         for ( i = 0; i < length; i += 1 ) {
-            list[ position + i ] = ids[i];
+            list[ position + i ] = storeKeys[i];
         }
 
         // Have we fetched any windows?
-        var windowSize = this.get( 'windowSize' ),
-            windowIndex = Math.floor( position / windowSize ),
-            withinWindowIndex = position % windowSize;
+        windowSize = this.get( 'windowSize' );
+        windowIndex = Math.floor( position / windowSize );
+        withinWindowIndex = position % windowSize;
         if ( withinWindowIndex ) {
             for ( i = windowIndex * windowSize, l = i + withinWindowIndex;
                     i < l; i += 1  ) {
@@ -11655,22 +11863,22 @@ var WindowedRemoteQuery = NS.Class({
     sourceWillFetchQuery: function () {
         // If optimise and no longer observed -> remove request
         // Move from requested -> loading
-        var windowSize = this.get( 'windowSize' ),
-            windows = this._windows,
-            isAnExplicitIdFetch = this._isAnExplicitIdFetch,
-            indexOfRequested = this._indexOfRequested,
-            refreshRequested = this._refresh,
-            recordRequests = [],
-            idRequests = [],
-            optimiseFetching = this.get( 'optimiseFetching' ),
-            ranges =  ( NS.meta( this ).rangeObservers || [] ).map(
-                function ( observer ) {
-                    return observer.range;
-                }),
-            fetchAllObservedIds = refreshRequested &&
-                !this.get( 'canGetDeltaUpdates' ),
-            prefetch = this.get( 'prefetch' ),
-            i, l, status, inUse, rPrev, iPrev, start;
+        var windowSize = this.get( 'windowSize' );
+        var windows = this._windows;
+        var isAnExplicitIdFetch = this._isAnExplicitIdFetch;
+        var indexOfRequested = this._indexOfRequested;
+        var refreshRequested = this._refresh;
+        var recordRequests = [];
+        var idRequests = [];
+        var optimiseFetching = this.get( 'optimiseFetching' );
+        var ranges =  ( NS.meta( this ).rangeObservers || [] ).map(
+            function ( observer ) {
+                return observer.range;
+            });
+        var fetchAllObservedIds = refreshRequested &&
+                !this.get( 'canGetDeltaUpdates' );
+        var prefetch = this.get( 'prefetch' );
+        var i, l, status, inUse, rPrev, iPrev, start;
 
         this._isAnExplicitIdFetch = false;
         this._indexOfRequested = [];
@@ -11809,10 +12017,12 @@ var RecordAttribute = NS.Class({
                 ( dependents[ propKey ] = [] ) ).push( 'id' );
         }
         attrs[ this.key || propKey ] = propKey;
+        object.constructor.clientSettableAttributes = null;
     },
 
-    __teardownProperty__: function ( metadata, propKey ) {
+    __teardownProperty__: function ( metadata, propKey, object ) {
         metadata.attrs[ this.key || propKey ] = null;
+        object.constructor.clientSettableAttributes = null;
     },
 
     /**
@@ -11927,7 +12137,11 @@ var RecordAttribute = NS.Class({
             }
         }
         else if ( this.Type && !instanceOf( propValue, this.Type ) ) {
-            throw new Error( "Incorrect value type for record attribute" );
+            throw new Error(
+                'Incorrect value type for record attribute: \n' +
+                'key: ' + propKey + '\n' +
+                'value: ' + propValue
+            );
         }
         return true;
     },
@@ -12644,7 +12858,7 @@ var getForeignRefAttrs = function ( Type ) {
         foreignRefAttrs = [];
         for ( attrKey in attrs ) {
             propKey = attrs[ attrKey ];
-            attribute = proto[ propKey ];
+            attribute = propKey && proto[ propKey ];
             if ( attribute instanceof NS.ToOneAttribute ) {
                 foreignRefAttrs.push([ attrKey, 1, attribute.Type ]);
             }
@@ -12795,6 +13009,8 @@ var Store = NS.Class({
         // Map store key -> last access timestamp for memory manager
         this._skToLastAccess = {};
 
+        // Flag if committing
+        this.isCommitting = false;
         // Set of store keys for created records
         this._created = {};
         // Set of store keys for destroyed records
@@ -12926,6 +13142,22 @@ var Store = NS.Class({
             ( this._typeToSkToId[ guid( Type ) ] || {} )[ storeKey ];
     },
 
+    /**
+        Method: O.Store#getTypeFromStoreKey
+
+        Get the record type for a given store key.
+
+        Parameters:
+            storeKey - {String} The store key to get the record type for.
+
+        Returns:
+            {(Type|null)} Returns the type for the record, or `null` if the
+            store key is not found.
+    */
+    getTypeFromStoreKey: function ( storeKey ) {
+        return this._skToType[ storeKey ] || null;
+    },
+
     // === Client API ==========================================================
 
     /**
@@ -12964,10 +13196,19 @@ var Store = NS.Class({
             no id given.
     */
     getRecord: function ( Type, id, doNotFetch ) {
-        if ( !Type || !id ) { return null; }
-        var storeKey = ( id.charAt( 0 ) === '#' ) ?
-                id.slice( 1 ) : this.getStoreKey( Type, id ),
-            record = this.materialiseRecord( storeKey, Type );
+        var storeKey, record;
+        if ( !Type || !id ) {
+            return null;
+        }
+        if ( id.charAt( 0 ) === '#' ) {
+            storeKey = id.slice( 1 );
+            if ( this.getTypeFromStoreKey( storeKey ) !== Type ) {
+                return null;
+            }
+        } else {
+            storeKey = this.getStoreKey( Type, id );
+        }
+        record = this.materialiseRecord( storeKey, Type );
 
         // If the caller is already handling the fetching, they can
         // set doNotFetch to true.
@@ -13067,6 +13308,17 @@ var Store = NS.Class({
         NS.RunLoop.queueFn( 'middle', this._commitChanges, this );
     },
     _commitChanges: function () {
+        // Don't commit if another commit is already in progress. We can't
+        // reference a foreign ID if it is currently being created in an
+        // inflight request. We also need the new state string for commits
+        // to a particular type to make sure we don't miss any changes.
+        // We'll automatically commit again if there are any changes when the
+        // current commit finishes.
+        if ( this.isCommitting ) {
+            return;
+        }
+        this.isCommitting = true;
+
         this.fire( 'willCommit' );
         var _created = this._created,
             _destroyed = this._destroyed,
@@ -13084,7 +13336,8 @@ var Store = NS.Class({
             newDestroyed = {},
             changes = {},
             commitCallbacks = this._commitCallbacks,
-            types = {};
+            types = {},
+            hasChanges = false;
 
         var getEntry = function ( Type ) {
             var typeId = guid( Type ),
@@ -13100,10 +13353,9 @@ var Store = NS.Class({
                     destroy: { storeKeys: [], ids: [] },
                     state: _typeToClientState[ typeId ]
                 };
-                // TODO: should we not allow commits for a type if a commit
-                // is already in progress and the type has a state string?
                 _typeToStatus[ typeId ] |= COMMITTING;
                 types[ typeId ] = Type;
+                hasChanges = true;
             }
             return entry;
         };
@@ -13163,13 +13415,21 @@ var Store = NS.Class({
         this._destroyed = newDestroyed;
         this._commitCallbacks = [];
 
-        this.source.commitChanges( changes, function () {
-            commitCallbacks.forEach( invoke );
-            for ( var typeId in types ) {
-                _typeToStatus[ typeId ] &= ~COMMITTING;
-                this._checkServerStatus( types[ typeId ] );
-            }
-        }.bind( this ) );
+        if ( hasChanges ) {
+            this.source.commitChanges( changes, function () {
+                commitCallbacks.forEach( invoke );
+                for ( var typeId in types ) {
+                    _typeToStatus[ typeId ] &= ~COMMITTING;
+                    this._checkServerStatus( types[ typeId ] );
+                }
+                this.isCommitting = false;
+                if ( this.hasChanges() && this.autoCommit ) {
+                    this.commitChanges();
+                }
+            }.bind( this ) );
+        } else {
+            this.isCommitting = false;
+        }
 
         this.fire( 'didCommit' );
     },
@@ -13237,7 +13497,10 @@ var Store = NS.Class({
             inverse.create.push([
                 storeKey,
                 Type,
-                NS.clone( _skToData[ storeKey ] )
+                Object.filter(
+                    NS.clone( _skToData[ storeKey ] ),
+                    NS.Record.getClientSettableAttributes( Type )
+                )
             ]);
         }
 
@@ -13452,19 +13715,23 @@ var Store = NS.Class({
         }
         this.willUnloadRecord( storeKey );
 
-        var typeId = guid( this._skToType[ storeKey ] ),
-            id = this._typeToSkToId[ typeId ][ storeKey ];
-
+        delete this._skToLastAccess[ storeKey ];
         delete this._skToRecord[ storeKey ];
+        delete this._skToRollback[ storeKey ];
         delete this._skToData[ storeKey ];
         delete this._skToStatus[ storeKey ];
-        delete this._skToType[ storeKey ];
-        delete this._skToRollback[ storeKey ];
-        delete this._typeToSkToId[ typeId ][ storeKey ];
-        if ( id ) {
-            delete this._typeToIdToSk[ typeId ][ id ];
-        }
-        delete this._skToLastAccess[ storeKey ];
+
+        // Can't delete id/sk mapping without checking if we have any other
+        // references to this key elsewhere (as either a foreign key or in a
+        // remote query). For now just always keep.
+        // var typeId = guid( this._skToType[ storeKey ] );
+        // var id = this._typeToSkToId[ typeId ][ storeKey ];
+        // delete this._skToType[ storeKey ];
+        // delete this._typeToSkToId[ typeId ][ storeKey ];
+        // if ( id ) {
+        //     delete this._typeToIdToSk[ typeId ][ id ];
+        // }
+
         return true;
     },
 
@@ -13680,14 +13947,17 @@ var Store = NS.Class({
     */
     fetchData: function ( storeKey ) {
         var status = this.getStatus( storeKey );
-
+        var Type, typeId, id;
         // Nothing to do if already loading or new, destroyed or non-existant.
         if ( status & (LOADING|NEW|DESTROYED|NON_EXISTENT) ) {
             return this;
         }
-        var Type = this._skToType[ storeKey ],
-            typeId = guid( Type ),
-            id = this._typeToSkToId[ typeId ][ storeKey ];
+        Type = this._skToType[ storeKey ];
+        if ( !Type ) {
+            return this;
+        }
+        typeId = guid( Type );
+        id = this._typeToSkToId[ typeId ][ storeKey ];
         if ( status & EMPTY ) {
             this.source.fetchRecord( Type, id );
             this.setStatus( storeKey, (EMPTY|LOADING) );
@@ -13990,7 +14260,8 @@ var Store = NS.Class({
             var _idToSk = this._typeToIdToSk[ guid( Type ) ],
                 destroyed = [];
             for ( id in _idToSk ) {
-                if ( !seen[ id ] ) {
+                if ( !seen[ id ] &&
+                        ( this.getStatus( _idToSk[ id ] ) & READY ) ) {
                     destroyed.push( id );
                 }
             }
@@ -16115,13 +16386,6 @@ var View = NS.Class({
    */
     allowTextSelection: false,
 
-    _cancelTextSelection: function ( event ) {
-        if ( !this.get( 'allowTextSelection' ) ) {
-            event.preventDefault();
-        }
-        event.stopPropagation();
-    }.on( 'selectstart' ),
-
     // --- Layout ---
 
     /**
@@ -16508,7 +16772,8 @@ var View = NS.Class({
 
         Returns:
             {Object} An object with 'top' and 'left' properties, each being the
-            number of pixels this view is offset from the given view.
+            number of pixels this view is offset from the given view, and
+            'width' and 'height' properties for the dimensions of this view.
     */
     getPositionRelativeTo: function ( view ) {
         // If it's a scroll view, it may not have synced the current scroll
@@ -16879,9 +17144,10 @@ var RootView = NS.Class({
         events = [
             'click', 'mousedown', 'mouseup', 'dblclick',
             'keypress', 'keydown', 'keyup',
-            'dragstart', 'selectstart',
+            'dragstart',
             'touchstart', 'touchmove', 'touchend', 'touchcancel',
-            'cut'
+            'cut',
+            'submit'
         ];
         for ( l = events.length; l--; ) {
             node.addEventListener( events[l], this, false );
@@ -17126,7 +17392,7 @@ var ViewEventsController = {
     */
     addEventTarget: function ( eventTarget, priority ) {
         if ( !priority ) { priority = 0; }
-        var eventTargets = this._eventTargets,
+        var eventTargets = this._eventTargets.slice(),
             index = eventTargets.binarySearch( priority, etSearch ),
             length = eventTargets.length;
 
@@ -17135,6 +17401,8 @@ var ViewEventsController = {
         }
 
         eventTargets.splice( index, 0, [ priority, eventTarget ] );
+        this._eventTargets = eventTargets;
+
         return this;
     },
 
@@ -17152,13 +17420,9 @@ var ViewEventsController = {
             {O.ViewEventsController} Returns self.
     */
     removeEventTarget: function ( eventTarget ) {
-        var eventTargets = this._eventTargets,
-            l = eventTargets.length;
-        while ( l-- ) {
-            if ( eventTargets[l][1] === eventTarget ) {
-                eventTargets.splice( l, 1 );
-            }
-        }
+        this._eventTargets = this._eventTargets.filter( function ( target ) {
+            return target[1] !== eventTarget;
+        });
         return this;
     },
 
@@ -18082,10 +18346,13 @@ function TouchDragEvent ( touch ) {
     this.targetView = NS.ViewEventsController.getViewFromNode( target );
 }
 
-var getTouch = function ( event, touchId ) {
-    var touches = event.changedTouches,
-        l = touches.length,
+var getTouch = function ( touches, touchId ) {
+    var l = touches.length,
         touch;
+    // Touch id may be 0 on Android chrome; can't use a falsy check
+    if ( touchId === null ) {
+        return null;
+    }
     while ( l-- ) {
         touch = touches[l];
         if ( touch.identifier === touchId ) {
@@ -18264,7 +18531,7 @@ var DragController = new NS.Object({
     */
     _onMousemove: function ( event ) {
         var drag = this._drag;
-        if ( drag && !this._touchId ) {
+        if ( drag && this._touchId === null ) {
             // Mousemove should only be fired if not native DnD, but sometimes
             // is fired even when there's a native drag
             if ( !drag.get( 'isNative' ) ) {
@@ -18308,7 +18575,7 @@ var DragController = new NS.Object({
         this._targetView = null;
         // Mouseup will not fire if native DnD
         var drag = this._drag;
-        if ( drag && !this._touchId ) {
+        if ( drag && this._touchId === null ) {
             drag.drop( event ).endDrag();
         }
     }.on( 'mouseup' ),
@@ -18335,22 +18602,35 @@ var DragController = new NS.Object({
     }.on( 'hold' ),
 
     /**
-        Method (private): O.DragController._onTouchemove
+        Method (private): O.DragController._onTouchstart
+
+        Parameters:
+            event - {Event} The touchstart event.
+    */
+    // Just doing a sanity check to make sure our drag touch isn't orphaned
+    _onTouchstart: function ( event ) {
+        // Touch id may be 0 on Android chrome; can't use a falsy check
+        if ( this._touchId !== null ) {
+            var touch = getTouch( event.touches, this._touchId );
+            if ( !touch ) {
+                this._drag.endDrag();
+            }
+        }
+    }.on( 'touchstart' ),
+
+    /**
+        Method (private): O.DragController._onTouchmove
 
         Parameters:
             event - {Event} The touchmove event.
     */
     _onTouchmove: function ( event ) {
-        var touchId = this._touchId,
-            touch;
-        if ( touchId ) {
-            touch = getTouch( event, touchId );
-            if ( touch ) {
-                this._drag.move( new TouchDragEvent( touch ) );
-                // Don't propagate to views and don't trigger scroll.
-                event.preventDefault();
-                event.stopPropagation();
-            }
+        var touch = getTouch( event.changedTouches, this._touchId );
+        if ( touch ) {
+            this._drag.move( new TouchDragEvent( touch ) );
+            // Don't propagate to views and don't trigger scroll.
+            event.preventDefault();
+            event.stopPropagation();
         }
     }.on( 'touchmove' ),
 
@@ -18361,13 +18641,9 @@ var DragController = new NS.Object({
             event - {Event} The touchend event.
     */
     _onTouchend: function ( event ) {
-        var touchId = this._touchId,
-            touch;
-        if ( touchId ) {
-            touch = getTouch( event, touchId );
-            if ( touch ) {
-                this._drag.drop( new TouchDragEvent( touch ) ).endDrag();
-            }
+        var touch = getTouch( event.changedTouches, this._touchId );
+        if ( touch ) {
+            this._drag.drop( new TouchDragEvent( touch ) ).endDrag();
         }
     }.on( 'touchend' ),
 
@@ -18378,13 +18654,9 @@ var DragController = new NS.Object({
             event - {Event} The touchcancel event.
     */
     _onTouchcancel: function ( event ) {
-        var touchId = this._touchId,
-            touch;
-        if ( touchId ) {
-            touch = getTouch( event, touchId );
-            if ( touch ) {
-                this._drag.endDrag();
-            }
+        var touch = getTouch( event.changedTouches, this._touchId );
+        if ( touch ) {
+            this._drag.endDrag();
         }
     }.on( 'touchcancel' ),
 
@@ -18433,7 +18705,7 @@ var DragController = new NS.Object({
         var drag = this._drag,
             dataTransfer = event.dataTransfer,
             notify = true,
-            dropEffect;
+            dropEffect, effectAllowed;
         // Probably hasn't come via root view controller, so doesn't have target
         // view property
         if ( !event.targetView ) {
@@ -18441,12 +18713,17 @@ var DragController = new NS.Object({
                 NS.ViewEventsController.getViewFromNode( event.target );
         }
         if ( !drag ) {
-            // Drag from external source:
+            // IE10 will throw an error when you try to access this property!
+            try {
+                effectAllowed = dataTransfer.effectAllowed;
+            } catch ( error ) {
+                effectAllowed = NS.DragEffect.ALL;
+            }
+            // Drag from external source
             drag = new NS.Drag({
                 event: event,
                 isNative: true,
-                allowedEffects:
-                    effectToString.indexOf( dataTransfer.effectAllowed )
+                allowedEffects: effectToString.indexOf( effectAllowed )
             });
         } else {
             var x = event.clientX,
@@ -18903,8 +19180,10 @@ var parseHeaders = function ( allHeaders ) {
         if ( end < 0 ) {
             break;
         }
-        // Slice out the header name
-        name = allHeaders.slice( start, end );
+        // Slice out the header name.
+        // Convert to lower-case: HTTP2 will always be lower case, but HTTP1
+        // may be mixed case, which causes bugs!
+        name = allHeaders.slice( start, end ).toLowerCase();
         // Trim off any spaces after the colon.
         start = end + 1;
         while ( allHeaders.charAt( start ) === ' ' ) {
@@ -21420,7 +21699,16 @@ var LocaleController = {
             }),
             'i'
         );
-    }
+    },
+
+    /**
+        Property: O.LocaleController.letterAlternatives
+        Type: String[String]
+
+        Maps upper-case A-Z to a character class string containing all unicode
+        alternatives that resemble that letter.
+    */
+    letterAlternatives: alternatives
 };
 
 NS.LocaleController = NS.i18n = LocaleController;
@@ -21456,7 +21744,11 @@ var formatDuration = Date.formatDuration = function ( durationInMS, approx ) {
         time, weeks, days, hours, minutes;
 
     if ( durationInSeconds < 60 ) {
-        time = NS.loc( 'less than a minute' );
+        if ( approx ) {
+            time = NS.loc( 'less than a minute' );
+        } else {
+            time = NS.loc( '[*2,_1,%n second,%n seconds]', durationInSeconds );
+        }
     } else if ( durationInSeconds < 60 * 60 ) {
         time = NS.loc( '[*2,_1,%n minute,%n minutes]',
             ~~( durationInSeconds / 60 ) );
@@ -22228,10 +22520,13 @@ var parseDateTime = function ( string, locale, mode ) {
     if ( !locale ) {
         locale = NS.i18n.getLocale();
     }
+    string = string.trim().replace(/[０-９]/g, function ( wideNum ) {
+        return String.fromCharCode( wideNum.charCodeAt( 0 ) - 65248 );
+    });
     var code = locale.code + mode;
     var dateParser = dateParsers[ code ] ||
         ( dateParsers[ code ] = generateLocalisedDateParser( locale, mode ) );
-    var parse = new NS.Parse( string.trim() );
+    var parse = new NS.Parse( string );
     while ( parse.string.length ) {
         if ( !dateParser( parse ) ) {
             // We've hit something unexpected. Skip it.
@@ -22278,15 +22573,14 @@ var SelectionController = NS.Class({
 
     Extends: NS.Object,
 
-    content: NS.bind( 'view.content' ),
+    content: null,
 
     init: function ( mixin ) {
         this._selectionId = 0;
         this._lastSelectedIndex = 0;
-        this._selectedIds = {};
+        this._selectedStoreKeys = {};
 
         this.isLoadingSelection = false;
-        this.view = null;
         this.length = 0;
 
         SelectionController.parent.init.call( this, mixin );
@@ -22304,83 +22598,67 @@ var SelectionController = NS.Class({
         if ( newContent ) {
             newContent.on( 'query:updated', this, 'contentWasUpdated' );
         }
-        this._selectedIds = {};
-        this.set( 'length', 0 )
-            .propertyDidChange( 'selectedIds' );
+        this.selectNone();
     }.observes( 'content' ),
 
     contentWasUpdated: function ( event ) {
         // If an id has been removed, it may no
         // longer belong to the selection
-        var _selectedIds = this._selectedIds,
-            length = this.get( 'length' ),
-            removed = event.removed || [],
-            added = event.added.reduce( function ( set, id ) {
-                set[ id ] = true;
-                return set;
-            }, {} ),
-            l = removed.length,
-            id;
+        var _selectedStoreKeys = this._selectedStoreKeys;
+        var length = this.get( 'length' );
+        var removed = event.removed;
+        var added = event.added.reduce( function ( set, storeKey ) {
+            set[ storeKey ] = true;
+            return set;
+        }, {} );
+        var l = removed.length;
+        var storeKey;
 
         while ( l-- ) {
-            id = removed[l];
-            if ( _selectedIds[ id ] && !added[ id ] ) {
+            storeKey = removed[l];
+            if ( _selectedStoreKeys[ storeKey ] && !added[ storeKey ] ) {
                 length -= 1;
-                delete _selectedIds[ id ];
+                delete _selectedStoreKeys[ storeKey ];
             }
         }
 
         this.set( 'length', length )
-            .propertyDidChange( 'selectedIds' );
+            .propertyDidChange( 'selectedStoreKeys' );
     },
 
     // ---
 
-    selectedIds: function () {
-        return Object.keys( this._selectedIds );
+    selectedStoreKeys: function () {
+        return Object.keys( this._selectedStoreKeys );
     }.property().nocache(),
 
-    isIdSelected: function ( id ) {
-        return !!this._selectedIds[ id ];
+    isStoreKeySelected: function ( storeKey ) {
+        return !!this._selectedStoreKeys[ storeKey ];
     },
-
-    updateViews: function () {
-        var itemViews = this.getFromPath( 'view.childViews' ),
-            l = itemViews ? itemViews.length : 0,
-            _selectedIds = this._selectedIds,
-            view, id;
-        while ( l-- ) {
-            view = itemViews[l];
-            id = view.getFromPath( 'content.id' );
-            if ( id ) {
-                view.set( 'isSelected', !!_selectedIds[ id ] );
-            }
-        }
-    }.observes( 'selectedIds' ),
 
     // ---
 
-    selectIds: function ( ids, isSelected, _selectionId ) {
+    selectStoreKeys: function ( storeKeys, isSelected, _selectionId ) {
         if ( _selectionId && _selectionId !== this._selectionId ) {
             return;
         }
         // Make sure we've got a boolean
         isSelected = !!isSelected;
 
-        var _selectedIds = this._selectedIds,
-            howManyChanged = 0,
-            l = ids.length,
-            id, wasSelected;
+        var _selectedStoreKeys = this._selectedStoreKeys;
+        var howManyChanged = 0;
+        var l = storeKeys.length;
+        var storeKey, wasSelected;
 
         while ( l-- ) {
-            id = ids[l];
-            wasSelected = !!_selectedIds[ id ];
+            storeKey = storeKeys[l];
+            wasSelected = !!_selectedStoreKeys[ storeKey ];
             if ( isSelected !== wasSelected ) {
                 if ( isSelected ) {
-                    _selectedIds[ id ] = true;
+                    _selectedStoreKeys[ storeKey ] = true;
                 }
                 else {
-                    delete _selectedIds[ id ];
+                    delete _selectedStoreKeys[ storeKey ];
                 }
                 howManyChanged += 1;
             }
@@ -22389,7 +22667,7 @@ var SelectionController = NS.Class({
         if ( howManyChanged ) {
             this.increment( 'length',
                     isSelected ? howManyChanged : -howManyChanged )
-                .propertyDidChange( 'selectedIds' );
+                .propertyDidChange( 'selectedStoreKeys' );
         }
 
         this.set( 'isLoadingSelection', false );
@@ -22408,10 +22686,11 @@ var SelectionController = NS.Class({
     selectRange: function ( start, end, isSelected ) {
         var content = this.get( 'content' ),
             selectionId = ( this._selectionId += 1 ),
-            loading = content.getIdsForObjectsInRange(
+            loading = content.getStoreKeysForObjectsInRange(
                 start, end = Math.min( end, content.get( 'length' ) || 0 ),
-                function ( ids, start, end ) {
-                    this.selectIds( ids, isSelected, selectionId, start, end );
+                function ( storeKeys, start, end ) {
+                    this.selectStoreKeys( storeKeys,
+                        isSelected, selectionId, start, end );
                 }.bind( this )
             );
 
@@ -22422,26 +22701,29 @@ var SelectionController = NS.Class({
         return this;
     },
 
-    selectAll: function ( isSelected ) {
-        var content = this.get( 'content' ),
-            selectionId = ( this._selectionId += 1 );
+    selectAll: function () {
+        var content = this.get( 'content' );
+        var selectionId = ( this._selectionId += 1 );
+        var loading = content.getStoreKeysForAllObjects(
+            function ( storeKeys, start, end ) {
+                this.selectStoreKeys( storeKeys,
+                    true, selectionId, start, end );
+            }.bind( this )
+        );
 
-        if ( isSelected ) {
-            var loading = content.getIdsForAllObjects(
-                function ( ids, start, end ) {
-                    this.selectIds( ids, true, selectionId, start, end );
-                }.bind( this )
-            );
-            if ( loading ) {
-                this.set( 'isLoadingSelection', true );
-            }
+        if ( loading ) {
+            this.set( 'isLoadingSelection', true );
         }
-        else {
-            this._selectedIds = {};
-            this.set( 'length', 0 )
-                .propertyDidChange( 'selectedIds' )
-                .set( 'isLoadingSelection', false );
-        }
+
+        return this;
+    },
+
+    selectNone: function () {
+        this._lastSelectedIndex = 0;
+        this._selectedStoreKeys = {};
+        this.set( 'length', 0 )
+            .propertyDidChange( 'selectedStoreKeys' )
+            .set( 'isLoadingSelection', false );
 
         return this;
     }
@@ -22549,8 +22831,8 @@ var SingleSelectionController = NS.Class({
             }
             if ( record && list ) {
                 this.set( 'isFetchingIndex', true );
-                list.indexOfId(
-                    record.toIdOrStoreKey(),
+                list.indexOfStoreKey(
+                    record.get( 'storeKey' ),
                     0,
                     function ( index ) {
                         if ( this.get( 'record' ) === record &&
@@ -22595,7 +22877,7 @@ var SingleSelectionController = NS.Class({
         // See if the currently set record exists in the new list. If it does,
         // we'll use that.
         if ( record ) {
-            index = list.indexOfId( record.toIdOrStoreKey() );
+            index = list.indexOfStoreKey( record.get( 'storeKey' ) );
             if ( !allowNoSelection && index < 0 ) {
                 index = 0;
             }
@@ -22647,7 +22929,8 @@ var SingleSelectionController = NS.Class({
 
     contentWasUpdated: function ( updates ) {
         var record = this.get( 'record' ),
-            index = record ? updates.added.indexOf( record.get( 'id' ) ) : -1,
+            index = record ?
+                updates.added.indexOf( record.get( 'storeKey' ) ) : -1,
             removedIndexes = updates.removedIndexes,
             addedIndexes = updates.addedIndexes,
             content = this.get( 'content' ),
@@ -22817,7 +23100,8 @@ var getPeriod = function ( periods, date, isUTC ) {
 var getRule = function ( rules, offset, datetime, isUTC, recurse ) {
     var l = rules.length,
         year = datetime.getUTCFullYear(),
-        rule, ruleDate, ruleIsUTC, ruleInEffect = null, dateInEffect,
+        ruleInEffect = null,
+        rule, ruleDate, ruleIsUTC, prevRule, dateInEffect,
         month, date, day, difference;
     while ( l-- ) {
         rule = rules[l];
@@ -22832,9 +23116,7 @@ var getRule = function ( rules, offset, datetime, isUTC, recurse ) {
             month = rule[2];
             // 0 => last day of the month
             date = rule[3] || Date.getDaysInMonth( month, year );
-            ruleDate = new Date(Date.UTC(
-                year, month, date, rule[5], rule[6], rule[7]
-            ));
+            ruleDate = new Date(Date.UTC( year, month, date ));
 
             // Adjust to nearest +/- day of the week if specified
             if ( day = rule[4] ) {
@@ -22849,6 +23131,11 @@ var getRule = function ( rules, offset, datetime, isUTC, recurse ) {
                 }
             }
 
+            // Set time (could be 24:00, which moves it to next day)
+            ruleDate.setUTCHours( rule[5] );
+            ruleDate.setUTCMinutes( rule[6] );
+            ruleDate.setUTCSeconds( rule[7] );
+
             // Now match up timezones
             ruleIsUTC = !rule[8];
             if ( ruleIsUTC !== isUTC ) {
@@ -22860,16 +23147,18 @@ var getRule = function ( rules, offset, datetime, isUTC, recurse ) {
                 // 3 hours, find the rule for the previous day.
                 if ( rule[8] === 2 &&
                     Math.abs( ruleDate - datetime ) <= 3 * 60 * 60 * 1000 ) {
-                    ruleDate.add(
-                        ( ruleIsUTC ? 1 : -1 ) *
-                        getRule(
-                            rules,
-                            offset,
-                            new Date( datetime - 86400000 ),
-                            isUTC,
-                            true
-                        )[9], 'second'
+                    prevRule = getRule(
+                        rules,
+                        offset,
+                        new Date( datetime - 86400000 ),
+                        isUTC,
+                        true
                     );
+                    if ( prevRule ) {
+                        ruleDate.add(
+                            ( ruleIsUTC ? 1 : -1 ) * prevRule[9], 'second'
+                        );
+                    }
                 }
             }
 
@@ -22879,15 +23168,16 @@ var getRule = function ( rules, offset, datetime, isUTC, recurse ) {
             if ( !isUTC ) {
                 ruleDate.add( rule[9], 'second' );
                 if ( Math.abs( ruleDate - datetime ) <= 3 * 60 * 60 * 1000 ) {
-                    ruleDate.add(
-                        getRule(
-                            rules,
-                            offset,
-                            new Date( datetime - 86400000 ),
-                            isUTC,
-                            true
-                        )[9], 'second'
+                    prevRule = prevRule || getRule(
+                        rules,
+                        offset,
+                        new Date( datetime - 86400000 ),
+                        isUTC,
+                        true
                     );
+                    if ( prevRule ) {
+                        ruleDate.add( prevRule[9], 'second' );
+                    }
                 }
             }
 
@@ -22907,9 +23197,25 @@ var getRule = function ( rules, offset, datetime, isUTC, recurse ) {
     return ruleInEffect;
 };
 
+var switchSign = function ( string ) {
+    return string.replace( /[+-]/, function ( sign ) {
+        return sign === '+' ? '-' : '+';
+    });
+};
+
 var TimeZone = NS.Class({
-    init: function ( mixin ) {
-        NS.extend( this, mixin );
+    init: function ( id, periods ) {
+        var name = id.replace( /_/g, ' ' );
+        // The IANA ids have the +/- the wrong way round for historical reasons.
+        // Display correctly for the user in name and suffix.
+        if ( /GMT[+-]/.test( name ) ) {
+            name = switchSign( name );
+            periods[0][3] = switchSign( periods[0][3] );
+        }
+
+        this.id = id;
+        this.name = name;
+        this.periods = periods;
     },
 
     convert: function ( date, toTimeZone ) {
@@ -22953,11 +23259,24 @@ var TimeZone = NS.Class({
 });
 
 TimeZone.fromJSON = function ( id ) {
-    return TimeZone[ id ] || TimeZone.UTC;
+    return TimeZone[ id ] || null;
 };
 
 TimeZone.isEqual = function ( a, b ) {
     return a.id === b.id;
+};
+
+var addTimeZone = function ( timeZone ) {
+    var area = TimeZone.areas;
+    var parts = timeZone.name.split( '/' );
+    var l = parts.length - 1;
+    var i;
+    for ( i = 0; i < l; i += 1 ) {
+        area = area[ parts[i] ] || ( area[ parts[i] ] = {} );
+    }
+    area[ parts[l] ] = timeZone;
+
+    TimeZone[ timeZone.id ] = timeZone;
 };
 
 TimeZone.rules = {
@@ -22968,38 +23287,19 @@ TimeZone.areas = {};
 TimeZone.load = function ( json ) {
     var zones = json.zones,
         link = json.link,
-        areas = TimeZone.areas,
-        timeZone, id, parts, area, i, l;
+        alias = json.alias,
+        id;
 
     for ( id in zones ) {
-        timeZone = new TimeZone({
-            id: id,
-            periods: zones[ id ]
-        });
-        TimeZone[ id ] = timeZone;
-
-        area = areas;
-        parts = id.replace( /_/g, ' ' ).split( '/' );
-        l = parts.length - 1;
-        for ( i = 0; i < l; i += 1 ) {
-            area = area[ parts[i] ] || ( area[ parts[i] ] = {} );
-        }
-        area[ parts[l] ] = timeZone;
+        addTimeZone( new TimeZone( id, zones[ id ] ) );
     }
     for ( id in link ) {
-        timeZone = new TimeZone({
-            id: id,
-            periods: zones[ link[ id ] ]
-        });
-        TimeZone[ id ] = timeZone;
-
-        area = areas;
-        parts = id.replace( /_/g, ' ' ).split( '/' );
-        l = parts.length - 1;
-        for ( i = 0; i < l; i += 1 ) {
-            area = area[ parts[i] ] || ( area[ parts[i] ] = {} );
+        addTimeZone( new TimeZone( id, zones[ link[ id ] ] ) );
+    }
+    for ( id in alias ) {
+        if ( !TimeZone[ id ] ) {
+            TimeZone[ id ] = TimeZone[ alias[ id ] ];
         }
-        area[ parts[l] ] = timeZone;
     }
     NS.extend( TimeZone.rules, json.rules );
 };
@@ -23052,7 +23352,7 @@ var GestureManager = new NS.Object({
                 this.set( 'isMouseDown', false );
             }
         }
-        return false;
+        event.propagationStopped = false;
     }
 });
 
@@ -23117,12 +23417,12 @@ var MouseEventRemover = NS.Class({
             isMouse = isClick || /^mouse/.test( type );
         if ( type === 'touchstart' || Date.now() - this.time > 1000 ) {
             NS.ViewEventsController.removeEventTarget( this );
-            return false;
+            isMouse = false;
         }
         if ( isMouse && ( this.stop || event.target !== this.target ) ) {
             event.preventDefault();
         }
-        return isMouse;
+        event.propagationStopped = isMouse;
     }
 });
 
@@ -23152,6 +23452,33 @@ TrackedTouch.prototype.done  = function () {
     for ( i = 0, l = activeEls.length; i < l; i += 1 ) {
         NS.Element.removeClass( activeEls[i], 'tap-active' );
     }
+};
+
+var isInputOrLink = function ( node ) {
+    var nodeName = node.nodeName;
+    var seenLink = false;
+    if ( nodeName === 'INPUT' ||
+        nodeName === 'BUTTON' ||
+        nodeName === 'TEXTAREA' ||
+        nodeName === 'SELECT' ) {
+        return true;
+    }
+    while ( node && node.contentEditable === 'inherit' ) {
+        if ( node.nodeName === 'A' ) {
+            seenLink = true;
+        }
+        node = node.parentNode;
+    }
+    if ( node && node.contentEditable === 'true' ) {
+        return true;
+    }
+    while ( !seenLink && node ) {
+        if ( node.nodeName === 'A' ) {
+            seenLink = true;
+        }
+        node = node.parentNode;
+    }
+    return seenLink;
 };
 
 /*  A tap is defined as a touch which:
@@ -23215,7 +23542,6 @@ NS.Tap = new NS.Gesture({
             tracking = this._tracking,
             now = Date.now(),
             i, l, touch, id, trackedTouch, target, tapEvent, clickEvent,
-            nodeName,
             ViewEventsController = NS.ViewEventsController;
         for ( i = 0, l = touches.length; i < l; i += 1 ) {
             touch = touches[i];
@@ -23235,10 +23561,9 @@ NS.Tap = new NS.Gesture({
                     // appear, even though the preventDefault on the click event
                     // stops it actually being focussed. Calling preventDefault
                     // on the touchend event stops this happening, however we
-                    // must not do this if the user actually taps an input!
-                    nodeName = target.nodeName;
-                    if ( nodeName !== 'INPUT' && nodeName !== 'TEXTAREA' &&
-                            nodeName !== 'SELECT' ) {
+                    // must not do this if the user actually taps an input or
+                    // a link!
+                    if ( !isInputOrLink( target ) ) {
                         event.preventDefault();
                     }
                     new MouseEventRemover( target, clickEvent.defaultPrevented );
@@ -23380,15 +23705,16 @@ var ModalEventHandler = NS.Class({
     // user has clicked and released outside the pop over; a decent indication
     // we should close it. However, if the pop over was triggered on mousedown
     // we may still see a mouseup and a click event from this initial user
-    // interaction, but these musn't hide the view. Therefore, we make sure
+    // interaction, but these must not hide the view. Therefore, we make sure
     // we've seen at least one mousedown event after the popOver view shows
-    // before hiding on click.
+    // before hiding on click. On Android/iOS, we will not see a mousedown
+    // event, so we also count a touchstart event.
     handleMouse: function ( event ) {
         var type = event.type,
             view;
         if ( !event.seenByModal && !this.inView( event ) ) {
             event.stopPropagation();
-            if ( type === 'mousedown' || type === 'tap' ) {
+            if ( type === 'mousedown' ) {
                 this._seenMouseDown = true;
             } else if ( type === 'click' ) {
                 event.preventDefault();
@@ -23426,6 +23752,8 @@ var ModalEventHandler = NS.Class({
         if ( !event.seenByModal && !this.inView( event ) ) {
             event.preventDefault();
             event.stopPropagation();
+            // Clicks outside should now close the modal.
+            this._seenMouseDown = true;
         }
         event.seenByModal = true;
     }.on( 'touchstart' )
@@ -23490,7 +23818,7 @@ var PopOverView = NS.Class({
             parent = options.inParent,
             deltaLeft = 0,
             deltaTop = 0,
-            layout, layer,
+            layout, position, layer,
             Element = NS.Element,
             el = Element.create,
             RootView = NS.RootView,
@@ -23510,8 +23838,12 @@ var PopOverView = NS.Class({
         }
 
         // Now find out our offsets;
-        layout = Element.getPosition( atNode, parent instanceof ScrollView ?
+        position = Element.getPosition( atNode, parent instanceof ScrollView ?
             parent.get( 'scrollLayer' ) : parent.get( 'layer' ) );
+        layout = {
+            top: position.top,
+            left: position.left
+        };
 
         switch ( positionToThe ) {
         case 'right':
@@ -23675,7 +24007,7 @@ var PopOverView = NS.Class({
 
         // Check bottom edge
         if ( !parent.get( 'showScrollbarY' ) ) {
-            gap = parent.get( 'pxHeight' )  - position.top - deltaTop -
+            gap = parent.get( 'pxHeight' ) - position.top - deltaTop -
                 layer.offsetHeight;
             if ( gap < 0 ) {
                 deltaTop += gap;
@@ -24165,7 +24497,7 @@ NS.AbstractControlView = AbstractControlView;
             el( 'div.actions', [
                 new O.ButtonView({
                     type: 'v-Button--destructive v-Button--size13',
-                    icon: 'redpill',
+                    icon: el( 'i.icon.icon-redpill' ),
                     isDisabled: O.bind( controller, 'isNeo' ),
                     label: 'The Red Pill',
                     target: controller,
@@ -24173,7 +24505,7 @@ NS.AbstractControlView = AbstractControlView;
                 }),
                 new O.ButtonView({
                     type: 'v-Button--constructive v-Button--size13',
-                    icon: 'bluepill',
+                    icon: el( 'i.icon.icon-bluepill' ),
                     label: 'The Blue Pill',
                     target: controller,
                     method: 'proceed'
@@ -24188,12 +24520,12 @@ NS.AbstractControlView = AbstractControlView;
     The underlying DOM structure is:
 
         <button class="ButtonView ${view.type}">
-            <i class="${view.icon}"></i>
-            <span>${view.label}</span>
+            ${view.icon},
+            <span class="label">${view.label}</span>
         </button>
 
-    If there is no icon property set, the <i> will have a class of 'hidden'
-    instead. The icon can be drawn as a background to the empty <i> element.
+    If there is no icon property set, a comment node will be inserted in its
+    position.
 */
 var ButtonView = NS.Class({
 
@@ -24216,6 +24548,16 @@ var ButtonView = NS.Class({
     isActive: false,
 
     /**
+        Property: O.ButtonView#isWaiting
+        Type: Boolean
+        Default: false
+
+        Is the button waiting for something to complete? Setting this to true
+        will disable the button and add an 'is-waiting' class name.
+    */
+    isWaiting: false,
+
+    /**
         Property: O.ButtonView#type
         Type: String
         Default: ''
@@ -24227,13 +24569,12 @@ var ButtonView = NS.Class({
 
     /**
         Property: O.ButtonView#type
-        Type: String
-        Default: ''
+        Type: Element|null
+        Default: null
 
-        Set to the name of the icon to use, if any, for the button. See the
-        general notes on using <O.ButtonView> for more information.
+        An element to insert before the label.
     */
-    icon: '',
+    icon: null,
 
     /**
         Property: O.ButtonView#tabIndex
@@ -24276,8 +24617,9 @@ var ButtonView = NS.Class({
             ( this.get( 'icon' ) ? ' v-Button--hasIcon' : '' ) +
             ( this.get( 'shortcut' ) ? ' v-Button--hasShortcut' : '' ) +
             ( this.get( 'isActive' ) ? ' is-active' : '' ) +
+            ( this.get( 'isWaiting' ) ? ' is-waiting' : '' ) +
             ( this.get( 'isDisabled' ) ? ' is-disabled' : '' );
-    }.property( 'type', 'icon', 'shortcut', 'isActive', 'isDisabled' ),
+    }.property( 'type', 'icon', 'shortcut', 'isActive', 'isWaiting', 'isDisabled' ),
 
     /**
         Method: O.ButtonView#draw
@@ -24287,11 +24629,16 @@ var ButtonView = NS.Class({
     */
     draw: function ( layer, Element, el ) {
         var icon = this.get( 'icon' );
+        if ( typeof icon === 'string' ) {
+            icon = el( 'i', {
+                className: 'icon ' + icon
+            });
+        } else if ( !icon ) {
+            icon = document.createComment( 'icon' );
+        }
         this._domControl = layer;
         return [
-            el( 'i', {
-                className: icon ? 'icon ' + icon : 'u-hidden'
-            }),
+            icon,
             ButtonView.parent.draw.call( this, layer, Element, el )
         ];
     },
@@ -24305,17 +24652,25 @@ var ButtonView = NS.Class({
         redraw.
     */
     buttonNeedsRedraw: function ( self, property, oldValue ) {
+        if ( property === 'isWaiting' ) { property = 'isDisabled'; }
        return this.propertyNeedsRedraw( self, property, oldValue );
-    }.observes( 'icon' ),
+    }.observes( 'icon', 'isWaiting' ),
 
-    /**
-        Method: O.ButtonView#redrawIcon
-
-        Updates the className of the <i> representing the button's icon.
-    */
     redrawIcon: function ( layer ) {
         var icon = this.get( 'icon' );
-        layer.firstChild.className = icon ? 'icon ' + icon : 'u-hidden';
+        if ( typeof icon === 'string' ) {
+            icon = NS.Element.create( 'i', {
+                className: 'icon ' + icon
+            });
+        } else if ( !icon ) {
+            icon = document.createComment( 'icon' );
+        }
+        layer.replaceChild( icon, layer.firstChild );
+    },
+
+    redrawIsDisabled: function () {
+        this._domControl.disabled =
+            this.get( 'isDisabled' ) || this.get( 'isWaiting' );
     },
 
     // --- Activate ---
@@ -24371,7 +24726,7 @@ var ButtonView = NS.Class({
         It also fires an event called `button:activate` on itself.
     */
     activate: function () {
-        if ( !this.get( 'isDisabled' ) ) {
+        if ( !this.get( 'isDisabled' ) && !this.get( 'isWaiting' ) ) {
             var target = this.get( 'target' ) || this,
                 action;
             if ( action = this.get( 'action' ) ) {
@@ -24432,6 +24787,9 @@ var ButtonView = NS.Class({
             NS.RunLoop.invokeInNextEventLoop( this._setIgnoreUntil, this );
             this.activate();
             event.preventDefault();
+            // Firefox keeps focus on the button after clicking. If the user
+            // then hits "space", it will activate the button again!
+            this.blur();
         }
     }.on( 'mouseup', 'click' ),
 
@@ -24612,13 +24970,11 @@ var canUseMultiple = FormData.isFake ? null : 'multiple';
     The underlying DOM structure is:
 
         <label>
-            <i class="${view.icon}"></i>
             <input type="file">
-            <span>${view.label}</span>
+            ${view.icon}
+            <span class="label">${view.label}</span>
         </label>
 
-    If there is no icon property set, the <i> will have a class of 'hidden'
-    instead. The icon can be drawn as a background to the empty <i> element.
 */
 var FileButtonView = NS.Class({
 
@@ -24673,16 +25029,21 @@ var FileButtonView = NS.Class({
     */
     draw: function ( layer, Element, el ) {
         var icon = this.get( 'icon' );
+        if ( typeof icon === 'string' ) {
+            icon = el( 'i', {
+                className: 'icon ' + icon
+            });
+        } else if ( !icon ) {
+            icon = document.createComment( 'icon' );
+        }
         return [
-            el( 'i', {
-                className: icon ? 'icon ' + icon : 'u-hidden'
-            }),
             this._domControl = el( 'input', {
                 className: 'v-FileButton-input',
                 type: 'file',
                 accept: this.get( 'acceptOnlyTypes' ) || undefined,
                 multiple: this.get( 'acceptMultiple' ) && canUseMultiple
             }),
+            icon,
             NS.AbstractControlView.prototype.draw
                 .call( this, layer, Element, el )
         ];
@@ -24883,7 +25244,6 @@ NS.LabelView = LabelView;
 
         new O.MenuButtonView({
             label: 'Select File',
-            icon: 'more',
             popOverView: new O.PopOverView(),
             menuView: new O.MenuView({
                 showFilter: false,
@@ -25153,7 +25513,7 @@ var MenuController = NS.Class({
     filter: '',
 
     filterDidChange: function () {
-        var value = this.get( 'filter' ).escapeRegExp(),
+        var value = this.get( 'filter' ),
             pattern = value ? NS.i18n.makeSearchRegExp( value ) : null,
             options = this.get( 'options' ),
             l = options.get( 'length' ),
@@ -25569,9 +25929,9 @@ NS.RadioView = RadioView;
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global document, window, FileReader, Squire */
+/*global window, document, FileReader, Squire */
 
-( function ( NS, undefined ) {
+( function ( NS, window, document, undefined ) {
 
 var execCommand = function ( command ) {
     return function ( arg ) {
@@ -25602,6 +25962,7 @@ var popOver = new NS.PopOverView();
 
 var ButtonView = NS.ButtonView;
 var equalTo = NS.Transform.isEqualToValue;
+var UA = NS.UA;
 
 var RichTextView = NS.Class({
 
@@ -25610,13 +25971,34 @@ var RichTextView = NS.Class({
     Mixin: NS.DropTarget,
 
     isFocussed: false,
-    isExpanding: false,
 
-    showToolbar: !NS.UA.isIOS,
+    allowTextSelection: true,
+
+    showToolbar: !UA.isIOS,
+    fontFaceOptions: [
+        [ 'Default', null ],
+        [ 'Arial', 'arial, sans-serif' ],
+        [ 'Georgia', 'georgia, serif' ],
+        [ 'Helvetica', 'helvetica, arial, sans-serif' ],
+        [ 'Monospace', 'menlo, consolas, monospace' ],
+        [ 'Tahoma', 'tahoma, sans-serif' ],
+        [ 'Times New Roman', '"Times New Roman", times, serif' ],
+        [ 'Trebuchet MS', '"Trebuchet MS", sans-serif' ],
+        [ 'Verdana', 'verdana, sans-serif' ]
+    ],
+    fontSizeOptions: function () {
+        return [
+            [ NS.loc( 'Small' ), '10px' ],
+            [ NS.loc( 'Medium' ), null  ],
+            [ NS.loc( 'Large' ), '16px' ],
+            [ NS.loc( 'Huge' ),  '22px' ]
+        ];
+    }.property(),
 
     editor: null,
-
+    editorClassName: '',
     styles: null,
+    blockDefaults: null,
 
     _value: '',
     value: function ( html ) {
@@ -25637,130 +26019,135 @@ var RichTextView = NS.Class({
         return html;
     }.property().nocache(),
 
+    destroy: function () {
+        var editor = this.get( 'editor' );
+        if ( editor ) {
+            editor.destroy();
+        }
+        RichTextView.parent.destroy.call( this );
+    },
+
     // --- Render ---
 
     willEnterDocument: function () {
         this.set( 'path', '' );
-        return RichTextView.parent.willEnterDocument.call( this );
+        RichTextView.parent.willEnterDocument.call( this );
+        this.get( 'layer' ).appendChild( this._editingLayer );
+        return this;
     },
 
     didEnterDocument: function () {
-        if ( this.get( 'showToolbar' ) && this.get( 'isExpanding' ) ) {
-            var scrollView = this.getParent( NS.ScrollView );
-            if ( scrollView ) {
+        var scrollView = this.getParent( NS.ScrollView );
+        if ( scrollView ) {
+            if ( this.get( 'showToolbar' ) ) {
                 scrollView.addObserverForKey(
                     'scrollTop', this, '_calcToolbarPosition' );
+            }
+            if ( NS.UA.isIOS ) {
+                scrollView.addObserverForKey(
+                    'scrollTop', this, 'redrawIOSCursor' );
             }
         }
         return RichTextView.parent.didEnterDocument.call( this );
     },
 
     willLeaveDocument: function () {
-        if ( this.get( 'showToolbar' ) && this.get( 'isExpanding' ) ) {
-            var scrollView = this.getParent( NS.ScrollView );
-            if ( scrollView ) {
+        var scrollView = this.getParent( NS.ScrollView );
+        if ( scrollView ) {
+            if ( this.get( 'showToolbar' ) ) {
                 scrollView.removeObserverForKey(
                     'scrollTop', this, '_calcToolbarPosition' );
+                this._setToolbarPosition(
+                    scrollView, this.get( 'toolbarView' ), false );
             }
-            this._setToolbarPosition(
-                scrollView, this.get( 'toolbarView' ), false );
-        }
-        // As soon as the view is removed from the document, any editor
-        // reference is no longer valid, as the iframe will have been unloaded.
-        // The reference will be recreated when the iframe is appended
-        // again. Must cache the value before it is removed though.
-        var editor = this.get( 'editor' );
-        if ( editor ) {
-            this._value = editor.getHTML( this.get( 'isFocussed' ) );
-            editor.destroy();
-            this.set( 'editor', null );
+            if ( NS.UA.isIOS ) {
+                scrollView.removeObserverForKey(
+                    'scrollTop', this, 'redrawIOSCursor' );
+            }
         }
         return RichTextView.parent.willLeaveDocument.call( this );
     },
 
+    didLeaveDocument: function () {
+        // The nodes must be in a document or document fragment for DOM Range
+        // API to work; otherwise will throw INVALID_NODE_TYPE_ERR errors.
+        // This is important if the value is changed before appending.
+        document.createDocumentFragment().appendChild( this._editingLayer );
+        return RichTextView.parent.didLeaveDocument.call( this );
+    },
+
+    // ---
+
     className: function () {
         return 'v-RichText' +
-            ( NS.UA.isIOS ? ' v-RichText--iOS' : '' ) +
             ( this.get( 'showToolbar' ) ? '' : ' v-RichText--noToolbar' );
     }.property(),
 
     draw: function ( layer, Element, el ) {
-        var richTextView = this;
-        var iframe = el( 'iframe.v-RichText-input' );
-        var onload = function () {
-            // Make sure we're in standards mode.
-            var doc = iframe.contentDocument;
-            if ( doc.compatMode !== 'CSS1Compat' ) {
-                doc.open();
-                doc.write( '<!DOCTYPE html><title></title>' );
-                doc.close();
-            }
-            // doc.close() can cause a re-entrant load event in some browsers,
-            // such as IE9.
-            if ( richTextView.get( 'editor' ) ) {
-                return;
-            }
-            // Create Squire instance
-            var editor = new Squire( doc );
-            editor.didError = NS.RunLoop.didError;
-            richTextView.set( 'editor', editor
-                .addStyles( richTextView.get( 'styles' ) )
-                .setHTML( richTextView._value )
-                .addEventListener( 'load', richTextView )
-                .addEventListener( 'keydown', richTextView )
-                .addEventListener( 'keypress', richTextView )
-                .addEventListener( 'keyup', richTextView )
-                .addEventListener( 'mousedown', richTextView )
-                .addEventListener( 'click', richTextView )
-                .addEventListener( 'focus', richTextView )
-                .addEventListener( 'blur', richTextView )
-                .addEventListener( 'input', richTextView )
-                .addEventListener( 'dragenter', richTextView )
-                .addEventListener( 'dragleave', richTextView )
-                .addEventListener( 'dragover', richTextView )
-                .addEventListener( 'drop', richTextView )
-                .addEventListener( 'select', richTextView )
-                .addEventListener( 'pathChange', richTextView )
-                .addEventListener( 'undoStateChange', richTextView )
-            ).set( 'path', editor.getPath() )
-             .expand();
-            if ( richTextView.get( 'isFocussed' ) ) {
-                editor.focus();
-            }
-        }.invokeInRunLoop();
-
-        iframe.addEventListener( 'load', onload, false );
-
+        var editorClassName = this.get( 'editorClassName' );
+        var editingLayer = this._editingLayer = el( 'div', {
+            className: 'v-RichText-input' +
+                ( editorClassName ? ' ' + editorClassName : '' )
+        });
+        // The nodes must be in a document or document fragment for DOM Range
+        // API to work; otherwise will throw INVALID_NODE_TYPE_ERR errors.
+        document.createDocumentFragment().appendChild( editingLayer );
+        var editor = new Squire( editingLayer, this.get( 'blockDefaults' ) );
+        editor
+            .setHTML( this._value )
+            .addEventListener( 'input', this )
+            .addEventListener( 'select', this )
+            .addEventListener( 'pathChange', this )
+            .addEventListener( 'undoStateChange', this )
+            .addEventListener( 'dragover', this )
+            .addEventListener( 'drop', this )
+            .didError = NS.RunLoop.didError;
+        this.set( 'editor', editor )
+            .set( 'path', editor.getPath() );
         return [
-            this.get( 'showToolbar' ) ? this.get( 'toolbarView' ) : null,
-            el( 'div.v-RichText-content', [ iframe ] )
+            el( 'style', { type: 'text/css' }, [
+                this.get( 'styles' )
+            ]),
+            this.get( 'showToolbar' ) ? this.get( 'toolbarView' ) : null
         ];
     },
 
-    expand: function () {
-        if ( !NS.UA.isIOS && this.get( 'isExpanding' ) ) {
-            var editor = this.get( 'editor' ),
-                doc = editor && editor.getDocument(),
-                body = doc && doc.body,
-                lastChild = body && body.lastChild;
+    // ---
 
-            if ( !lastChild ) {
-                return;
-            }
-
-            var chromeHeight = this._chromeHeight || ( this._chromeHeight =
-                    this.get( 'pxHeight' ) - body.offsetHeight ),
-                height = lastChild.offsetTop + lastChild.offsetHeight +
-                    chromeHeight + 30,
-                layout = this.get( 'layout' );
-
-            if ( layout.height !== height ) {
-                layout = NS.clone( layout );
-                layout.height = height;
-                this.set( 'layout', layout );
-            }
+    redrawIOSCursor: function () {
+        if ( this.get( 'isFocussed' ) ) {
+            var editor = this.get( 'editor' );
+            editor.setSelection( editor.getSelection() );
         }
-    }.queue( 'after' ).on( 'input', 'load' ),
+    }.nextFrame(),
+
+    scrollIntoView: function () {
+        var scrollView = this.getParent( NS.ScrollView );
+        var editor = this.get( 'editor' );
+        var cursorPosition = editor && editor.getCursorPosition();
+        if ( !scrollView || !cursorPosition ) {
+            return;
+        }
+        var scrollViewOffsetTop =
+            scrollView.get( 'layer' ).getBoundingClientRect().top;
+        var offsetTop = cursorPosition.top - scrollViewOffsetTop;
+        var offsetBottom = cursorPosition.bottom - scrollViewOffsetTop;
+        var scrollViewHeight = scrollView.get( 'pxHeight' );
+        var scrollBy = 0;
+        if ( NS.UA.isIOS ) {
+            scrollViewHeight -=
+                // Keyboard height (in WKWebView, but not Safari)
+                ( document.body.offsetHeight - window.innerHeight );
+        }
+        if ( offsetTop - 15 < 0 ) {
+            scrollBy = offsetTop - 15;
+        } else if ( offsetBottom + 15 > scrollViewHeight ) {
+            scrollBy = offsetBottom + 15 - scrollViewHeight;
+        }
+        if ( scrollBy ) {
+            scrollView.scrollBy( 0, Math.round( scrollBy ), true );
+        }
+    }.queue( 'after' ).on( 'input' ),
 
     _calcToolbarPosition: function ( scrollView, _, __, scrollTop ) {
         var toolbarView = this.get( 'toolbarView' ),
@@ -25796,7 +26183,6 @@ var RichTextView = NS.Class({
                 // Need to account separately for any border in the new parent.
                 borders = scrollView.getPositionRelativeTo( newParent );
             toolbarView
-                .set( 'className', 'v-Toolbar v-RichText-toolbar is-sticky' )
                 .set( 'layout', {
                     top: scrollView.get( 'pxTop' ),
                     left: position.left - borders.left,
@@ -25805,7 +26191,6 @@ var RichTextView = NS.Class({
             newParent.insertView( toolbarView );
         } else {
             toolbarView
-                .set( 'className', 'v-Toolbar v-RichText-toolbar' )
                 .set( 'layout', {
                     top: 0,
                     left: 0,
@@ -25819,7 +26204,7 @@ var RichTextView = NS.Class({
         left: [
             'bold', 'italic', 'underline', 'strikethrough', '-',
             'font', 'size', '-',
-            'colour', 'bgcolour', '-',
+            'color', 'bgcolor', '-',
             'image', '-',
             'link', '-',
             'ul', 'ol', '-',
@@ -25927,21 +26312,21 @@ var RichTextView = NS.Class({
                 target: this,
                 method: 'showFontFaceMenu'
             }),
-            colour: new ButtonView({
+            color: new ButtonView({
                 type: 'v-Button--iconOnly',
                 icon: 'icon-palette',
                 label: NS.loc( 'Text Color' ),
                 tooltip: NS.loc( 'Text Color' ),
                 target: this,
-                method: 'showTextColourMenu'
+                method: 'showTextColorMenu'
             }),
-            bgcolour: new ButtonView({
+            bgcolor: new ButtonView({
                 type: 'v-Button--iconOnly',
                 icon: 'icon-highlight',
                 label: NS.loc( 'Text Highlight' ),
                 tooltip: NS.loc( 'Text Highlight' ),
                 target: this,
-                method: 'showTextHighlightColourMenu'
+                method: 'showTextHighlightColorMenu'
             }),
             link: new ButtonView({
                 type: 'v-Button--iconOnly',
@@ -26102,20 +26487,16 @@ var RichTextView = NS.Class({
         var richTextView = this;
         return new NS.MenuView({
             showFilter: false,
-            options: [
-                [ NS.loc( 'Small' ), '10px'  ],
-                [ NS.loc( 'Medium' ), '13px' ],
-                [ NS.loc( 'Large' ), '16px'  ],
-                [ NS.loc( 'Huge' ), '22px'   ]
-            ].map( function ( item ) {
+            options: this.get( 'fontSizeOptions' ).map( function ( item ) {
+                var fontSize = item[1];
                 return new ButtonView({
-                    layout: {
-                        fontSize: item[1]
-                    },
+                    layout: fontSize ? {
+                        fontSize: fontSize
+                    } : null,
                     label: item[0],
                     method: 'setFontSize',
                     setFontSize: function () {
-                        richTextView.setFontSize( item[1] );
+                        richTextView.setFontSize( fontSize );
                     }
                 });
             })
@@ -26140,24 +26521,16 @@ var RichTextView = NS.Class({
         var richTextView = this;
         return new NS.MenuView({
             showFilter: false,
-            options: [
-                [ 'Arial', 'arial, sans-serif' ],
-                [ 'Georgia', 'georgia, serif' ],
-                [ 'Helvetica', 'helvetica, arial, sans-serif' ],
-                [ 'Monospace', 'menlo, consolas, "courier new", monospace' ],
-                [ 'Tahoma', 'tahoma, sans-serif' ],
-                [ 'Times New Roman', '"Times New Roman", times, serif' ],
-                [ 'Trebuchet MS', '"Trebuchet MS", sans-serif' ],
-                [ 'Verdana', 'verdana, sans-serif' ]
-            ].map( function ( item ) {
+            options: this.get( 'fontFaceOptions' ).map( function ( item ) {
+                var fontFace = item[1];
                 return new ButtonView({
-                    layout: {
-                        fontFamily: item[1]
-                    },
+                    layout: fontFace ? {
+                        fontFamily: fontFace
+                    } : null,
                     label: item[0],
                     method: 'setFontFace',
                     setFontFace: function () {
-                        richTextView.setFontFace( item[1] );
+                        richTextView.setFontFace( fontFace );
                     }
                 });
             })
@@ -26178,12 +26551,12 @@ var RichTextView = NS.Class({
         });
     },
 
-    _colourText: true,
+    _colorText: true,
 
-    textColourMenuView: function () {
+    textColorMenuView: function () {
         var richTextView = this;
         return new NS.MenuView({
-            className: 'v-ColourMenu',
+            className: 'v-ColorMenu',
             showFilter: false,
             options: (
                 '000000 b22222 ff0000 ffa07a fff0f5 ' +
@@ -26195,19 +26568,19 @@ var RichTextView = NS.Class({
                 '4b0082 800080 ee82ee dda0dd e6e6fa ' +
                 '696969 808080 a9a9a9 d3d3d3 ffffff' )
                 .split( ' ' )
-                .map( function ( colour ) {
-                    colour = '#' + colour;
+                .map( function ( color ) {
+                    color = '#' + color;
                     return new ButtonView({
                         layout: {
-                            backgroundColor: colour
+                            backgroundColor: color
                         },
-                        label: colour,
-                        method: 'setColour',
-                        setColour: function () {
-                            if ( richTextView._colourText ) {
-                                richTextView.setTextColour( colour );
+                        label: color,
+                        method: 'setColor',
+                        setColor: function () {
+                            if ( richTextView._colorText ) {
+                                richTextView.setTextColor( color );
                             } else {
-                                richTextView.setHighlightColour( colour );
+                                richTextView.setHighlightColor( color );
                             }
                         }
                     });
@@ -26215,14 +26588,14 @@ var RichTextView = NS.Class({
         });
     }.property(),
 
-    showTextColourMenu: function ( buttonView ) {
-        this._colourText = true;
+    showTextColorMenu: function ( buttonView ) {
+        this._colorText = true;
         // If we're in the overflow menu, align with the "More" button.
         if ( buttonView.getParent( NS.MenuView ) ) {
             buttonView = this.get( 'toolbarView' ).getView( 'overflow' );
         }
         popOver.show({
-            view: this.get( 'textColourMenuView' ),
+            view: this.get( 'textColorMenuView' ),
             alignWithView: buttonView,
             alignEdge: 'centre',
             showCallout: true,
@@ -26230,14 +26603,14 @@ var RichTextView = NS.Class({
         });
     },
 
-    showTextHighlightColourMenu: function ( buttonView ) {
-        this._colourText = false;
+    showTextHighlightColorMenu: function ( buttonView ) {
+        this._colorText = false;
         // If we're in the overflow menu, align with the "More" button.
         if ( buttonView.getParent( NS.MenuView ) ) {
             buttonView = this.get( 'toolbarView' ).getView( 'overflow' );
         }
         popOver.show({
-            view: this.get( 'textColourMenuView' ),
+            view: this.get( 'textColorMenuView' ),
             alignWithView: buttonView,
             alignEdge: 'centre',
             showCallout: true,
@@ -26343,8 +26716,6 @@ var RichTextView = NS.Class({
         var editor = this.get( 'editor' );
         if ( editor ) {
             editor.focus();
-        } else {
-            this.set( 'isFocussed', true );
         }
         return this;
     },
@@ -26353,8 +26724,6 @@ var RichTextView = NS.Class({
         var editor = this.get( 'editor' );
         if ( editor ) {
             editor.blur();
-        } else {
-            this.set( 'isFocussed', false );
         }
         return this;
     },
@@ -26378,8 +26747,8 @@ var RichTextView = NS.Class({
     setFontFace: execCommand( 'setFontFace' ),
     setFontSize: execCommand( 'setFontSize' ),
 
-    setTextColour: execCommand( 'setTextColour' ),
-    setHighlightColour: execCommand( 'setHighlightColour' ),
+    setTextColor: execCommand( 'setTextColour' ),
+    setHighlightColor: execCommand( 'setHighlightColour' ),
 
     setTextAlignment: execCommand( 'setTextAlignment' ),
     setTextDirection: execCommand( 'setTextDirection' ),
@@ -26417,7 +26786,7 @@ var RichTextView = NS.Class({
     },
 
     kbShortcuts: function ( event ) {
-        var isMac = NS.UA.isMac;
+        var isMac = UA.isMac;
         switch ( NS.DOMEvent.lookupKey( event ) ) {
         case isMac ? 'meta-k' : 'ctrl-k':
             event.preventDefault();
@@ -26426,7 +26795,7 @@ var RichTextView = NS.Class({
             );
             break;
         case 'pagedown':
-            if ( !isMac && this.get( 'isExpanding' ) ) {
+            if ( !isMac ) {
                 var scrollView = this.getParent( NS.ScrollView );
                 if ( scrollView ) {
                     scrollView.scrollToView( this, {
@@ -26520,6 +26889,14 @@ var RichTextView = NS.Class({
     // --- Keep state in sync with render ---
 
     handleEvent: function ( event ) {
+        // Ignore real dragover/drop events from Squire. They wil be handled
+        // by the standard event delegation system. We only observe these
+        // to get the image paste fake dragover/drop events.
+        var type = event.type;
+        if ( ( type === 'dragover' || type === 'drop' ) &&
+                event.stopPropagation ) {
+            return;
+        }
         NS.ViewEventsController.handleEvent( event, this );
     },
 
@@ -26564,16 +26941,20 @@ var RichTextView = NS.Class({
 
 RichTextView.isSupported = (
     ( 'contentEditable' in document.body ) &&
-    ( !NS.UA.operaMobile ) &&
-    ( !NS.UA.msie || NS.UA.msie > 8 ) &&
+    // Opera Mobile. Yeh, no.
+    ( !UA.operaMobile ) &&
+    // Windows Phone as of v8.1 (IE11) is still pretty buggy
+    ( !UA.isWinPhone ) &&
+    // Desktop IE is fine from v9 onwards
+    ( !UA.msie || UA.msie > 8 ) &&
     // WKWebView (introduced in iOS8) finally supports RTV without horrendous
-    // bugs. Can detect it from UIWebView by looking for indexedDB support.
-    ( !NS.UA.isIOS || !!window.indexedDB )
+    // bugs.
+    ( !UA.isIOS || UA.isWKWebView )
 );
 
 NS.RichTextView = RichTextView;
 
-}( O ) );
+}( O, window, document ) );
 
 
 // -------------------------------------------------------------------------- \\
@@ -26974,6 +27355,7 @@ var TextView = NS.Class({
         var selection = this.get( 'savedSelection' );
         if ( selection ) {
             this.set( 'selection', selection ).focus();
+            this.set( 'savedSelection', null );
         }
         return this;
     },
@@ -27088,10 +27470,12 @@ var TextView = NS.Class({
             event - {Event} The keypress event.
     */
     _onKeypress: function ( event ) {
-        var key = ( event.keyCode || event.which );
         // If key == enter, IE will automatically focus the nearest button
-        // (presumably as though it were submitting the form). Stop this.
-        if ( key === 13 && !this.get( 'isMultiline' ) ) {
+        // (presumably as though it were submitting the form). Stop this
+        // unless we're actually in a form.
+        if ( !this.get( 'isMultiline' ) &&
+                NS.DOMEvent.lookupKey( event, true ) === 'enter' &&
+                !NS.Element.nearest( this.get( 'layer' ), 'FORM' ) ) {
             event.preventDefault();
         }
     }.on( 'keypress' ),
@@ -27106,10 +27490,10 @@ var TextView = NS.Class({
             event - {Event} The keydown event.
     */
     _blurOnEsc: function ( event ) {
-        var key = ( event.keyCode || event.which );
+        var key = NS.DOMEvent.lookupKey( event, true );
         // If key == esc, we want to blur. Not all browsers do this
         // automatically.
-        if ( key === 27 && this.get( 'blurOnEscape' ) ) {
+        if ( key === 'esc' && this.get( 'blurOnEscape' ) ) {
             this.blur();
         }
     }.on( 'keydown' )
@@ -27146,29 +27530,37 @@ NS.TextView = TextView;
 
 ( function ( NS ) {
 
+var ClearSearchButtonView = new NS.Class({
+
+    Extends: NS.ButtonView,
+
+    type: 'v-ClearSearchButton',
+    positioning: 'absolute',
+    shortcut: 'ctrl-/'
+});
+
+NS.ClearSearchButtonView = ClearSearchButtonView;
+
 var SearchTextView = NS.Class({
 
     Extends: NS.TextView,
 
     type: 'v-SearchText',
 
+    icon: null,
+
     draw: function ( layer, Element, el ) {
         var children =
                 SearchTextView.parent.draw.call( this, layer, Element, el );
         children.push(
-            el( 'i.icon.icon-search' ),
-            new NS.ButtonView({
-                type: NS.bind( this, 'value', function ( value ) {
-                    return value ?
-                        'v-SearchText-reset v-Button--iconOnly' : 'u-hidden';
-                }),
-                icon: 'icon-clear',
-                positioning: 'absolute',
-                label: NS.loc( 'Clear Search' ),
-                shortcut: 'ctrl-/',
-                target: this,
-                method: 'reset'
-            })
+            this.get( 'icon' ),
+            Element.when( this, 'value' ).show([
+                new NS.ClearSearchButtonView({
+                    label: NS.loc( 'Clear Search' ),
+                    target: this,
+                    method: 'reset'
+                })
+            ]).end()
         );
         return children;
     },
@@ -27193,6 +27585,8 @@ NS.SearchTextView = SearchTextView;
 // -------------------------------------------------------------------------- \\
 
 ( function ( NS ) {
+
+var isEqual = NS.isEqual;
 
 /**
     Class: O.SelectView
@@ -27276,7 +27670,7 @@ var SelectView = NS.Class({
                     return el( 'option', {
                         text: option.text,
                         value: i,
-                        selected: option.value === selected,
+                        selected: isEqual( option.value, selected ),
                         disabled: !!option.isDisabled
                     });
                 })
@@ -27305,7 +27699,7 @@ var SelectView = NS.Class({
     redrawOptions: function ( layer, oldOptions ) {
         var options = this.get( 'options' ),
             select;
-        if ( !NS.isEqual( options, oldOptions ) ) {
+        if ( !isEqual( options, oldOptions ) ) {
             select = this._drawSelect( options );
             layer.replaceChild( select, this._domControl );
             this._domControl = select;
@@ -27324,7 +27718,7 @@ var SelectView = NS.Class({
             l = options.length;
 
         while ( l-- ) {
-            if ( options[l].value === value ) {
+            if ( isEqual( options[l].value, value ) ) {
                 this._domControl.value = l + '';
                 return;
             }
@@ -27383,8 +27777,8 @@ var ListItemView = NS.Class({
         var selection = mixin.selection,
             content = mixin.content;
         if ( selection && content ) {
-            this.isSelected = selection.isIdSelected(
-                content.get( 'id' )
+            this.isSelected = selection.isStoreKeySelected(
+                content.get( 'storeKey' )
             );
         }
         ListItemView.parent.init.call( this, mixin );
@@ -27422,7 +27816,7 @@ NS.ListItemView = ListItemView;
 
 
 // -------------------------------------------------------------------------- \\
-// File: ListKBFocusView.js                                              \\
+// File: ListKBFocusView.js                                                   \\
 // Module: CollectionViews                                                    \\
 // Requires: Core, Foundation, View                                           \\
 // Author: Neil Jenkins                                                       \\
@@ -27494,7 +27888,7 @@ var ListKBFocusView = NS.Class({
 
     // Scroll to centre widget on screen with no animation
     checkInitialScroll: function () {
-        if ( this.get( 'distanceFromVisRect' ) ) {
+        if ( this.get( 'index' ) > -1 && this.get( 'distanceFromVisRect' ) ) {
             this.scrollIntoView( 0, false );
         }
     }.queue( 'after' ),
@@ -27510,14 +27904,14 @@ var ListKBFocusView = NS.Class({
         var scrollView = this.getParent( NS.ScrollView );
         if ( scrollView ) {
             var scrollTop = scrollView.get( 'scrollTop' ),
-                layout = this.get( 'layout' ),
-                top = layout.top,
+                position = this.getPositionRelativeTo( scrollView ),
+                top = position.top,
                 above = top - scrollTop;
 
             if ( above < 0 ) { return above; }
 
             var scrollHeight = scrollView.get( 'pxHeight' ),
-                below = top + layout.height - scrollTop - scrollHeight;
+                below = top + this.get( 'pxHeight' ) - scrollTop - scrollHeight;
 
             if ( below > 0 ) { return below; }
         }
@@ -27528,9 +27922,8 @@ var ListKBFocusView = NS.Class({
         var scrollView = this.getParent( NS.ScrollView );
         if ( scrollView ) {
             var scrollHeight = scrollView.get( 'pxHeight' ),
-                layout = this.get( 'layout' ),
-                itemHeight = layout.height,
-                top = layout.top;
+                itemHeight = this.get( 'pxHeight' ),
+                top = this.getPositionRelativeTo( scrollView ).top;
 
             if ( offset && -1 <= offset && offset <= 1 ) {
                 offset = ( offset * ( scrollHeight - itemHeight ) ) >> 1;
@@ -27578,7 +27971,7 @@ var ListKBFocusView = NS.Class({
         // Check it's next to a loaded record.
         if ( selection && record ) {
             selection.selectIndex( index,
-                !selection.isIdSelected( record.get( 'id' ) ),
+                !selection.isStoreKeySelected( record.get( 'storeKey' ) ),
                 event.shiftKey );
         }
     },
@@ -27639,11 +28032,17 @@ var ListView = NS.Class({
 
         var selection = this.get( 'selection' );
         if ( selection ) {
-            selection.set( 'view', this );
+            selection.addObserverForKey(
+                'selectedStoreKeys', this, 'redrawSelection' );
         }
     },
 
     destroy: function () {
+        var selection = this.get( 'selection' );
+        if ( selection ) {
+            selection.removeObserverForKey(
+                'selectedStoreKeys', this, 'redrawSelection' );
+        }
         if ( this.get( 'isRendered' ) ) {
             var content = this.get( 'content' );
             if ( content ) {
@@ -27807,7 +28206,7 @@ var ListView = NS.Class({
             view = rendered[ id ];
             if ( !newRendered[ id ] ) {
                 isRemoved = removed && ( item = view.get( 'content' ) ) ?
-                    removed[ item.get( 'id' ) ] : false;
+                    removed[ item.get( 'storeKey' ) ] : false;
                 view.detach( isRemoved );
                 this.destroyItemView( view );
             }
@@ -27820,7 +28219,8 @@ var ListView = NS.Class({
             id = item ? NS.guid( item ) : 'null:' + i;
             view = newRendered[ id ];
             if ( !view ) {
-                isAdded = added && item ? added[ item.get( 'id' ) ] : false;
+                isAdded = added && item ?
+                    added[ item.get( 'storeKey' ) ] : false;
                 view = this.createItemView( item, i, list, isAdded );
                 if ( view ) {
                     newRendered[ id ] = view;
@@ -27874,6 +28274,21 @@ var ListView = NS.Class({
         this._removed = null;
         this.propertyDidChange( 'childViews' );
         this.endPropertyChanges();
+    },
+
+    redrawSelection: function () {
+        var selection = this.get( 'selection' ),
+            itemViews = this.get( 'childViews' ),
+            l = itemViews.length,
+            view, storeKey;
+        while ( l-- ) {
+            view = itemViews[l];
+            storeKey = view.getFromPath( 'content.storeKey' );
+            if ( storeKey ) {
+                view.set( 'isSelected',
+                    selection.isStoreKeySelected( storeKey ) );
+            }
+        }
     },
 
     // --- Can't add views by hand; just bound to content ---
@@ -28523,6 +28938,10 @@ var ToolbarView = NS.Class({
         return this._views[ name ];
     },
 
+    getConfig: function ( config ) {
+        return this._configs[ config ] || null;
+    },
+
     // ---
 
     leftConfig: function () {
@@ -28673,7 +29092,9 @@ var ToolbarView = NS.Class({
     },
 
     toolbarNeedsRedraw: function ( self, property, oldValue ) {
-       return this.propertyNeedsRedraw( self, property, oldValue );
+        if ( oldValue ) {
+            this.propertyNeedsRedraw( self, property, oldValue );
+        }
     }.observes( 'left', 'right' ),
 
     redrawLeft: function ( layer, oldViews ) {
@@ -28779,7 +29200,6 @@ var ScrollAnimation = NS.Class({
 var ScrollView = NS.Class({
 
     Extends: NS.View,
-
 
     /**
         Property: O.ScrollView#showScrollbarX
@@ -28922,6 +29342,43 @@ var ScrollView = NS.Class({
     }.property(),
 
     /**
+        Property: O.ScrollView#isAnimating
+        Type: Boolean
+
+        Is the scroll currently animating?
+    */
+    isAnimating: false,
+
+    willAnimate: function () {
+        this.set( 'isAnimating', true );
+    },
+
+    didAnimate: function () {
+        this.set( 'isAnimating', false );
+    },
+
+    /**
+        Method: O.ScrollView#scrollToTop
+
+        Scrolls the view to the top
+    */
+    scrollToTop: function () {
+        return this.scrollTo( 0, 0, true );
+    },
+
+    /**
+        Method: O.ScrollView#scrollToBottom
+
+        Scrolls the view to the bottom
+    */
+    scrollToBottom: function () {
+        return this.scrollTo( 0,
+            this.get( 'scrollLayer' ).scrollHeight - this.get( 'pxHeight' ),
+            true
+        );
+    },
+
+    /**
         Method: O.ScrollView#scrollPage
 
         Scrolls the view down by the view height - 50px.
@@ -29032,7 +29489,7 @@ var ScrollView = NS.Class({
         var scrollAnimation = this.get( 'scrollAnimation' );
         scrollAnimation.stop();
 
-        if ( withAnimation ) {
+        if ( withAnimation && this.get( 'isInDocument' ) ) {
             scrollAnimation.animate({
                 x: x,
                 y: y
@@ -29144,13 +29601,13 @@ if ( NS.UA.isIOS ) {
             }
 
             // Trick 2: Never leave the scroll view at the ends.
-            // As Trick 1 doesn't work in Safari on iOS8, we have to use a more
-            // crude method: ensure the scrollHeight is at least pxHeight + 2,
-            // then make sure scrollTop is never at the absolute end, so there
-            // is always room to scroll in both directions. We add a 1px tall
-            // empty div at the top of the content so at scrollTop=1px, it
-            // looks like it should.
-            if ( safariVersion >= 8 ) {
+            // As Trick 1 doesn't work in Safari on iOS8, or any other WKWebView
+            // based browser. We have to use a more crude method: ensure the
+            // scrollHeight is at least pxHeight + 2, then make sure scrollTop
+            // is never at the absolute end, so there is always room to scroll
+            // in both directions. We add a 1px tall empty div at the top of
+            // the content so at scrollTop=1px, it looks like it should.
+            if ( NS.UA.isWKWebView ) {
                 scrollFixerHeight = 2;
                 layer.appendChild(
                     el( 'div', { style: 'height:1px' } )
@@ -29210,7 +29667,7 @@ if ( NS.UA.isIOS ) {
                         relativeTo = relativeTo.firstChild;
                         where = 'after';
                     }
-                } else if ( where === 'bottom' ) {
+                } else if ( !where || where === 'bottom' ) {
                     if ( this.get( 'isFixedDimensions' ) ) {
                         relativeTo = relativeTo.lastChild;
                         where = 'before';
@@ -29379,6 +29836,7 @@ NS.SplitViewController = SplitViewController;
 ( function ( NS ) {
 
 var VERTICAL = NS.SplitViewController.VERTICAL;
+var TOP_LEFT = NS.SplitViewController.TOP_LEFT;
 
 /**
     Class: O.SplitDividerView
@@ -29474,7 +29932,7 @@ var SplitDividerView = NS.Class({
         (top/left/bottom/right).
     */
     anchor: function () {
-        var flexTL = this.get( 'flex' ) === NS.SplitViewController.TOP_LEFT,
+        var flexTL = this.get( 'flex' ) === TOP_LEFT,
             isVertical = this.get( 'direction' ) === VERTICAL;
         return isVertical ?
             ( flexTL ? 'right' : 'left' ) : ( flexTL ? 'bottom' : 'top' );
@@ -29539,9 +29997,13 @@ var SplitDividerView = NS.Class({
     dragMoved: function ( drag ) {
         var dir = this._dir,
             delta = drag.get( 'cursorPosition' )[ dir ] -
-                drag.get( 'startPosition' )[ dir ];
-        this.set( 'offset', ( this._offset + delta ).limit(
-            this.get( 'min' ), this.get( 'max' ) ) );
+                drag.get( 'startPosition' )[ dir ],
+            sign = this.get( 'flex' ) === TOP_LEFT ? -1 : 1;
+
+        this.set( 'offset',
+            ( this._offset + ( sign * delta ) )
+                .limit( this.get( 'min' ), this.get( 'max' ) )
+        );
     }
 });
 

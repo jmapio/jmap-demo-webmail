@@ -146,7 +146,7 @@ var MailboxItemView = O.Class({
             inMailboxes = this.getFromPath( 'list.filter.inMailboxes' );
             isInTrash = this.isInTrash = inMailboxes &&
                 inMailboxes.length === 1 &&
-                inMailboxes[0] === JMAP.mail.systemMailboxIds.get( 'trash' );
+                inMailboxes[0] === JMAP.mail.getMailboxIdForRole( 'trash' );
             this.set( 'isUnread', isInTrash ?
                     thread.get( 'isUnreadInTrash' ) :
                     thread.get( 'isUnread' )
@@ -266,7 +266,7 @@ var MailboxItemView = O.Class({
             );
         } else {
             App.state.selection
-                .selectAll( false )
+                .selectNone()
                 .selectIndex( index, true, false );
             App.state.selectedMessage
                 .set( 'index', index );
@@ -280,13 +280,13 @@ var MailboxItemView = O.Class({
         var message = this.get( 'content' );
         if ( message && message.is( READY ) ) {
             // Set drag image
-            var selection = App.state.selection,
-                id = message.get( 'id' ),
-                count = selection.isIdSelected( id ) ?
-                    selection.get( 'length' ) : 1,
-                el = O.Element.create;
+            var selection = App.state.selection;
+            var storeKey = message.get( 'storeKey' );
+            var count = selection.isStoreKeySelected( storeKey ) ?
+                    selection.get( 'length' ) : 1;
+            var el = O.Element.create;
 
-            drag._draggedId = id;
+            drag._draggedStoreKey = id;
             drag.set( 'dragImage', el( 'div.v-MailboxItem-drag', [
                 O.i18n.localise(
                     '[*2,_1,1 conversation,%n conversations]', count )
@@ -298,14 +298,14 @@ var MailboxItemView = O.Class({
 
     // --- DragDataSource ---
 
-    dragDataTypes: [ 'MessageIds' ],
+    dragDataTypes: [ 'MessageStoreKeys' ],
 
     getDragDataOfType: function ( type, drag ) {
-        var id = drag._draggedId,
-            selection = App.state.selection;
-        if ( id && type === 'MessageIds' ) {
-            return selection.isIdSelected( id ) ?
-                selection.get( 'selectedIds' ) : [ id ];
+        var storeKey = drag._draggedStoreKey;
+        var selection = App.state.selection;
+        if ( storeKey && type === 'MessageStoreKeys' ) {
+            return selection.isStoreKeySelected( storeKey ) ?
+                selection.get( 'selectedStoreKeys' ) : [ storeKey ];
         }
     }
 });

@@ -6,17 +6,82 @@
 // License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, App, JMAP */
+/*global O, App, JMAP, JSON */
 
 "use strict";
 
 O.RunLoop.invoke( function () {
 
-// ==== State ====
+var Status = O.Status;
+var LOADING = Status.LOADING;
+var EMPTY_OR_OBSOLETE = Status.EMPTY | Status.OBSOLETE;
 
-var Status = O.Status,
-    LOADING = Status.LOADING,
-    EMPTY_OR_OBSOLETE = Status.EMPTY | Status.OBSOLETE;
+var store = JMAP.store;
+var MessageList = JMAP.MessageList;
+var Mailbox = JMAP.Mailbox;
+var Thread = JMAP.Thread;
+var Message = JMAP.Message;
+
+// ---
+
+var byMailSourceOrder = function ( a, b ) {
+    if ( a === b ) {
+        return 0;
+    }
+    if ( a.get( 'parent' ) !== b.get( 'parent' ) ) {
+        var aParents = [a];
+        var bParents = [b];
+        var parent = a;
+        var al, bl;
+
+        while ( parent = parent.get( 'parent' ) ) {
+            if ( parent === b ) {
+                return 1;
+            }
+            aParents.push( parent );
+        }
+        parent = b;
+        while ( parent = parent.get( 'parent' ) ) {
+            if ( parent === a ) {
+                return -1;
+            }
+            bParents.push( parent );
+        }
+
+        al = aParents.length;
+        bl = bParents.length;
+        while ( al-- && bl-- ) {
+            if ( ( a = aParents[ al ] ) !== ( b = bParents[ bl ] ) ) {
+                break;
+            }
+        }
+    }
+    return ( a.get( 'sortOrder' ) - b.get( 'sortOrder' ) ) ||
+        O.i18n.compare( a.get( 'displayName' ), b.get( 'displayName' ) ) ||
+        ( a.get( 'id' ) < b.get( 'id' ) ? -1 : 1 );
+};
+
+var rootMailboxes = store.getQuery( 'rootMailboxes', O.LiveQuery, {
+    Type: Mailbox,
+    filter: function ( data ) {
+        return !data.parentId;
+    },
+    sort: [ 'sortOrder', 'name' ]
+});
+
+var allMailboxes = new O.ObservableArray( null, {
+    content: store.getQuery( 'allMailboxes', O.LiveQuery, {
+        Type: Mailbox
+    }),
+    contentDidChange: function () {
+        var mailboxes = this.get( 'content' ).get( '[]' );
+        mailboxes.sort( byMailSourceOrder );
+        return this.set( '[]', mailboxes );
+    }
+}).contentDidChange();
+store.on( Mailbox, allMailboxes, 'contentDidChange' );
+
+// ---
 
 App.state = new O.Router({
 
@@ -28,7 +93,7 @@ App.state = new O.Router({
         {
             url: /^(.+)$/,
             handle: function ( _, messageId ) {
-                this.selection.selectAll( false );
+                this.selection.selectNone();
                 this.beginPropertyChanges()
                     .set( 'messageId', messageId )
                     .endPropertyChanges();
@@ -38,7 +103,7 @@ App.state = new O.Router({
         {
             url: /.*/,
             handle: function () {
-                this.selection.selectAll( false );
+                this.selection.selectNone();
                 this.beginPropertyChanges()
                     .set( 'messageId', '' )
                     .endPropertyChanges();
@@ -52,13 +117,13 @@ App.state = new O.Router({
 
     // ---
 
-    mailboxId: O.bind( JMAP.mail.systemMailboxIds, 'inbox' ),
+    mailboxId: '',
     threadId: '',
     messageId: '',
 
     mailbox: function () {
         var id = this.get( 'mailboxId' );
-        return id ? JMAP.store.getRecord( JMAP.Mailbox, id ) : null;
+        return id ? store.getRecord( Mailbox, id ) : null;
     }.property( 'mailboxId' ),
 
     mailboxMessageList: function () {
@@ -71,8 +136,8 @@ App.state = new O.Router({
             sort: [ 'date desc' ],
             collapseThreads: true
         };
-        var id = JMAP.MessageList.getId( args );
-        return JMAP.store.getQuery( id, JMAP.MessageList, args );
+        var id = MessageList.getId( args );
+        return store.getQuery( id, MessageList, args );
     }.property( 'mailboxId' ),
 
     mailboxMessageListStatusDidChange: function ( _, __, ___, status ) {
@@ -84,7 +149,7 @@ App.state = new O.Router({
 
     thread: function () {
         var id = this.get( 'threadId' );
-        return id ? JMAP.store.getRecord( JMAP.Thread, id ) : null;
+        return id ? store.getRecord( Thread, id ) : null;
     }.property( 'threadId' ),
 
     threadStatusDidChange: function ( thread, __, ___, status ) {
@@ -98,7 +163,7 @@ App.state = new O.Router({
     threadMessageList: function () {
         var threadId = this.get( 'threadId' );
         return threadId ?
-            JMAP.store.getRecord( JMAP.Thread, threadId ).get( 'messages' ) :
+            store.getRecord( Thread, threadId ).get( 'messages' ) :
             null;
     }.property( 'threadId' ),
 
@@ -145,10 +210,15 @@ App.state = new O.Router({
         if ( list ) {
             list.refresh( true );
         }
-        JMAP.store.fetchAll( JMAP.Mailbox, true )
-                  .fetchAll( JMAP.Message, true )
-                  .fetchAll( JMAP.Thread, true );
+        store.fetchAll( Mailbox, true )
+             .fetchAll( Message, true )
+             .fetchAll( Thread, true );
     },
+
+    // --- Queries ---
+
+    allMailboxes: allMailboxes,
+    rootMailboxes: rootMailboxes,
 
     // --- Title ---
 
@@ -176,13 +246,20 @@ App.state = new O.Router({
     })
 });
 
+rootMailboxes.addObserverForKey( '[]', {
+    go: function ( rootMailboxes, key ) {
+        rootMailboxes.removeObserverForKey( key, this, 'go' );
+        App.state.set( 'mailboxId', JMAP.mail.getMailboxIdForRole( 'inbox' ) );
+    }
+}, 'go' );
+
 App.state.selectedMessage = new O.SingleSelectionController({
     content: O.bind( App.state, 'mailboxMessageList' ),
     record: O.bindTwoWay( App.state, 'messageId',
     function ( value, syncForward ) {
         return syncForward ?
             value ?
-                JMAP.store.getRecord( JMAP.Message, value ) :
+                store.getRecord( Message, value ) :
                 null :
             value ?
                 value.get( 'id' ) :
@@ -201,11 +278,12 @@ App.state.selectedMessage = new O.SingleSelectionController({
 
     setSelection: function () {
         var record = this.get( 'record' );
+        var selection = App.state.selection;
         if ( record &&
-                !App.state.selection.isIdSelected( record.get( 'id' ) ) ) {
-            App.state.selection
-                .selectAll( false )
-                .selectIds( [ record.get( 'id' ) ], true );
+                !selection.isStoreKeySelected( record.get( 'storeKey' ) ) ) {
+            selection
+                .selectNone()
+                .selectStoreKeys( [ record.get( 'storeKey' ) ], true );
         }
     }.queue( 'before' ).observes( 'record', 'content' ),
 
@@ -268,7 +346,10 @@ App.kbshortcuts
 // --- Temp hack to talk to proxy without implementing proper auth ---
 
 var userPath = ( /k=([0-9a-f\-]+)/.exec( location.href ) || [ '', '' ] )[1];
-JMAP.auth.didAuthenticate( '', '', {
+
+JMAP.auth.didAuthenticate({
+    username:       'user@example.com',
+    accessToken:    'password',
     apiUrl:         '/jmap/'   + userPath,
     eventSourceUrl: '/events/' + userPath,
     uploadUrl:      '/upload/' + userPath,
@@ -300,7 +381,7 @@ App.push = new O.EventSource({
         for ( accountId in changed ) {
             accountState = changed[ accountId ];
             for ( type in accountState ) {
-                JMAP.store.sourceStateDidChange(
+                store.sourceStateDidChange(
                     JMAP[ type ], accountState[ type ] );
             }
         }

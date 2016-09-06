@@ -34,7 +34,7 @@ Date.prototype.toJSON = function () {
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-var JMAP = {};
+this.JMAP = {};
 
 
 // -------------------------------------------------------------------------- \\
@@ -45,7 +45,7 @@ var JMAP = {};
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP */
+/*global O, JMAP, JSON */
 
 ( function ( JMAP ) {
 
@@ -74,13 +74,13 @@ JMAP.auth = new O.Object({
 
     // ---
 
-    didAuthenticate: function ( username, accessToken, urls ) {
-        for ( var service in urls ) {
-            this.set( service, urls[ service ] );
+    didAuthenticate: function ( data ) {
+        for ( var property in data ) {
+            if ( property in this && typeof this[ property ] !== 'function' ) {
+                this.set( property, data[ property ] );
+            }
         }
-        this.set( 'username', username )
-            .set( 'accessToken', accessToken )
-            .set( 'isAuthenticated', true );
+        this.set( 'isAuthenticated', !!data.accessToken );
 
         this._awaitingAuthentication.forEach( function ( connection ) {
             connection.send();
@@ -105,21 +105,11 @@ JMAP.auth = new O.Object({
                 'Authorization': this.get( 'accessToken' )
             },
             success: function ( event ) {
-                var urls, service;
-                try {
-                    urls = JSON.parse( event.data );
-                }
-                catch ( error ) {}
-
-                if ( urls ) {
-                    for ( service in urls ) {
-                        this.set( service + 'Url', urls[ service ] );
-                    }
-                }
+                auth.didAuthenticate( JSON.parse( event.data ) );
             }.on( 'io:success' ),
             failure: function ( event ) {
                 switch ( event.status ) {
-                case 401: // Unauthorized
+                case 403: // Unauthorized
                     auth.didLoseAuthentication();
                     break;
                 case 404: // Not Found
@@ -171,8 +161,23 @@ JMAP.auth = new O.Object({
         return false;
     },
 
+    connectionSucceeded: function () {
+        if ( this.get( 'isDisconnected' ) ) {
+            this._timeToWait = 1;
+            this.set( 'isDisconnected', false );
+        }
+    },
+
     connectionFailed: function ( connection, timeToWait ) {
-        this._failedConnections.include( connection );
+        if ( this.get( 'isAuthenticated' ) ) {
+            this._failedConnections.include( connection );
+            this.retryIn( timeToWait );
+        } else {
+            this._awaitingAuthentication.include( connection );
+        }
+    },
+
+    retryIn: function ( timeToWait ) {
         // If we're not already ticking down...
         if ( !this.get( 'timeToReconnect' ) ) {
             // Is this a reconnection attempt already? Exponentially back off.
@@ -187,13 +192,6 @@ JMAP.auth = new O.Object({
             this._timer =
                 O.RunLoop.invokePeriodically( this._tick, 1000, this );
             this._tick();
-        }
-    },
-
-    connectionSucceeded: function () {
-        if ( this.get( 'isDisconnected' ) ) {
-            this._timeToWait = 1;
-            this.set( 'isDisconnected', false );
         }
     },
 
@@ -228,7 +226,7 @@ JMAP.auth = new O.Object({
 // License: © 2010-2014 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP, console, alert */
+/*global O, JMAP, JSON, console, alert */
 
 ( function ( JMAP ) {
 
@@ -246,6 +244,21 @@ var delta = function ( update ) {
 
 var toPrimaryKey = function ( primaryKey, record ) {
     return record[ primaryKey ];
+};
+
+var makeSetRequest = function ( change ) {
+    var create = change.create;
+    var update = change.update;
+    var destroy = change.destroy;
+    return {
+        create: Object.zip( create.storeKeys, create.records ),
+        update: Object.zip(
+            update.records.map(
+                toPrimaryKey.bind( null, change.primaryKey )
+            ), delta( update )
+        ),
+        destroy: destroy.ids
+    };
 };
 
 var handleProps = {
@@ -873,16 +886,7 @@ var Connection = O.Class({
             destroy = change.destroy;
             if ( handler ) {
                 if ( typeof handler === 'string' ) {
-                    this.callMethod( handler, {
-                        state: change.state,
-                        create: Object.zip( create.storeKeys, create.records ),
-                        update: Object.zip(
-                            update.records.map(
-                                toPrimaryKey.bind( null, change.primaryKey )
-                            ), delta( update )
-                        ),
-                        destroy: destroy.ids
-                    });
+                    this.callMethod( handler, makeSetRequest( change ) );
                 } else {
                     handler.call( this, change );
                 }
@@ -1197,6 +1201,8 @@ var Connection = O.Class({
             // TODO: refetch accounts list and clear out any calendar data
         }
     }
+}).extend({
+    makeSetRequest: makeSetRequest
 });
 
 JMAP.Connection = Connection;
@@ -1469,6 +1475,7 @@ var Sequence = O.Class({
                 this.afterwards( index, length );
             }
         }
+        return this;
     },
 
     cancel: function () {
@@ -1477,7 +1484,9 @@ var Sequence = O.Class({
         if ( index < length ) {
             this.set( 'length', 0 );
             this.afterwards( index, length );
+            this.fire( 'cancel' );
         }
+        return this;
     },
 
     progress: function () {
@@ -1535,6 +1544,46 @@ var Calendar = O.Class({
         defaultValue: true
     }),
 
+    cascadeChange: function ( _, key, oldValue, newValue ) {
+        var store = this.get( 'store' ),
+            calendarId = this.get( 'id' ),
+            property = 'calendar-' + key;
+        if ( !store.isNested ) {
+            store.getAll( JMAP.CalendarEvent, function ( data ) {
+                return data.calendarId === calendarId;
+            }).forEach( function ( event ) {
+                if ( event.get( 'recurrenceRule' ) ||
+                        event.get( 'recurrenceOverrides' ) ) {
+                    var cache = event._ocache;
+                    var id;
+                    for ( id in cache ) {
+                        cache[ id ].propertyDidChange(
+                            property, oldValue, newValue );
+                    }
+                } else {
+                    event.propertyDidChange( property, oldValue, newValue );
+                }
+            });
+        }
+    }.observes( 'name', 'color' ),
+
+    calendarWasDestroyed: function () {
+        if ( this.get( 'status' ) === O.Status.DESTROYED ) {
+            var store = this.get( 'store' );
+            var calendarStoreKey = this.get( 'storeKey' );
+            if ( !store.isNested ) {
+                store.findAll( JMAP.CalendarEvent, function ( data ) {
+                    return data.calendarId === calendarStoreKey;
+                }).forEach( function ( storeKey ) {
+                    store.setStatus( storeKey, O.Status.DESTROYED )
+                         .unloadRecord( storeKey );
+                });
+            }
+        }
+    }.observes( 'status' ),
+
+    // ---
+
     mayReadFreeBusy: attr( Boolean, {
         defaultValue: true
     }),
@@ -1569,49 +1618,7 @@ var Calendar = O.Class({
                 this.get( 'mayRemoveItems' );
         }
         return mayWrite;
-    }.property( 'mayAddItems', 'mayModifyItems', 'mayRemoveItems' ),
-
-    cascadeChange: function ( _, key, oldValue, newValue ) {
-        var store = this.get( 'store' ),
-            calendarId = this.get( 'id' ),
-            property = 'calendar-' + key;
-        if ( !store.isNested ) {
-            store.getAll( JMAP.CalendarEvent, function ( data ) {
-                return data.calendarId === calendarId;
-            }).forEach( function ( event ) {
-                if ( event.get( 'recurrence' ) ) {
-                    var cache = event._ocache,
-                        id;
-                    for ( id in cache ) {
-                        cache[ id ].propertyDidChange(
-                            property, oldValue, newValue );
-                    }
-                } else {
-                    event.propertyDidChange( property, oldValue, newValue );
-                }
-            });
-        }
-    }.observes( 'color', 'name' ),
-
-    calendarWasDestroyed: function () {
-        if ( this.get( 'status' ) === O.Status.DESTROYED ) {
-            var store = this.get( 'store' ),
-                calendarId = this.get( 'id' ),
-                eventIds = [];
-            if ( !store.isNested ) {
-                store.findAll( JMAP.CalendarEvent, function ( data ) {
-                    if ( data.calendarId === calendarId ) {
-                        eventIds.push( data.id );
-                    }
-                    return false;
-                });
-                if ( eventIds.length ) {
-                    store.sourceDidDestroyRecords(
-                        JMAP.CalendarEvent, eventIds );
-                }
-            }
-        }
-    }.observes( 'status' )
+    }.property( 'mayAddItems', 'mayModifyItems', 'mayRemoveItems' )
 });
 
 JMAP.calendar.handle( Calendar, {
@@ -1642,6 +1649,1822 @@ JMAP.calendar.handle( Calendar, {
 });
 
 JMAP.Calendar = Calendar;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: Duration.js                                                          \\
+// Module: CalendarModel                                                      \\
+// Author: Neil Jenkins                                                       \\
+// License: © 2010-2016 FastMail Pty Ltd. MIT Licensed.                       \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+( function ( JMAP ) {
+
+var durationFormat = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+
+var Duration = O.Class({
+    init: function ( durationInMS ) {
+        this._durationInMS = durationInMS;
+    },
+
+    valueOf: function () {
+        return this._durationInMS;
+    },
+
+    toJSON: function () {
+        var output = 'P';
+        var durationInMS = this._durationInMS;
+        var quantity;
+
+        // Days. Also encompasses 0 duration. (P0D).
+        if ( !durationInMS || durationInMS > 24 * 60 * 60 * 1000 ) {
+            quantity = Math.floor( durationInMS / ( 24 * 60 * 60 * 1000 ) );
+            output += quantity;
+            output += 'D';
+            durationInMS -= quantity * 24 * 60 * 60 * 1000;
+        }
+
+        if ( durationInMS ) {
+            output += 'T';
+            switch ( true ) {
+            // Hours
+            case durationInMS > 60 * 60 * 1000:
+                quantity = Math.floor( durationInMS / ( 60 * 60 * 1000 ) );
+                output += quantity;
+                output += 'H';
+                durationInMS -= quantity * 60 * 60 * 1000;
+                /* falls through */
+            // Minutes
+            case durationInMS > 60 * 1000:
+                quantity = Math.floor( durationInMS / ( 60 * 1000 ) );
+                output += quantity;
+                output += 'M';
+                durationInMS -= quantity * 60 * 1000;
+                /* falls through */
+            // Seconds
+            default:
+                quantity = Math.floor( durationInMS / 1000 );
+                output += quantity;
+                output += 'S';
+            }
+        }
+
+        return output;
+    }
+}).extend({
+    isEqual: function ( a, b ) {
+        return a._durationInMS === b._durationInMS;
+    },
+
+    fromJSON: function ( value ) {
+        var results = value ? durationFormat.exec( value ) : null;
+        var durationInMS = 0;
+        if ( results ) {
+            durationInMS += ( +results[1] || 0 ) * 24 * 60 * 60 * 1000;
+            durationInMS += ( +results[2] || 0 ) * 60 * 60 * 1000;
+            durationInMS += ( +results[3] || 0 ) * 60 * 1000;
+            durationInMS += ( +results[4] || 0 ) * 1000;
+        }
+        return new Duration( durationInMS );
+    }
+});
+
+Duration.ZERO = new Duration( 0 );
+Duration.AN_HOUR = new Duration( 60 * 60 * 1000 );
+Duration.A_DAY = new Duration( 24 * 60 * 60 * 1000 );
+
+JMAP.Duration = Duration;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: RecurrenceRule.js                                                    \\
+// Module: CalendarModel                                                      \\
+// Author: Neil Jenkins                                                       \\
+// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+( function ( JMAP ) {
+
+// --- Filtering ---
+
+var none = 1 << 15;
+
+var getMonth = function ( date, results ) {
+    results[0] = date.getUTCMonth();
+    results[1] = none;
+    results[2] = none;
+};
+var getDate = function ( date, results, total ) {
+    var daysInMonth = total || Date.getDaysInMonth(
+            date.getUTCMonth(), date.getUTCFullYear() ) + 1;
+    results[0] = date.getUTCDate();
+    results[1] = results[0] - daysInMonth;
+    results[2] = none;
+};
+var getDay = function ( date, results ) {
+    results[0] = date.getUTCDay();
+    results[1] = none;
+    results[2] = none;
+};
+var getDayMonthly = function ( date, results, total ) {
+    var day = date.getUTCDay(),
+        monthDate = date.getUTCDate(),
+        occurrence = Math.floor( ( monthDate - 1 ) / 7 ) + 1,
+        daysInMonth = total || Date.getDaysInMonth(
+            date.getUTCMonth(), date.getUTCFullYear() ),
+        occurrencesInMonth = occurrence +
+            Math.floor( ( daysInMonth - monthDate ) / 7 );
+    results[0] = day;
+    results[1] = day + ( 7 * occurrence );
+    results[2] = day + ( 7 * ( occurrence - occurrencesInMonth - 1 ) );
+};
+var getDayYearly = function ( date, results, daysInYear ) {
+    var day = date.getUTCDay(),
+        dayOfYear = date.getDayOfYear( true ),
+        occurrence = Math.floor( ( dayOfYear - 1 ) / 7 ) + 1,
+        occurrencesInYear = occurrence +
+            Math.floor( ( daysInYear - dayOfYear ) / 7 );
+    results[0] = day;
+    results[1] = day + ( 7 * occurrence );
+    results[2] = day + ( 7 * ( occurrence - occurrencesInYear - 1 ) );
+};
+var getYearDay = function ( date, results, total ) {
+    results[0] = date.getDayOfYear( true );
+    results[1] = results[0] - total;
+    results[2] = none;
+};
+var getWeekNo = function ( firstDayOfWeek, date, results, total ) {
+    results[0] = date.getISOWeekNumber( firstDayOfWeek, true );
+    results[1] = results[0] - total;
+    results[2] = none;
+};
+var getPosition = function ( date, results, total, index ) {
+    results[0] = index + 1;
+    results[1] = index - total;
+    results[2] = none;
+};
+
+var filter = function ( array, getValues, allowedValues, total ) {
+    var l = array.length,
+        results = [ none, none, none ],
+        date, i, ll, a, b, c, allowed;
+    ll = allowedValues.length;
+    outer: while ( l-- ) {
+        date = array[l];
+        if ( date ) {
+            getValues( date, results, total, l );
+            a = results[0];
+            b = results[1];
+            c = results[2];
+            for ( i = 0; i < ll; i += 1 ) {
+                allowed = allowedValues[i];
+                if ( allowed === a || allowed === b || allowed === c ) {
+                    continue outer;
+                }
+            }
+            array[l] = null;
+        }
+    }
+};
+var expand = function ( array, property, values ) {
+    var l = array.length, ll = values.length,
+        i, j, k = 0,
+        results = new Array( l * ll ),
+        candidate, newCandidate;
+    for ( i = 0; i < l; i += 1 ) {
+        candidate = array[i];
+        for ( j = 0; j < ll; j += 1 ) {
+            if ( candidate ) {
+                newCandidate = new Date( candidate );
+                newCandidate[ property ]( values[j] );
+            } else {
+                newCandidate = null;
+            }
+            results[ k ] = newCandidate;
+            k += 1;
+        }
+    }
+    return results;
+};
+
+var toBoolean = O.Transform.toBoolean;
+
+// ---
+
+var YEARLY = 1;
+var MONTHLY = 2;
+var WEEKLY = 3;
+var DAILY = 4;
+var HOURLY = 5;
+var MINUTELY = 6;
+var SECONDLY = 7;
+
+var frequencyNumbers = {
+    yearly: YEARLY,
+    monthly: MONTHLY,
+    weekly: WEEKLY,
+    daily: DAILY,
+    hourly: HOURLY,
+    minutely: MINUTELY,
+    secondly: SECONDLY
+};
+
+var dayToNumber = {
+    monday: 1,
+    tuesday: 2,
+    wednesday: 3,
+    thursday: 4,
+    friday: 5,
+    saturday: 6,
+    sunday: 0
+};
+
+var numberToDay = [
+    'sunday',
+    'monday',
+    'tuesday',
+    'wednesday',
+    'thursday',
+    'friday',
+    'saturday'
+];
+
+// ---
+
+var RecurrenceRule = O.Class({
+
+    init: function ( json ) {
+        this.frequency = frequencyNumbers[ json.frequency ] || DAILY;
+        this.interval = json.interval || 1;
+
+        var firstDayOfWeek = dayToNumber[ json.firstDayOfWeek ];
+        this.firstDayOfWeek =
+            0 <= firstDayOfWeek && firstDayOfWeek < 7 ? firstDayOfWeek : 1;
+        // Convert { day: "monday", nthOfPeriod: -1 } to -6 etc.
+        this.byDay = json.byDay ? json.byDay.map( function ( nDay ) {
+            return dayToNumber[ nDay.day ] + 7 * ( nDay.nthOfPeriod || 0 );
+        }) : null;
+        this.byDate = json.byDate || null;
+        // Convert "1" (Jan), "2" (Feb) etc. to 0 (Jan), 1 (Feb)
+        this.byMonth = json.byMonth ? json.byMonth.map( function ( month ) {
+            return parseInt( month, 10 ) - 1;
+        }) : null;
+        this.byYearDay = json.byYearDay || null;
+        this.byWeekNo = json.byWeekNo || null;
+
+        this.byHour = json.byHour || null;
+        this.byMinute = json.byMinute || null;
+        this.bySecond = json.bySecond || null;
+
+        this.bySetPosition = json.bySetPosition || null;
+
+        this.until = json.until ? Date.fromJSON( json.until ) : null;
+        this.count = json.count || null;
+
+        this._isComplexAnchor = false;
+    },
+
+    toJSON: function () {
+        var result = {};
+        var key, value;
+        for ( key in this ) {
+            if ( key.charAt( 0 ) === '_' || !this.hasOwnProperty( key ) ) {
+                continue;
+            }
+            value = this[ key ];
+            if ( value === null ) {
+                continue;
+            }
+            switch ( key ) {
+            case 'frequency':
+                value = Object.keyOf( frequencyNumbers, value );
+                break;
+            case 'interval':
+                if ( value === 1 ) {
+                    continue;
+                }
+                break;
+            case 'firstDayOfWeek':
+                if ( value === 1 ) {
+                    continue;
+                }
+                value = numberToDay[ value ];
+                break;
+            case 'byDay':
+                /* jshint ignore:start */
+                value = value.map( function ( day ) {
+                    return 0 <= day && day < 7 ? {
+                        day: numberToDay[ day ]
+                    } : {
+                        day: numberToDay[ day.mod( 7 ) ],
+                        nthOfPeriod: Math.floor( day / 7 )
+                    };
+                });
+                break;
+            case 'byMonth':
+                value = value.map( function ( month ) {
+                    return ( month + 1 ) + '';
+                });
+                /* jshint ignore:end */
+                break;
+            case 'until':
+                value = value.toJSON();
+                break;
+            }
+            result[ key ] = value;
+        }
+        return result;
+    },
+
+    // Returns the next set of dates revolving around the interval defined by
+    // the fromDate. This may include dates *before* the from date.
+    iterate: function ( fromDate, startDate ) {
+        var frequency = this.frequency,
+            interval = this.interval,
+
+            firstDayOfWeek = this.firstDayOfWeek,
+
+            byDay = this.byDay,
+            byDate = this.byDate,
+            byMonth = this.byMonth,
+            byYearDay = this.byYearDay,
+            byWeekNo = this.byWeekNo,
+
+            byHour = this.byHour,
+            byMinute = this.byMinute,
+            bySecond = this.bySecond,
+
+            bySetPosition = this.bySetPosition,
+
+            candidates = [],
+            maxAttempts =
+                ( frequency === YEARLY ) ? 10 :
+                ( frequency === MONTHLY ) ? 24 :
+                ( frequency === WEEKLY ) ? 53 :
+                ( frequency === DAILY ) ? 366 :
+                ( frequency === HOURLY ) ? 48 :
+                /* MINUTELY || SECONDLY */ 120,
+            useFastPath, i, daysInMonth, offset, candidate, lastDayInYear,
+            weeksInYear, year, month, date, hour, minute, second;
+
+        // Check it's sane.
+        if ( interval < 1 ) {
+            throw new Error( 'RecurrenceRule: Cannot have interval < 1' );
+        }
+
+        // Ignore illegal restrictions:
+        if ( frequency !== YEARLY ) {
+            byWeekNo = null;
+        }
+        switch ( frequency ) {
+            case WEEKLY:
+                byDate = null;
+                /* falls through */
+            case DAILY:
+            case MONTHLY:
+                byYearDay = null;
+                break;
+        }
+
+        // Only fill-in-the-blanks cases not handled by the fast path.
+        if ( frequency === YEARLY ) {
+            if ( byDate && !byMonth && !byDay && !byYearDay && !byWeekNo ) {
+                if ( byDate.length === 1 &&
+                        byDate[0] === fromDate.getUTCDate() ) {
+                    byDate = null;
+                } else {
+                    byMonth = [ fromDate.getUTCMonth() ];
+                }
+            }
+            if ( byMonth && !byDate && !byDay && !byYearDay && !byWeekNo ) {
+                byDate = [ fromDate.getUTCDate() ];
+            }
+        }
+        if ( frequency === MONTHLY && byMonth && !byDate && !byDay ) {
+            byDate = [ fromDate.getUTCDate() ];
+        }
+        if ( frequency === WEEKLY && byMonth && !byDay ) {
+            byDay = [ fromDate.getUTCDay() ];
+        }
+
+        // Deal with monthly/yearly repetitions where the anchor may not exist
+        // in some cycles. Must not use fast path.
+        if ( this._isComplexAnchor &&
+                !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo ) {
+            byDate = [ startDate.getUTCDate() ];
+            if ( frequency === YEARLY ) {
+                byMonth = [ startDate.getUTCMonth() ];
+            }
+        }
+
+        useFastPath = !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo;
+        switch ( frequency ) {
+            case SECONDLY:
+                useFastPath = useFastPath && !bySecond;
+                /* falls through */
+            case MINUTELY:
+                useFastPath = useFastPath && !byMinute;
+                /* falls through */
+            case HOURLY:
+                useFastPath = useFastPath && !byHour;
+                break;
+        }
+
+        // It's possible to write rules which don't actually match anything.
+        // Limit the maximum number of cycles we are willing to pass through
+        // looking for a new candidate.
+        while ( maxAttempts-- ) {
+            year = fromDate.getUTCFullYear();
+            month = fromDate.getUTCMonth();
+            date = fromDate.getUTCDate();
+            hour = fromDate.getUTCHours();
+            minute = fromDate.getUTCMinutes();
+            second = fromDate.getUTCSeconds();
+
+            // Fast path
+            if ( useFastPath ) {
+                candidates.push( fromDate );
+            } else {
+                // 1. Build set of candidates.
+                switch ( frequency ) {
+                // We do the filtering of bySecond/byMinute/byHour in the
+                // candidate generation phase for SECONDLY, MINUTELY and HOURLY
+                // frequencies.
+                case SECONDLY:
+                    if ( bySecond && bySecond.indexOf( second ) < 0 ) {
+                        break;
+                    }
+                    /* falls through */
+                case MINUTELY:
+                    if ( byMinute && byMinute.indexOf( minute ) < 0 ) {
+                        break;
+                    }
+                    /* falls through */
+                case HOURLY:
+                    if ( byHour && byHour.indexOf( hour ) < 0 ) {
+                        break;
+                    }
+                    lastDayInYear = new Date( Date.UTC(
+                        year, 11, 31, hour, minute, second
+                    ));
+                    /* falls through */
+                case DAILY:
+                    candidates.push( new Date( Date.UTC(
+                        year, month, date, hour, minute, second
+                    )));
+                    break;
+                case WEEKLY:
+                    offset = ( fromDate.getUTCDay() - firstDayOfWeek ).mod( 7 );
+                    for ( i = 0; i < 7; i += 1 ) {
+                        candidates.push( new Date( Date.UTC(
+                            year, month, date - offset + i, hour, minute, second
+                        )));
+                    }
+                    break;
+                case MONTHLY:
+                    daysInMonth = Date.getDaysInMonth( month, year );
+                    for ( i = 1; i <= daysInMonth; i += 1 ) {
+                        candidates.push( new Date( Date.UTC(
+                            year, month, i, hour, minute, second
+                        )));
+                    }
+                    break;
+                case YEARLY:
+                    candidate = new Date( Date.UTC(
+                        year, 0, 1, hour, minute, second
+                    ));
+                    lastDayInYear = new Date( Date.UTC(
+                        year, 11, 31, hour, minute, second
+                    ));
+                    while ( candidate <= lastDayInYear ) {
+                        candidates.push( candidate );
+                        candidate = new Date( +candidate + 86400000 );
+                    }
+                    break;
+                }
+
+                // 2. Apply restrictions and expansions
+                if ( byMonth ) {
+                    filter( candidates, getMonth, byMonth );
+                }
+                if ( byDate ) {
+                    filter( candidates, getDate, byDate,
+                        daysInMonth ? daysInMonth + 1 : 0
+                    );
+                }
+                if ( byDay ) {
+                    if ( frequency !== MONTHLY &&
+                            ( frequency !== YEARLY || byWeekNo ) ) {
+                        filter( candidates, getDay, byDay );
+                    } else if ( frequency === MONTHLY || byMonth ) {
+                        // Filter candidates using position of day in month
+                        filter( candidates, getDayMonthly, byDay,
+                            daysInMonth || 0 );
+                    } else {
+                        // Filter candidates using position of day in year
+                        filter( candidates, getDayYearly, byDay,
+                            Date.getDaysInYear( year ) );
+                    }
+                }
+                if ( byYearDay ) {
+                    filter( candidates, getYearDay, byYearDay,
+                        lastDayInYear.getDayOfYear( true ) + 1
+                    );
+                }
+                if ( byWeekNo ) {
+                    weeksInYear =
+                        lastDayInYear.getISOWeekNumber( firstDayOfWeek, true );
+                    if ( weeksInYear === 1 ) {
+                        weeksInYear = 52;
+                    }
+                    filter( candidates, getWeekNo.bind( null, firstDayOfWeek ),
+                        byWeekNo,
+                        weeksInYear + 1
+                    );
+                }
+            }
+            if ( byHour && frequency !== HOURLY &&
+                    frequency !== MINUTELY && frequency !== SECONDLY ) {
+                candidates = expand( candidates, 'setUTCHours', byHour );
+            }
+            if ( byMinute &&
+                    frequency !== MINUTELY && frequency !== SECONDLY ) {
+                candidates = expand( candidates, 'setUTCMinutes', byMinute );
+            }
+            if ( bySecond && frequency !== SECONDLY ) {
+                candidates = expand( candidates, 'setUTCSeconds', bySecond );
+            }
+            if ( bySetPosition ) {
+                candidates = candidates.filter( toBoolean );
+                filter( candidates, getPosition, bySetPosition,
+                    candidates.length );
+            }
+
+            // 3. Increment anchor by frequency/interval
+            fromDate = new Date( Date.UTC(
+                ( frequency === YEARLY ) ? year + interval : year,
+                ( frequency === MONTHLY ) ? month + interval : month,
+                ( frequency === WEEKLY ) ? date + 7 * interval :
+                ( frequency === DAILY ) ? date + interval : date,
+                ( frequency === HOURLY ) ? hour + interval : hour,
+                ( frequency === MINUTELY ) ? minute + interval : minute,
+                ( frequency === SECONDLY ) ? second + interval : second
+            ));
+
+            // 4. Do we have any candidates left?
+            candidates = candidates.filter( toBoolean );
+            if ( candidates.length ) {
+                return [ candidates, fromDate ];
+            }
+        }
+        return [ null, fromDate ];
+    },
+
+    // start = Date recurrence starts (should be first occurrence)
+    // begin = Beginning of time period to return occurrences within
+    // end = End of time period to return occurrences within
+    getOccurrences: function ( start, begin, end ) {
+        var frequency = this.frequency,
+            count = this.count || 0,
+            until = this.until,
+            results = [],
+            interval, year, month, date, isComplexAnchor,
+            beginYear, beginMonth,
+            anchor, temp, occurrences, occurrence, i, l;
+
+        if ( !start ) {
+            start = new Date();
+        }
+        if ( !begin || begin <= start ) {
+            begin = start;
+        }
+        if ( !end && !until && !count ) {
+            count = 2;
+        }
+        if ( until && ( !end || end > until ) ) {
+            end = new Date( +until + 1000 );
+        }
+        if ( end && begin >= end ) {
+            return results;
+        }
+
+        // An anchor is a date == start + x * (interval * frequency)
+        // An anchor may return occurrences earlier than it.
+        // Anchor results do not overlap.
+        // For monthly/yearly recurrences, we have to generate a "false" anchor
+        // and use the slow path if the start date may not exist in some cycles
+        // e.g. 31st December repeat monthly -> no 31st in some months.
+        year = start.getUTCFullYear();
+        month = start.getUTCMonth();
+        date = start.getUTCDate();
+        isComplexAnchor = this._isComplexAnchor = date > 28 &&
+            ( frequency === MONTHLY || (frequency === YEARLY && month === 1) );
+
+        // Must always iterate from the start if there's a count
+        if ( count || begin === start ) {
+            // Anchor will be created below if complex
+            if ( !isComplexAnchor ) {
+                anchor = start;
+            }
+        } else {
+            // Find first anchor before or equal to "begin" date.
+            interval = this.interval;
+            switch ( frequency ) {
+            case YEARLY:
+                // Get year of range begin.
+                // Subtract year of start
+                // Find remainder modulo interval;
+                // Subtract from range begin year so we're on an interval.
+                beginYear = begin.getUTCFullYear();
+                year = beginYear - ( ( beginYear - year ) % interval );
+                break;
+            case MONTHLY:
+                beginYear = begin.getUTCFullYear();
+                beginMonth = begin.getUTCMonth();
+                // Get number of months from event start to range begin
+                month = 12 * ( beginYear - year ) + ( beginMonth - month );
+                // Calculate the first anchor month <= the begin month/year
+                month = beginMonth - ( month % interval );
+                year = beginYear;
+                // Month could be < 0 if anchor is in previous year
+                if ( month < 0 ) {
+                    year += Math.floor( month / 12 );
+                    month = month.mod( 12 );
+                }
+                break;
+            case WEEKLY:
+                interval *= 7;
+                /* falls through */
+            case DAILY:
+                interval *= 24;
+                /* falls through */
+            case HOURLY:
+                interval *= 60;
+                /* falls through */
+            case MINUTELY:
+                interval *= 60;
+                /* falls through */
+            case SECONDLY:
+                interval *= 1000;
+                anchor = new Date( begin - ( ( begin - start ) % interval ) );
+                break;
+            }
+        }
+        if ( !anchor ) {
+            anchor = new Date( Date.UTC(
+                year, month, isComplexAnchor ? 1 : date,
+                start.getUTCHours(),
+                start.getUTCMinutes(),
+                start.getUTCSeconds()
+            ));
+        }
+
+        // If anchor <= start, filter out any dates < start
+        // Always filter dates for begin <= date < end
+        // If we reach the count limit or find a date >= end, we're done.
+        // For sanity, set the count limit to be in the bounds [0,2^14], so
+        // we don't enter a near-infinite loop
+
+        if ( count <= 0 || count > 16384 ) {
+            count = 16384; // 2 ^ 14
+        }
+
+        // Start date is always included according to RFC5545, even if it
+        // doesn't match the recurrence
+        if ( anchor <= start ) {
+            results.push( start );
+            count -= 1;
+            if ( !count ) {
+                return results;
+            }
+        }
+
+        outer: while ( true ) {
+            temp = this.iterate( anchor, start );
+            occurrences = temp[0];
+            if ( !occurrences ) {
+                break;
+            }
+            if ( anchor <= start ) {
+                /* jshint ignore:start */
+                occurrences = occurrences.filter( function ( date ) {
+                    return date > start;
+                });
+                /* jshint ignore:end */
+            }
+            anchor = temp[1];
+            for ( i = 0, l = occurrences.length; i < l; i += 1 ) {
+                occurrence = occurrences[i];
+                if ( end && occurrence >= end ) {
+                    break outer;
+                }
+                if ( begin <= occurrence ) {
+                    results.push( occurrence );
+                }
+                count -= 1;
+                if ( !count ) {
+                    break outer;
+                }
+            }
+        }
+
+        return results;
+    },
+
+    matches: function ( start, date ) {
+        return !!this.getOccurrences( start, date, new Date( +date + 1000 ) )
+                     .length;
+    }
+}).extend({
+    dayToNumber: dayToNumber,
+    numberToDay: numberToDay,
+
+    fromJSON: function ( recurrenceRuleJSON ) {
+        return new RecurrenceRule( recurrenceRuleJSON );
+    }
+});
+
+JMAP.RecurrenceRule = RecurrenceRule;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: CalendarEvent.js                                                     \\
+// Module: CalendarModel                                                      \\
+// Requires: API, Calendar.js, Duration.js, RecurrenceRule.js                 \\
+// Author: Neil Jenkins                                                       \\
+// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+( function ( JMAP, undefined ) {
+
+var Record = O.Record;
+var attr = Record.attr;
+
+var numerically = function ( a, b ) {
+    return a - b;
+};
+
+var CalendarEvent = O.Class({
+
+    Extends: Record,
+
+    isDragging: false,
+    isOccurrence: false,
+
+    isEditable: function () {
+        var calendar = this.get( 'calendar' );
+        return ( !calendar || calendar.get( 'mayWrite' ) );
+    }.property( 'calendar' ),
+
+    isInvitation: function () {
+        var participants = this.get( 'participants' );
+        var participantId = this.get( 'participantId' );
+        return !!( participants && (
+            !participantId ||
+            !participants[ participantId ].roles.contains( 'owner' )
+        ));
+    }.property( 'participants', 'participantId' ),
+
+    storeWillUnload: function () {
+        this._clearOccurrencesCache();
+        CalendarEvent.parent.storeWillUnload.call( this );
+    },
+
+    // --- Metadata ---
+
+    calendar: Record.toOne({
+        Type: JMAP.Calendar,
+        key: 'calendarId'
+    }),
+
+    uid: attr( String, {
+        noSync: true
+    }),
+
+    relatedTo: attr( Array ),
+
+    prodId: attr( String ),
+
+    created: attr( Date, {
+        noSync: true
+    }),
+
+    updated: attr( Date, {
+        noSync: true
+    }),
+
+    sequence: attr( Number, {
+        defaultValue: 0,
+        noSync: true
+    }),
+
+    method: attr( String, {
+        noSync: true
+    }),
+
+    // --- What ---
+
+    title: attr( String, {
+        defaultValue: ''
+    }),
+
+    description: attr( String, {
+        defaultValue: ''
+    }),
+
+    // htmlDescription: attr( String, {
+    //     defaultValue: ''
+    // }),
+
+    // links: attr( Array ),
+
+    attachments: attr( Array, {
+        defaultValue: null
+    }),
+
+    isUploading: function () {
+        return !!JMAP.calendar.eventUploads.get( this ).length;
+    }.property( 'files' ),
+
+    files: function () {
+        var attachments = this.get( 'attachments' ) || [];
+        return attachments.map( function ( attachment ) {
+            return new O.Object( attachment );
+        }).concat( JMAP.calendar.eventUploads.get( this ) );
+    }.property( 'attachments' ),
+
+    addFile: function ( file ) {
+        var attachment = new JMAP.CalendarAttachment( file, this );
+        JMAP.calendar.eventUploads.add( this, attachment );
+        attachment.upload();
+        return this;
+    },
+
+    removeFile: function ( file ) {
+        if ( file instanceof JMAP.CalendarAttachment ) {
+            JMAP.calendar.eventUploads.remove( this, file );
+        } else {
+            var attachments = this.get( 'attachments' ).slice();
+            attachments.splice( this.get( 'files' ).indexOf( file ), 1 );
+            this.set( 'attachments', attachments.length ? attachments : null );
+        }
+        return this;
+    },
+
+    // ---
+
+    // language: attr( String ),
+    // translations: attr( Object ),
+
+    // --- Where ---
+
+    locations: attr( Object, {
+        defaultValue: null
+    }),
+
+    location: function ( value ) {
+        if ( value !== undefined ) {
+            this.set( 'locations', value ? {
+                '1': {
+                    name: value
+                }
+            } : null );
+        } else {
+            var locations = this.get( 'locations' );
+            if ( locations ) {
+                value = Object.values( locations )[0].name || '';
+            } else {
+                value = '';
+            }
+        }
+        return value;
+    }.property( 'locations' ).nocache(),
+
+    startLocationTimeZone: function () {
+        var locations = this.get( 'locations' );
+        var timeZone = this.get( 'timeZone' );
+        var id, location;
+        if ( timeZone ) {
+            for ( id in locations ) {
+                location = locations[ id ];
+                if ( location.rel === 'start' ) {
+                    if ( location.timeZone ) {
+                        timeZone = O.TimeZone.fromJSON( location.timeZone );
+                    }
+                    break;
+                }
+            }
+        }
+        return timeZone;
+    }.property( 'locations', 'timeZone' ),
+
+    endLocationTimeZone: function () {
+        var locations = this.get( 'locations' );
+        var timeZone = this.get( 'timeZone' );
+        var id, location;
+        if ( timeZone ) {
+            for ( id in locations ) {
+                location = locations[ id ];
+                if ( location.rel === 'end' ) {
+                    if ( location.timeZone ) {
+                        timeZone = O.TimeZone.fromJSON( location.timeZone );
+                    }
+                    break;
+                }
+            }
+        }
+        return timeZone;
+    }.property( 'locations', 'timeZone' ),
+
+    // --- When ---
+
+    isAllDay: attr( Boolean, {
+        defaultValue: false
+    }),
+
+    start: attr( Date ),
+
+    duration: attr( JMAP.Duration, {
+        defaultValue: JMAP.Duration.ZERO
+    }),
+
+    timeZone: attr( O.TimeZone, {
+        defaultValue: null
+    }),
+
+    recurrenceRule: attr( JMAP.RecurrenceRule, {
+        defaultValue: null
+    }),
+
+    recurrenceOverrides: attr( Object, {
+        defaultValue: null
+    }),
+
+    getStartInTimeZone: function ( timeZone ) {
+        var eventTimeZone = this.get( 'timeZone' );
+        var start, cacheKey;
+        if ( eventTimeZone && timeZone && timeZone !== eventTimeZone ) {
+            start = this.get( 'utcStart' );
+            cacheKey = timeZone.id + start.toJSON();
+            if ( this._ce_sk === cacheKey ) {
+                return this._ce_s;
+            }
+            this._ce_sk = cacheKey;
+            this._ce_s = start = timeZone.convertDateToTimeZone( start );
+        } else {
+            start = this.get( 'start' );
+        }
+        return start;
+    },
+
+    getEndInTimeZone: function ( timeZone ) {
+        var eventTimeZone = this.get( 'timeZone' );
+        var end = this.get( 'utcEnd' );
+        var cacheKey;
+        if ( eventTimeZone ) {
+            if ( !timeZone ) {
+                timeZone = eventTimeZone;
+            }
+            cacheKey = timeZone.id + end.toJSON();
+            if ( this._ce_ek === cacheKey ) {
+                return this._ce_e;
+            }
+            this._ce_ek = cacheKey;
+            this._ce_e = end = timeZone.convertDateToTimeZone( end );
+        }
+        return end;
+    },
+
+    utcStart: function ( date ) {
+        var timeZone = this.get( 'timeZone' );
+        if ( date ) {
+            this.set( 'start', timeZone ?
+                timeZone.convertDateToTimeZone( date ) : date );
+        } else {
+            date = this.get( 'start' );
+            if ( timeZone ) {
+                date = timeZone.convertDateToUTC( date );
+            }
+        }
+        return date;
+    }.property( 'start', 'timeZone' ),
+
+    utcEnd: function ( date ) {
+        var utcStart = this.get( 'utcStart' );
+        if ( date ) {
+            this.set( 'duration', new JMAP.Duration(
+                Math.max( 0, date - utcStart )
+            ));
+        } else {
+            date = new Date( +utcStart + this.get( 'duration' ) );
+        }
+        return date;
+    }.property( 'utcStart', 'duration' ),
+
+    end: function ( date ) {
+        var isAllDay = this.get( 'isAllDay' );
+        var timeZone = this.get( 'timeZone' );
+        var utcStart, utcEnd;
+        if ( date ) {
+            utcStart = this.get( 'utcStart' );
+            utcEnd = timeZone ?
+                timeZone.convertDateToUTC( date ) : new Date( date );
+            if ( isAllDay ) {
+                utcEnd.add( 1, 'day' );
+            }
+            if ( utcStart > utcEnd ) {
+                if ( isAllDay ||
+                        !this.get( 'start' ).isOnSameDayAs( date, true ) ) {
+                    this.set( 'utcStart', new Date(
+                        +utcStart + ( utcEnd - this.get( 'utcEnd' ) )
+                    ));
+                } else {
+                    utcEnd.add( 1, 'day' );
+                    date = new Date( date ).add( 1, 'day' );
+                }
+            }
+            this.set( 'utcEnd', utcEnd );
+        } else {
+            date = this.getEndInTimeZone( timeZone );
+            if ( isAllDay ) {
+                date = new Date( date ).subtract( 1, 'day' );
+            }
+        }
+        return date;
+    }.property( 'isAllDay', 'start', 'duration', 'timeZone' ),
+
+    _updateRecurrenceOverrides: function ( _, __, oldStart ) {
+        var recurrenceOverrides = this.get( 'recurrenceOverrides' );
+        var newRecurrenceOverrides, delta, date;
+        if ( this.get( 'store' ).isNested && recurrenceOverrides ) {
+            delta = this.get( 'start' ) - oldStart;
+            newRecurrenceOverrides = {};
+            for ( date in recurrenceOverrides ) {
+                newRecurrenceOverrides[
+                    new Date( +Date.fromJSON( date ) + delta ).toJSON()
+                ] = recurrenceOverrides[ date ];
+            }
+            this.set( 'recurrenceOverrides', newRecurrenceOverrides );
+        }
+    }.observes( 'start' ),
+
+    _removeRecurrenceOverrides: function () {
+        if ( this.get( 'store' ).isNested && !this.get( 'recurrenceRule' ) ) {
+            this.set( 'recurrenceOverrides', null );
+        }
+    }.observes( 'recurrenceRule' ),
+
+    removedDates: function () {
+        var recurrenceOverrides = this.get( 'recurrenceOverrides' );
+        var dates = null;
+        var date;
+        if ( recurrenceOverrides ) {
+            for ( date in recurrenceOverrides ) {
+                if ( !recurrenceOverrides[ date ] ) {
+                    if ( !dates ) { dates = []; }
+                    dates.push( Date.fromJSON( date ) );
+                }
+            }
+        }
+        if ( dates ) {
+            dates.sort( numerically );
+        }
+        return dates;
+    }.property( 'recurrenceOverrides' ),
+
+    _getOccurrenceForRecurrenceId: function ( id ) {
+        var cache = this._ocache || ( this._ocache = {} );
+        return cache[ id ] || ( cache[ id ] =
+            new JMAP.CalendarEventOccurrence( this, id )
+        );
+    },
+
+    // Return all occurrences that exist in this time range.
+    // May return others outside of this range.
+    // May return out of order.
+    getOccurrencesThatMayBeInDateRange: function ( start, end, timeZone ) {
+        // Get start time and end time in the event's time zone.
+        var eventTimeZone = this.get( 'timeZone' );
+        var recurrenceRule = this.get( 'recurrenceRule' );
+        var recurrenceOverrides = this.get( 'recurrenceOverrides' );
+        var duration, earliestStart;
+        var occurrences, occurrencesSet, id, occurrence, date;
+        var occurrenceIds, recurrences;
+
+        // Convert start/end to local time
+        if ( timeZone && eventTimeZone && timeZone !== eventTimeZone ) {
+            start = timeZone.convertDateToUTC( start );
+            start = eventTimeZone.convertDateToTimeZone( start );
+            end = timeZone.convertDateToUTC( end );
+            end = eventTimeZone.convertDateToTimeZone( end );
+        }
+
+        // Calculate earliest possible start date, given duration.
+        // To prevent pathological cases, we limit duration to
+        // the frequency of the recurrence.
+        if ( recurrenceRule ) {
+            duration = this.get( 'duration' ).valueOf();
+            switch ( recurrenceRule.frequency ) {
+            case 'yearly':
+                duration = Math.min( duration, 366 * 24 * 60 * 60 * 1000 );
+                break;
+            case 'monthly':
+                duration = Math.min( duration,  31 * 24 * 60 * 60 * 1000 );
+                break;
+            case 'weekly':
+                duration = Math.min( duration,   7 * 24 * 60 * 60 * 1000 );
+                break;
+            default:
+                duration = Math.min( duration,       24 * 60 * 60 * 1000 );
+                break;
+            }
+            earliestStart = new Date( start - duration + 1000 );
+        }
+
+        // Precompute count, as it's expensive to do each time.
+        if ( recurrenceRule && recurrenceRule.count ) {
+            occurrences = this.get( 'allStartDates' );
+            recurrences = occurrences.length ?
+                occurrences.map( function ( date ) {
+                    return this._getOccurrenceForRecurrenceId( date.toJSON() );
+                }, this ) :
+                null;
+        } else {
+            // Get occurrences that start within the time period.
+            if ( recurrenceRule ) {
+                occurrences = recurrenceRule.getOccurrences(
+                    this.get( 'start' ), earliestStart, end
+                );
+            }
+            // Or just the start if no recurrence rule.
+            else {
+                occurrences = [ this.get( 'start' ) ];
+            }
+            // Add overrides.
+            if ( recurrenceOverrides ) {
+                occurrencesSet = occurrences.reduce( function ( set, date ) {
+                    set[ date.toJSON() ] = true;
+                    return set;
+                }, {} );
+                for ( id in recurrenceOverrides ) {
+                    occurrence = recurrenceOverrides[ id ];
+                    // Remove EXDATEs.
+                    if ( occurrence === null ) {
+                        delete occurrencesSet[ id ];
+                    }
+                    // Add RDATEs.
+                    else {
+                        date = Date.fromJSON( id );
+                        // Include if in date range, or if it alters the date.
+                        if ( ( earliestStart <= date && date < end ) ||
+                                occurrence.start ||
+                                occurrence.duration ||
+                                occurrence.timeZone ) {
+                            occurrencesSet[ id ] = true;
+                        }
+                    }
+                }
+                occurrenceIds = Object.keys( occurrencesSet );
+            } else {
+                occurrenceIds = occurrences.map( function ( date ) {
+                    return date.toJSON();
+                });
+            }
+            // Get event occurrence objects
+            recurrences = occurrenceIds.length ?
+                occurrenceIds.map( this._getOccurrenceForRecurrenceId, this ) :
+                null;
+        }
+
+        return recurrences;
+    },
+
+    // Exceptions changing the date/time of an occurrence are ignored: the
+    // *original* date/time is still included in the allStartDates array.
+    allStartDates: function () {
+        var recurrenceRule = this.get( 'recurrenceRule' );
+        var recurrenceOverrides = this.get( 'recurrenceOverrides' );
+        var start = this.get( 'start' );
+        var dates, occurrencesSet, id;
+
+        if ( recurrenceRule &&
+                !recurrenceRule.until && !recurrenceRule.count ) {
+            return [ start ];
+        }
+        if ( recurrenceRule ) {
+            dates = recurrenceRule.getOccurrences( start, null, null );
+        } else {
+            dates = [ start ];
+        }
+        if ( recurrenceOverrides ) {
+            occurrencesSet = dates.reduce( function ( set, date ) {
+                set[ date.toJSON() ] = true;
+                return set;
+            }, {} );
+            for ( id in recurrenceOverrides ) {
+                // Remove EXDATEs.
+                if ( recurrenceOverrides[ id ] === null ) {
+                    delete occurrencesSet[ id ];
+                }
+                // Add RDATEs.
+                else {
+                    occurrencesSet[ id ] = true;
+                }
+            }
+            dates = Object.keys( occurrencesSet ).map( Date.fromJSON );
+            dates.sort( numerically );
+        }
+        return dates;
+    }.property( 'start', 'recurrenceRule', 'recurrenceOverrides' ),
+
+    totalOccurrences: function () {
+        var recurrenceRule = this.get( 'recurrenceRule' );
+        var recurrenceOverrides = this.get( 'recurrenceOverrides' );
+        if ( !recurrenceRule && !recurrenceOverrides ) {
+            return 1;
+        }
+        if ( recurrenceRule &&
+                !recurrenceRule.count && !recurrenceRule.until ) {
+            return Number.MAX_VALUE;
+        }
+        return this.get( 'allStartDates' ).length;
+    }.property( 'allStartDates' ),
+
+    _clearOccurrencesCache: function () {
+        var cache = this._ocache;
+        var id;
+        if ( cache ) {
+            for ( id in cache ) {
+                cache[ id ].unload();
+            }
+            this._ocache = null;
+        }
+    }.observes( 'start', 'timeZone', 'recurrence' ),
+
+    _notifyOccurrencesOfPropertyChange: function ( _, key ) {
+        var cache = this._ocache;
+        var id;
+        if ( cache ) {
+            for ( id in cache ) {
+                cache[ id ].propertyDidChange( key );
+            }
+        }
+    }.observes( 'calendar', 'uid', 'relatedTo', 'prodId', 'isAllDay',
+        'allStartDates', 'totalOccurrences', 'replyTo', 'participantId' ),
+
+    // --- Scheduling ---
+
+    status: attr( String, {
+        defaultValue: 'confirmed'
+    }),
+
+    showAsFree: attr( Boolean, {
+        defaultValue: false
+    }),
+
+    replyTo: attr( String, {
+        defaultValue: null
+    }),
+
+    participants: attr( Object, {
+        defaultValue: null
+    }),
+
+    // The id for the calendar owner's participant
+    participantId: attr( String, {
+        defaultValue: null
+    }),
+
+    rsvp: function ( rsvp ) {
+        var participants = this.get( 'participants' );
+        var participantId = this.get( 'participantId' );
+        var you = ( participants && participantId &&
+            participants[ participantId ] ) || null;
+        if ( you && rsvp !== undefined ) {
+            participants = O.clone( participants );
+            // Don't alert me if I'm not going!
+            if ( rsvp === 'declined' ) {
+                this.set( 'useDefaultAlerts', false )
+                    .set( 'alerts', null );
+            }
+            // Do alert me if I change my mind!
+            else if ( you.rsvp === 'declined' &&
+                    this.get( 'alerts' ) === null ) {
+                this.set( 'useDefaultAlerts', true );
+            }
+            participants[ participantId ].scheduleStatus = rsvp;
+            this.set( 'participants', participants );
+        } else {
+            rsvp = you && you.scheduleStatus || '';
+        }
+        return rsvp;
+    }.property( 'participants', 'participantId' ),
+
+    // --- Alerts ---
+
+    useDefaultAlerts: attr( Boolean, {
+        defaultValue: false
+    }),
+
+    alerts: attr( Object, {
+        defaultValue: null
+    })
+});
+
+// ---
+
+var dayToNumber = JMAP.RecurrenceRule.dayToNumber;
+
+var byNthThenDay = function ( a, b ) {
+    var aNthOfPeriod = a.nthOfPeriod || 0;
+    var bNthOfPeriod = b.nthOfPeriod || 0;
+    return ( aNthOfPeriod - bNthOfPeriod ) ||
+        ( dayToNumber[ a.day ] - dayToNumber[ b.day ] );
+};
+
+var numericArrayProps = [ 'byDate', 'byYearDay', 'byWeekNo', 'byHour', 'byMinute', 'bySecond', 'bySetPosition' ];
+
+var normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
+    var byDay, byMonth, i, l, key, value;
+    if ( !recurrenceRuleJSON ) {
+        return;
+    }
+    if ( recurrenceRuleJSON.interval === 1 ) {
+        delete recurrenceRuleJSON.interval;
+    }
+    if ( recurrenceRuleJSON.firstDayOfWeek === 'monday' ) {
+        delete recurrenceRuleJSON.firstDayOfWeek;
+    }
+    if ( byDay = recurrenceRuleJSON.byDay ) {
+        if ( byDay.length ) {
+            byDay.sort( byNthThenDay );
+        } else {
+            delete recurrenceRuleJSON.byDay;
+        }
+    }
+    if ( byMonth = recurrenceRuleJSON.byMonth ) {
+        if ( byMonth.length ) {
+            byMonth.sort();
+        } else {
+            delete recurrenceRuleJSON.byMonth;
+        }
+    }
+    for ( i = 0, l = numericArrayProps.length; i < l; i += 1 ) {
+        key = numericArrayProps[i];
+        value = recurrenceRuleJSON[ key ];
+        if ( value ) {
+            // Must be sorted
+            if ( value.length ) {
+                value.sort( numerically );
+            }
+            // Must not be empty
+            else {
+                delete recurrenceRuleJSON[ key ];
+            }
+        }
+    }
+};
+
+var alertOffsetFromJSON = function ( alerts ) {
+    if ( !alerts ) {
+        return null;
+    }
+    var id, alert;
+    for ( id in alerts ) {
+        alert = alerts[ id ];
+        alert.offset = new JMAP.Duration( alert.offset );
+    }
+};
+
+JMAP.calendar.replaceEvents = false;
+JMAP.calendar.handle( CalendarEvent, {
+    precedence: 2,
+    fetch: 'getCalendarEvents',
+    refresh: function ( _, state ) {
+        this.callMethod( 'getCalendarEventUpdates', {
+            sinceState: state,
+            maxChanges: 100,
+            fetchRecords: true
+        });
+    },
+    commit: 'setCalendarEvents',
+    // Response handlers
+    calendarEvents: function ( args ) {
+        var events = args.list;
+        var l = events.length;
+        var event, timeZoneId;
+        while ( l-- ) {
+            event = events[l];
+            timeZoneId = event.timeZone;
+            if ( timeZoneId ) {
+                JMAP.calendar.seenTimeZone( O.TimeZone[ timeZoneId ] );
+            }
+            normaliseRecurrenceRule( event.recurrenceRule );
+            alertOffsetFromJSON( event.alerts );
+        }
+        JMAP.calendar.propertyDidChange( 'usedTimeZones' );
+        this.didFetch( CalendarEvent, args, this.replaceEvents );
+        this.replaceEvents = false;
+    },
+    calendarEventUpdates: function ( args, _, reqArgs ) {
+        this.didFetchUpdates( CalendarEvent, args, reqArgs );
+        if ( args.hasMoreUpdates ) {
+            this.get( 'store' ).fetchAll( CalendarEvent, true );
+        }
+    },
+    error_getCalendarEventUpdates_cannotCalculateChanges: function () {
+        JMAP.calendar.flushCache();
+    },
+    calendarEventsSet: function ( args ) {
+        this.didCommit( CalendarEvent, args );
+    }
+});
+
+JMAP.CalendarEvent = CalendarEvent;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: CalendarEventOccurrence.js                                           \\
+// Module: CalendarModel                                                      \\
+// Requires: CalendarEvent.js                                                 \\
+// Author: Neil Jenkins                                                       \\
+// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+( function ( JMAP, undefined ) {
+
+var CalendarEvent = JMAP.CalendarEvent;
+
+// ---
+
+var applyPatch = function ( path, patch, value ) {
+    var slash, key;
+    while ( true ) {
+        slash = path.indexOf( '/' );
+        if ( slash > -1 ) {
+            key = path.slice( 0, slash );
+            path = path.slice( slash + 1 );
+        }
+        if ( key ) {
+            key = key.replace( /~1/g, '/' ).replace( /~0/g, '~' );
+        }
+        if ( slash > -1 ) {
+            value = value[ key ];
+        } else {
+            if ( patch !== null ) {
+                value[ key ] = patch;
+            } else {
+                delete value[ key ];
+            }
+            break;
+        }
+    }
+};
+
+var proxyOverrideAttibute = function ( Type, key ) {
+    return function ( value ) {
+        var original = this.get( 'original' );
+        var originalValue = this.getOriginalForKey( key );
+        var id = this.id;
+        var keyPath = '/' + key;
+        var recurrenceOverrides, overrides, keepOverride, path, recurrenceRule;
+
+        if ( value !== undefined ) {
+            // Get current overrides for occurrence
+            recurrenceOverrides =
+                O.clone( original.get( 'recurrenceOverrides' ) ) || {};
+            overrides = recurrenceOverrides[ id ] ||
+                ( recurrenceOverrides[ id ] = {} );
+
+            // Clear any previous overrides for this key
+            keepOverride = false;
+            for ( path in overrides ) {
+                if ( path.indexOf( keyPath ) === 0 ) {
+                    delete overrides[ path ];
+                } else {
+                    keepOverride = true;
+                }
+            }
+            // Set if different to parent
+            if ( !O.isEqual( value, originalValue ) ) {
+                keepOverride = true;
+                overrides[ keyPath ] = value && value.toJSON ?
+                    value.toJSON() : value;
+            }
+
+            // Check if we still have any overrides
+            if ( !keepOverride ) {
+                // Check if matches recurrence rule. If not, keep.
+                recurrenceRule = original.get( 'recurrenceRule' );
+                if ( recurrenceRule &&
+                        recurrenceRule.matches(
+                            original.get( 'start' ), this._start
+                        )) {
+                    delete recurrenceOverrides[ id ];
+                }
+            }
+            if ( !Object.keys( recurrenceOverrides ).length ) {
+                recurrenceOverrides = null;
+            }
+
+            // Set on original
+            original.set( 'recurrenceOverrides', recurrenceOverrides );
+        } else {
+            overrides = this.get( 'overrides' );
+            if ( keyPath in overrides ) {
+                return Type.fromJSON ?
+                    Type.fromJSON( overrides[ keyPath ] ) :
+                    overrides[ keyPath ];
+            }
+            value = originalValue;
+            for ( path in overrides ) {
+                if ( path.indexOf( keyPath ) === 0 ) {
+                    if ( value === originalValue ) {
+                        value = O.clone( originalValue );
+                    }
+                    applyPatch( path, overrides[ path ], value );
+                }
+            }
+        }
+        return value;
+    }.property( 'overrides', 'original.' + key );
+};
+
+var proxyAttribute = function ( _, key ) {
+    return this.get( 'original' ).get( key );
+}.property().nocache();
+
+var CalendarEventOccurrence = O.Class({
+
+    Extends: O.Object,
+
+    constructor: CalendarEvent,
+
+    isDragging: false,
+    isOccurrence: true,
+
+    isEditable: CalendarEvent.prototype.isEditable,
+    isInvitation: CalendarEvent.prototype.isInvitation,
+
+    overrides: O.bind( null, 'original*recurrenceOverrides',
+    function ( recurrenceOverrides ) {
+        var id = this.toObject.id;
+        return recurrenceOverrides && recurrenceOverrides[ id ] || {};
+    }),
+
+    init: function ( original, id ) {
+        this._start = Date.fromJSON( id );
+
+        this.id = id;
+        this.original = original;
+        // For attachment upload only
+        this.store = original.get( 'store' );
+        this.storeKey = original.get( 'storeKey' ) + id;
+
+        CalendarEventOccurrence.parent.init.call( this );
+        original.on( 'highlightView', this, 'echoEvent' );
+    },
+
+    getOriginalForKey: function ( key ) {
+        if ( key === 'start' ) {
+            return this._start;
+        }
+        return this.get( 'original' ).get( key );
+    },
+
+    getDoppelganger: function ( store ) {
+        var original = this.get( 'original' );
+        var originalStore = original.get( 'store' );
+        if ( originalStore === store ) {
+            return this;
+        }
+        return original.getDoppelganger( store )
+                       ._getOccurrenceForRecurrenceId( this.id );
+    },
+
+    clone: CalendarEvent.prototype.clone,
+
+    destroy: function () {
+        var original = this.get( 'original' );
+        var recurrenceOverrides = original.get( 'recurrenceOverrides' );
+
+        recurrenceOverrides = recurrenceOverrides ?
+            O.clone( recurrenceOverrides ) : {};
+        recurrenceOverrides[ this.id ] = null;
+        original.set( 'recurrenceOverrides', recurrenceOverrides );
+
+        this.unload();
+    },
+
+    unload: function () {
+        this.get( 'original' ).off( 'highlightView', this, 'echoEvent' );
+        CalendarEventOccurrence.parent.destroy.call( this );
+    },
+
+    is: function ( status ) {
+        return this.get( 'original' ).is( status );
+    },
+
+    echoEvent: function ( event ) {
+        this.fire( event.type, event );
+    },
+
+    // ---
+
+    // May not edit calendar prop.
+    calendar: proxyAttribute,
+    uid: proxyAttribute,
+    relatedTo: proxyAttribute,
+    prodId: proxyAttribute,
+
+    created: proxyOverrideAttibute( Date, 'created' ),
+    updated: proxyOverrideAttibute( Date, 'updated' ),
+    sequence: proxyOverrideAttibute( Number, 'sequence' ),
+
+    // ---
+
+    title: proxyOverrideAttibute( String, 'title' ),
+    description: proxyOverrideAttibute( String, 'description' ),
+    // htmlDescription: proxyOverrideAttibute( String, 'htmlDescription' ),
+    // links: proxyOverrideAttibute( Array, 'links' ),
+
+    attachments: proxyOverrideAttibute( Array, 'attachments' ),
+
+    isUploading: CalendarEvent.prototype.isUploading,
+    files: CalendarEvent.prototype.files,
+    addFile: CalendarEvent.prototype.addFile,
+    removeFile: CalendarEvent.prototype.removeFile,
+
+    // ---
+
+    // language: proxyOverrideAttibute( String, 'language' ),
+    // translations: proxyOverrideAttibute( Object, 'translations' ),
+
+    // ---
+
+    locations: proxyOverrideAttibute( Object, 'locations' ),
+    location: CalendarEvent.prototype.location,
+    startLocationTimeZone: CalendarEvent.prototype.startLocationTimeZone,
+    endLocationTimeZone: CalendarEvent.prototype.endLocationTimeZone,
+
+    // ---
+
+    isAllDay: proxyAttribute,
+
+    start: proxyOverrideAttibute( Date, 'start' ),
+    duration: proxyOverrideAttibute( JMAP.Duration, 'duration' ),
+    timeZone: proxyOverrideAttibute( O.TimeZone, 'timeZone' ),
+    recurrence: proxyAttribute,
+    recurrenceOverrides: null,
+
+    getStartInTimeZone: CalendarEvent.prototype.getStartInTimeZone,
+    getEndInTimeZone: CalendarEvent.prototype.getEndInTimeZone,
+
+    utcStart: CalendarEvent.prototype.utcStart,
+    utcEnd: CalendarEvent.prototype.utcEnd,
+
+    end: CalendarEvent.prototype.end,
+
+    removedDates: null,
+
+    allStartDates: proxyAttribute,
+    totalOccurrences: proxyAttribute,
+
+    index: function () {
+        var start = this.get( 'start' );
+        var original = this.get( 'original' );
+        return O.isEqual( start, original.get( 'start' ) ) ? 0 :
+            original.get( 'allStartDates' ).binarySearch( this._start );
+    }.property().nocache(),
+
+    // ---
+
+    status: proxyOverrideAttibute( String, 'status' ),
+    showAsFree: proxyOverrideAttibute( Boolean, 'showAsFree' ),
+    replyTo: proxyAttribute,
+    participants: proxyOverrideAttibute( Object, 'participants' ),
+    participantId: proxyAttribute,
+
+    rsvp: function ( rsvp ) {
+        var original = this.get( 'original' );
+        var recurrenceOverrides = original.get( 'recurrenceOverrides' );
+        var id = this.id;
+        // If this is an exception from the organizer, RSVP to just this
+        // instance, otherwise RSVP to whole series
+        if ( recurrenceOverrides && recurrenceOverrides[ id ] &&
+                Object.keys( recurrenceOverrides[ id ] ).some(
+                function ( key ) {
+                    return key !== 'alerts' && key !== 'useDefaultAlerts';
+                })) {
+            return CalendarEvent.prototype.rsvp.call( this, rsvp );
+        }
+        if ( rsvp !== undefined ) {
+            original.set( 'rsvp', rsvp );
+        }
+        return original.get( 'rsvp' );
+    }.property( 'participants', 'participantId' ),
+
+    // ---
+
+    useDefaultAlerts: proxyOverrideAttibute( Boolean, 'useDefaultAlerts' ),
+    alerts: proxyOverrideAttibute( Object, 'alerts' )
+});
+O.meta( CalendarEventOccurrence.prototype ).attrs =
+    O.meta( CalendarEvent.prototype ).attrs;
+
+JMAP.CalendarEventOccurrence = CalendarEventOccurrence;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: InfiniteDateSource.js                                                \\
+// Module: CalendarModel                                                      \\
+// Author: Neil Jenkins                                                       \\
+// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+( function ( JMAP ) {
+
+var InfiniteDateSource = O.Class({
+
+    Extends: O.ObservableArray,
+
+    init: function ( mixin ) {
+        InfiniteDateSource.parent.init.call( this, null, mixin );
+        this.windowLengthDidChange();
+    },
+
+    start: new Date(),
+
+    getNext: function ( date ) {
+        return new Date( date ).add( 1 );
+    },
+
+    getPrev: function ( date ) {
+        return new Date( date ).subtract( 1 );
+    },
+
+    windowLength: 10,
+
+    windowLengthDidChange: function () {
+        var windowLength = this.get( 'windowLength' ),
+            length = this.get( 'length' ),
+            anchor, array, i;
+        if ( length < windowLength ) {
+            anchor = this.last();
+            array = this._array;
+            for ( i = length; i < windowLength; i += 1 ) {
+                array[i] = anchor = anchor ?
+                    this.getNext( anchor ) : this.get( 'start' );
+            }
+            this.rangeDidChange( length, windowLength );
+        }
+        this.set( 'length', windowLength );
+    }.observes( 'windowLength' ),
+
+    shiftWindow: function ( offset ) {
+        var current = this._array.slice(),
+            length = this.get( 'windowLength' ),
+            anchor;
+        if ( offset < 0 ) {
+            anchor = current[0];
+            while ( offset++ ) {
+                anchor = this.getPrev( anchor );
+                current.unshift( anchor );
+            }
+            current = current.slice( 0, length );
+        } else {
+            anchor = current.last();
+            while ( offset-- ) {
+                anchor = this.getNext( anchor );
+                current.push( anchor );
+            }
+            current = current.slice( -length );
+        }
+        this.set( '[]', current );
+    }
+});
+
+JMAP.InfiniteDateSource = InfiniteDateSource;
 
 }( JMAP ) );
 
@@ -1701,7 +3524,7 @@ var getDayYearly = function ( date, results, daysInYear ) {
     results[2] = day + ( 7 * ( occurrence - occurrencesInYear - 1 ) );
 };
 var getYearDay = function ( date, results, total ) {
-    results[0] = date.getYearDay( true );
+    results[0] = date.getDayOfYear( true );
     results[1] = results[0] - total;
     results[2] = none;
 };
@@ -1874,8 +3697,8 @@ var RecurringDate = O.Class({
                 ( frequency === DAILY ) ? 366 :
                 ( frequency === HOURLY ) ? 48 :
                 /* MINUTELY || SECONDLY */ 120,
-            i, daysInMonth, offset, candidate, lastDayInYear,
-            year, month, date, hour, minute, second;
+            useFastPath, i, daysInMonth, offset, candidate, lastDayInYear,
+            weeksInYear, year, month, date, hour, minute, second;
 
         // Check it's sane.
         if ( interval < 1 ) {
@@ -1910,6 +3733,12 @@ var RecurringDate = O.Class({
                 byDate = [ fromDate.getUTCDate() ];
             }
         }
+        if ( frequency === MONTHLY && byMonth && !byDate && !byDay ) {
+            byDate = [ fromDate.getUTCDate() ];
+        }
+        if ( frequency === WEEKLY && byMonth && !byDay ) {
+            byDay = [ fromDate.getUTCDay() ];
+        }
 
         // Deal with monthly/yearly repetitions where the anchor may not exist
         // in some cycles. Must not use fast path.
@@ -1919,6 +3748,19 @@ var RecurringDate = O.Class({
             if ( frequency === YEARLY ) {
                 byMonth = [ startDate.getUTCMonth() ];
             }
+        }
+
+        useFastPath = !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo;
+        switch ( frequency ) {
+            case SECONDLY:
+                useFastPath = useFastPath && !bySecond;
+                /* falls through */
+            case MINUTELY:
+                useFastPath = useFastPath && !byMinute;
+                /* falls through */
+            case HOURLY:
+                useFastPath = useFastPath && !byHour;
+                break;
         }
 
         // It's possible to write rules which don't actually match anything.
@@ -1933,7 +3775,7 @@ var RecurringDate = O.Class({
             second = fromDate.getUTCSeconds();
 
             // Fast path
-            if ( !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo ) {
+            if ( useFastPath ) {
                 candidates.push( fromDate );
             } else {
                 // 1. Build set of candidates.
@@ -1955,6 +3797,9 @@ var RecurringDate = O.Class({
                     if ( byHour && byHour.indexOf( hour ) < 0 ) {
                         break;
                     }
+                    lastDayInYear = new Date( Date.UTC(
+                        year, 11, 31, hour, minute, second
+                    ));
                     /* falls through */
                 case DAILY:
                     candidates.push( new Date( Date.UTC(
@@ -2016,16 +3861,18 @@ var RecurringDate = O.Class({
                 }
                 if ( byYearDay ) {
                     filter( candidates, getYearDay, byYearDay,
-                        // May only be used with YEARLY frequency
                         lastDayInYear.getDayOfYear( true ) + 1
                     );
                 }
                 if ( byWeekNo ) {
+                    weeksInYear =
+                        lastDayInYear.getISOWeekNumber( firstDayOfWeek, true );
+                    if ( weeksInYear === 1 ) {
+                        weeksInYear = 52;
+                    }
                     filter( candidates, getWeekNo.bind( null, firstDayOfWeek ),
                         byWeekNo,
-                        // May only be used with YEARLY frequency
-                        lastDayInYear
-                            .getISOWeekNumber( firstDayOfWeek, true ) + 1
+                        weeksInYear + 1
                     );
                 }
             }
@@ -2215,6 +4062,11 @@ var RecurringDate = O.Class({
         }
 
         return results;
+    },
+
+    matches: function ( start, date ) {
+        return !!this.getOccurrences( start, date, new Date( +date + 1000 ) )
+                     .length;
     }
 });
 
@@ -2229,794 +4081,6 @@ RecurringDate.fromJSON = function ( recurrenceRule ) {
 };
 
 JMAP.RecurringDate = RecurringDate;
-
-}( JMAP ) );
-
-
-// -------------------------------------------------------------------------- \\
-// File: CalendarEvent.js                                                     \\
-// Module: CalendarModel                                                      \\
-// Requires: API, Calendar.js, RecurringDate.js                               \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
-// -------------------------------------------------------------------------- \\
-
-/*global O, JMAP */
-
-( function ( JMAP, undefined ) {
-
-var Record = O.Record,
-    attr = Record.attr;
-
-var numerically = function ( a, b ) {
-    return a - b;
-};
-
-var CalendarEvent = O.Class({
-
-    Extends: Record,
-
-    isDragging: false,
-    isOccurrence: false,
-
-    mayEdit: function () {
-        var calendar = this.get( 'calendar' ),
-            organizer = this.get( 'organizer' );
-        return calendar.get( 'mayWrite' ) && ( !organizer || organizer.isYou );
-    }.property( 'calendar', 'organizer' ),
-
-    isInvitation: function () {
-        var organizer = this.get( 'organizer' );
-        return ( organizer && !organizer.isYou );
-    }.property( 'organizer' ),
-
-    storeWillUnload: function () {
-        this._clearOccurrencesCache();
-        CalendarEvent.parent.storeWillUnload.call( this );
-    },
-
-    // ---
-
-    calendar: Record.toOne({
-        Type: JMAP.Calendar,
-        key: 'calendarId'
-    }),
-
-    summary: attr( String, {
-        defaultValue: ''
-    }),
-    description: attr( String, {
-        defaultValue: ''
-    }),
-    location: attr( String, {
-        defaultValue: ''
-    }),
-    showAsFree: attr( Boolean, {
-        defaultValue: false
-    }),
-
-    // ---
-
-    isAllDay: attr( Boolean, {
-        defaultValue: false
-    }),
-
-    // Local Time/Date string, e.g. 2011-03-12T03:04
-    start: attr( Date, {
-        defaultValue: new Date()
-    }),
-    end: attr( Date, {
-        defaultValue: new Date().add( 1, 'hour' )
-    }),
-
-    // TimeZone
-    startTimeZone: attr( O.TimeZone, {
-        defaultValue: null
-    }),
-    endTimeZone: attr( O.TimeZone, {
-        defaultValue: null
-    }),
-
-    getStartDateInTZ: function ( timeZone ) {
-        var start = this.get( 'start' );
-        var startTimeZone = this.get( 'startTimeZone' );
-        var cacheKey;
-        if ( startTimeZone ) {
-            if ( !timeZone || timeZone === startTimeZone ) {
-                return start;
-            }
-            start = this.get( 'utcStart' );
-            cacheKey = timeZone.id + start.toJSON();
-            if ( this._ce_sk === cacheKey ) {
-                return this._ce_s;
-            }
-            this._ce_sk = cacheKey;
-            this._ce_s = start = timeZone.convertDateToTimeZone( start );
-        }
-        return start;
-    },
-
-    getEndDateInTZ: function ( timeZone ) {
-        var end = this.get( 'end' );
-        var endTimeZone = this.get( 'endTimeZone' );
-        var cacheKey;
-        if ( endTimeZone ) {
-            if ( !timeZone || timeZone === endTimeZone ) {
-                return end;
-            }
-            end = this.get( 'utcEnd' );
-            cacheKey = timeZone.id + end.toJSON();
-            if ( this._ce_ek === cacheKey ) {
-                return this._ce_e;
-            }
-            this._ce_ek = cacheKey;
-            this._ce_e = end = timeZone.convertDateToTimeZone( end );
-        }
-        return end;
-    },
-
-    utcStart: function ( date ) {
-        var timeZone = this.get( 'startTimeZone' );
-        if ( date ) {
-            this.set( 'start', timeZone ?
-                timeZone.convertDateToTimeZone( date ) : date );
-        } else {
-            date = this.get( 'start' );
-            if ( timeZone ) {
-                date = timeZone.convertDateToUTC( date );
-            }
-        }
-        return date;
-    }.property( 'start', 'startTimeZone' ),
-
-    utcEnd: function ( date ) {
-        var timeZone = this.get( 'endTimeZone' );
-        if ( date ) {
-            this.set( 'end', timeZone ?
-                timeZone.convertDateToTimeZone( date ) : date );
-        } else {
-            date = this.get( 'end' );
-            if ( timeZone ) {
-                date = timeZone.convertDateToUTC( date );
-            }
-        }
-        return date;
-    }.property( 'end', 'endTimeZone', 'isAllDay' ),
-
-    localStart: function ( date ) {
-        var start = this.get( 'start' );
-        if ( date && !O.isEqual( date, start ) ) {
-            this.set( 'end', new Date( +this.get( 'end' ) + ( date - start ) ) )
-                .set( 'start', date );
-        } else {
-            date = start;
-        }
-        return date;
-    }.property( 'start', 'startTimeZone' ).doNotNotify(),
-
-    localEnd: function ( date ) {
-        var isAllDay = this.get( 'isAllDay' ),
-            timeZone = this.get( 'endTimeZone' ),
-            utcStart, utcEnd;
-        if ( date ) {
-            utcStart = this.get( 'utcStart' );
-            utcEnd = timeZone ?
-                timeZone.convertDateToUTC( date ) : new Date( date );
-            if ( isAllDay ) {
-                utcEnd.add( 1, 'day' );
-            }
-            if ( utcStart > utcEnd ) {
-                if ( isAllDay || !utcStart.isOnSameDayAs( utcEnd, true ) ) {
-                    this.set( 'utcStart', new Date(
-                        +utcStart + ( utcEnd - this.get( 'utcEnd' ) )
-                    ));
-                } else {
-                    utcEnd.add( 1, 'day' );
-                    date = new Date( date ).add( 1, 'day' );
-                }
-            }
-            this.set( 'utcEnd', utcEnd );
-        } else {
-            date = this.get( 'end' );
-            if ( isAllDay ) {
-                date = new Date( date ).subtract( 1, 'day' );
-            }
-        }
-        return date;
-    }.property( 'end', 'endTimeZone', 'isAllDay' ).doNotNotify(),
-
-    // ---
-
-    duration: function ( duration ) {
-        var utcStart = this.get( 'utcStart' );
-        if ( duration !== undefined ) {
-            this.set( 'utcEnd', new Date( +utcStart + duration ) );
-        } else {
-            duration = this.get( 'utcEnd' ) - utcStart;
-        }
-        return duration;
-    }.property( 'utcStart', 'utcEnd' ),
-
-    // ---
-
-    recurrence: attr( JMAP.RecurringDate, {
-        defaultValue: null
-    }),
-
-    inclusions: attr( Array, {
-        defaultValue: null
-    }),
-
-    exceptions: attr( Object, {
-        defaultValue: null
-    }),
-
-    _updateExceptions: function ( _, __, oldStart ) {
-        var exceptions = this.get( 'exceptions' ),
-            newExceptions, delta, date;
-        if ( this.get( 'store' ).isNested && exceptions ) {
-            newExceptions = {};
-            delta = this.get( 'start' ) - oldStart;
-            for ( date in exceptions ) {
-                newExceptions[
-                    new Date( +Date.fromJSON( date ) + delta ).toJSON()
-                ] = exceptions[ date ];
-            }
-            this.set( 'exceptions', newExceptions );
-        }
-    }.observes( 'start' ),
-
-    _removeRecurrence: function () {
-        if ( this.get( 'store' ).isNested && !this.get( 'recurrence' ) ) {
-            this.set( 'inclusions', null )
-                .set( 'exceptions', null );
-        }
-    }.observes( 'recurrence' ),
-
-    removedDates: function () {
-        var exceptions = this.get( 'exceptions' ),
-            dates = null,
-            date;
-        if ( exceptions ) {
-            for ( date in exceptions ) {
-                if ( !exceptions[ date ] ) {
-                    if ( !dates ) { dates = []; }
-                    dates.push( Date.fromJSON( date ) );
-                }
-            }
-        }
-        if ( dates ) {
-            dates.sort( numerically );
-        }
-        return dates;
-    }.property( 'exceptions' ),
-
-    _getOccurrenceForDate: function ( date ) {
-        var id = date.toJSON(),
-            cache = this._ocache || ( this._ocache = {} );
-        return cache[ id ] || ( cache[ id ] =
-            new CalendarEventOccurrence( this, id, date )
-        );
-    },
-
-    getOccurrencesForDateRange: function ( start, end, timeZone ) {
-        // Get start time and end time in the event's time zone.
-        var eventTimeZone = this.get( 'startTimeZone' ),
-            recurrence = this.get( 'recurrence' ),
-            inclusions = this.get( 'inclusions' ),
-            exceptions = this.get( 'exceptions' ),
-            needsFilter = false,
-            earliestStart, occurrences,
-            i, l, date, index,
-            id, exception,
-            recurrences;
-
-        // Convert start/end to local time
-        if ( timeZone && eventTimeZone && timeZone !== eventTimeZone ) {
-            start = timeZone.convertDateToUTC( start );
-            start = eventTimeZone.convertDateToTimeZone( start );
-            end = timeZone.convertDateToUTC( end );
-            end = eventTimeZone.convertDateToTimeZone( end );
-        }
-
-        // Calculate earliest possible start date, given duration
-        earliestStart = new Date( start - this.get( 'duration' ) + 1000 );
-
-        // Precompute count, as it's expensive to do each time.
-        if ( recurrence.count ) {
-            occurrences = this.get( 'allStartDates' );
-            needsFilter = true;
-        } else {
-            // Get occurrences that start within the time period:
-            occurrences = recurrence.getOccurrences(
-                this.get( 'start' ), earliestStart, end
-            );
-
-            // Add inclusions
-            if ( inclusions ) {
-                for ( i = 0, l = inclusions.length; i < l; i += 1 ) {
-                    date = inclusions[i];
-                    if ( earliestStart <= date && date < end ) {
-                        index = occurrences.binarySearch( date );
-                        if ( !O.isEqual( occurrences[ index ], date ) ) {
-                            occurrences.splice( index, 0, date );
-                        }
-                    }
-                }
-            }
-            if ( exceptions ) {
-                // Remove exceptions
-                occurrences = occurrences.filter( function ( date ) {
-                    return exceptions[ date.toJSON() ] !== null;
-                });
-                // Check for crazy time altering weirdness
-                for ( id in exceptions ) {
-                    exception = exceptions[ id ];
-                    if ( exception && ( exception.start || exception.end ) ) {
-                        date = Date.fromJSON( id );
-                        index = occurrences.binarySearch( date );
-                        if ( !O.isEqual( occurrences[ index ], date ) ) {
-                            occurrences.splice( index, 0, date );
-                        }
-                        needsFilter = true;
-                    }
-                }
-            }
-        }
-
-        // Get event occurrence objects
-        recurrences = occurrences.length ?
-            occurrences.map( this._getOccurrenceForDate, this ) : null;
-
-        if ( recurrences && needsFilter ) {
-            recurrences = recurrences.filter( function ( occurrence ) {
-                return occurrence.get( 'start' ) < end &&
-                    occurrence.get( 'end' ) > start -
-                    ( occurrence.get( 'isAllDay' ) ? 24 * 60 * 60 * 1000 : 0 );
-            });
-        }
-        return recurrences;
-    },
-
-    // Exceptions changing the date/time of an occurrence are ignored: the
-    // *original* date/time is still included in the allStartDates array.
-    allStartDates: function () {
-        var recurrence = this.get( 'recurrence' ),
-            inclusions = this.get( 'inclusions' ),
-            exceptions = this.get( 'exceptions' ),
-            start = this.get( 'start' ),
-            dates;
-
-        if ( !recurrence || ( !recurrence.until && !recurrence.count ) ) {
-            return [ start ];
-        }
-        dates = recurrence.getOccurrences( start, null, null );
-        if ( inclusions ) {
-            dates = dates.concat( inclusions );
-            dates.sort( numerically );
-            // Deduplicate
-            dates = dates.filter( function ( date, index, array ) {
-                return !index || !O.isEqual( date, array[ index - 1 ] );
-            });
-        }
-        if ( exceptions ) {
-            dates = dates.filter( function ( date ) {
-                return exceptions[ date.toJSON() ] !== null;
-            });
-        }
-        return dates;
-    }.property( 'start', 'startTimeZone',
-        'recurrence', 'inclusions', 'exceptions' ),
-
-    totalOccurrences: function () {
-        var recurrence = this.get( 'recurrence' );
-        if ( !recurrence ) {
-            return 1;
-        }
-        if ( !recurrence.count && !recurrence.until ) {
-            return Number.MAX_VALUE;
-        }
-        return this.get( 'allStartDates' ).length;
-    }.property( 'allStartDates' ),
-
-    _clearOccurrencesCache: function () {
-        var cache = this._ocache,
-            id;
-        if ( cache ) {
-            for ( id in cache ) {
-                cache[ id ].unload();
-            }
-            this._ocache = null;
-        }
-    }.observes( 'start', 'startTimeZone', 'recurrence' ),
-
-    // ---
-
-    alerts: attr( Array, {
-        defaultValue: null
-    }),
-
-    // ---
-
-    organizer: attr( Object, {
-        defaultValue: null
-    }),
-    attendees: attr( Array, {
-        defaultValue: null
-    }),
-
-    rsvp: function ( rsvp ) {
-        var attendees = this.get( 'attendees' ),
-            you;
-        if ( rsvp !== undefined ) {
-            attendees = O.clone( attendees );
-        }
-        if ( attendees ) {
-            you = attendees.find( function ( participant ) {
-                return participant.isYou;
-            });
-        }
-        if ( you && rsvp !== undefined ) {
-            you.rsvp = rsvp;
-            this.set( 'attendees', attendees );
-        } else {
-            rsvp = you ? you.rsvp : 'n/a';
-        }
-        return rsvp;
-    }.property( 'attendees' ),
-
-    // ---
-
-    attachments: attr( Array, {
-        defaultValue: null
-    }),
-
-    isUploading: function () {
-        return !!JMAP.calendar.eventUploads.get( this ).length;
-    }.property( 'files' ),
-
-    files: function () {
-        var attachments = this.get( 'attachments' ) || [];
-        return attachments.map( function ( attachment ) {
-            return new O.Object( attachment );
-        }).concat( JMAP.calendar.eventUploads.get( this ) );
-    }.property( 'attachments' ),
-
-    addFile: function ( file ) {
-        var attachment = new JMAP.CalendarAttachment( file, this );
-        JMAP.calendar.eventUploads.add( this, attachment );
-        attachment.upload();
-        return this;
-    },
-
-    removeFile: function ( file ) {
-        if ( file instanceof JMAP.CalendarAttachment ) {
-            JMAP.calendar.eventUploads.remove( this, file );
-        } else {
-            var attachments = this.get( 'attachments' ).slice();
-            attachments.splice( this.get( 'files' ).indexOf( file ), 1 );
-            this.set( 'attachments', attachments.length ? attachments : null );
-        }
-        return this;
-    }
-});
-
-JMAP.calendar.replaceEvents = false;
-JMAP.calendar.handle( CalendarEvent, {
-    precedence: 2,
-    fetch: 'getCalendarEvents',
-    refresh: function ( _, state ) {
-        this.callMethod( 'getCalendarEventUpdates', {
-            sinceState: state,
-            maxChanges: 100,
-            fetchRecords: true
-        });
-    },
-    commit: 'setCalendarEvents',
-    // Response handlers
-    calendarEvents: function ( args ) {
-        var events = args.list,
-            l = events.length,
-            event, inclusions;
-        while ( l-- ) {
-            event = events[l];
-            inclusions = event.inclusions;
-            if ( inclusions ) {
-                event.inclusions = inclusions.map( Date.fromJSON );
-            }
-        }
-        this.didFetch( CalendarEvent, args, this.replaceEvents );
-        this.replaceEvents = false;
-    },
-    calendarEventUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( CalendarEvent, args, reqArgs );
-        if ( args.hasMoreUpdates ) {
-            this.get( 'store' ).fetchAll( CalendarEvent, true );
-        }
-    },
-    error_getCalendarEventUpdates_cannotCalculateChanges: function () {
-        JMAP.calendar.flushCache();
-    },
-    calendarEventsSet: function ( args ) {
-        this.didCommit( CalendarEvent, args );
-    }
-});
-
-// ---
-
-var proxyOverrideAttibute = function ( Type, key ) {
-    return function ( value ) {
-        var original = this.get( 'original' ),
-            originalValue = this.getOriginalForKey( key ),
-            exceptions, overrides;
-        if ( value !== undefined ) {
-            exceptions = O.clone( original.get( 'exceptions' ) );
-            overrides = exceptions && exceptions[ this.id ] || {};
-            // If equal to original prop, remove from override.
-            if ( O.isEqual( value, originalValue ) ) {
-                if ( key in overrides ) {
-                    delete overrides[ key ];
-                    if ( !Object.keys( overrides ).length ) {
-                        delete exceptions[ this.id ];
-                    }
-                    if ( !Object.keys( exceptions ).length ) {
-                        exceptions = null;
-                    }
-                }
-            }
-            // Otherwise set in exceptions
-            else {
-                if ( !exceptions ) {
-                    exceptions = {};
-                }
-                exceptions[ this.id ] = overrides;
-                overrides[ key ] = value && value.toJSON ?
-                    value.toJSON() : value;
-            }
-            original.set( 'exceptions', exceptions );
-        } else {
-            overrides = this.get( 'overrides' );
-            value = key in overrides ?
-                Type.fromJSON ?
-                    Type.fromJSON( overrides[ key ] ) :
-                    overrides[ key ] :
-                originalValue;
-        }
-        return value;
-    }.property( 'overrides', 'original.' + key );
-};
-
-var CalendarEventOccurrence = O.Class({
-
-    Extends: O.Object,
-
-    isDragging: false,
-    isOccurrence: true,
-
-    mayEdit: CalendarEvent.prototype.mayEdit,
-    isInvitation: CalendarEvent.prototype.isInvitation,
-
-    overrides: O.bind( 'original*exceptions', null, function ( exceptions ) {
-        var id = this.toObject.id;
-        return exceptions && exceptions[ id ] || {};
-    }),
-
-    init: function ( original, id, start ) {
-        this._start = start;
-
-        this.id = id;
-        this.original = original;
-        // For attachment upload only
-        this.store = original.get( 'store' );
-        this.storeKey = original.get( 'storeKey' ) + id;
-
-        CalendarEventOccurrence.parent.init.call( this );
-    },
-
-    getOriginalForKey: function ( key ) {
-        var original = this.get( 'original' ),
-            startTimeZone, endTimeZone, utcStart, utcEnd;
-        switch ( key ) {
-        case 'start':
-            return this._start;
-        case 'end':
-            startTimeZone = original.get( 'startTimeZone' );
-            endTimeZone = original.get( 'endTimeZone' );
-            utcStart = startTimeZone ?
-                startTimeZone.convertDateToUTC( this._start ) :
-                this._start;
-            utcEnd = new Date( +utcStart + original.get( 'duration' ) );
-            return endTimeZone ?
-                endTimeZone.convertDateToTimeZone( utcEnd ) : utcEnd;
-        }
-        return original.get( key );
-    },
-
-    getDoppelganger: function ( store ) {
-        var original = this.get( 'original' ),
-            originalStore = original.get( 'store' );
-        if ( originalStore === store ) {
-            return this;
-        }
-        return original.getDoppelganger( store )
-                       ._getOccurrenceForDate( Date.fromJSON( this.id ) );
-    },
-
-    destroy: function () {
-        var original = this.get( 'original' ),
-            exceptions = original.get( 'exceptions' );
-        exceptions = exceptions ? O.clone( exceptions ) : {};
-        exceptions[ this.id ] = null;
-        original.set( 'exceptions', exceptions );
-
-        this.unload();
-    },
-
-    unload: function () {
-        CalendarEventOccurrence.parent.destroy.call( this );
-    },
-
-    is: function ( status ) {
-        return this.get( 'original' ).is( status );
-    },
-
-    // ---
-
-    // May not edit calendar prop.
-    calendar: O.bind( 'original.calendar' ),
-
-    summary: proxyOverrideAttibute( String, 'summary' ),
-    description: proxyOverrideAttibute( String, 'description' ),
-    location: proxyOverrideAttibute( String, 'location' ),
-    showAsFree: proxyOverrideAttibute( Boolean, 'showAsFree' ),
-
-    // ---
-
-    // May not change isAllDay
-    isAllDay: O.bind( 'original.isAllDay' ),
-
-    start: proxyOverrideAttibute( Date, 'start' ),
-    end: proxyOverrideAttibute( Date, 'end' ),
-
-    startTimeZone: proxyOverrideAttibute( O.TimeZone, 'startTimeZone' ),
-    endTimeZone: proxyOverrideAttibute( O.TimeZone, 'endTimeZone' ),
-
-    getStartDateInTZ: CalendarEvent.prototype.getStartDateInTZ,
-    getEndDateInTZ: CalendarEvent.prototype.getEndDateInTZ,
-
-    utcStart: CalendarEvent.prototype.utcStart,
-    utcEnd: CalendarEvent.prototype.utcEnd,
-
-    localStart: CalendarEvent.prototype.localStart,
-    localEnd: CalendarEvent.prototype.localEnd,
-
-    duration: CalendarEvent.prototype.duration,
-
-    // ---
-
-    // Read-only
-    recurrence: O.bind( 'original.recurrence' ),
-
-    inclusions: null,
-    exceptions: null,
-
-    removedDates: null,
-
-    index: function () {
-        var start = this.get( 'start' ),
-            original = this.get( 'original' );
-        return O.isEqual( start, original.get( 'start' ) ) ? 0 :
-            original.get( 'allStartDates' )
-                    .binarySearch( Date.fromJSON( this.get( 'id' ) ) );
-    }.property().nocache(),
-
-    allStartDates: function () {
-        return this.get( 'original' ).get( 'allStartDates' );
-    }.property().nocache(),
-
-    totalOccurrences: function () {
-        return this.get( 'original' ).get( 'totalOccurrences' );
-    }.property().nocache(),
-
-    // ---
-
-    alerts: proxyOverrideAttibute( Array, 'alerts' ),
-
-    // ---
-
-    organizer: proxyOverrideAttibute( Object, 'organizer' ),
-    attendees: proxyOverrideAttibute( Array, 'attendees' ),
-
-    rsvp: O.bindTwoWay( 'original.rsvp' ),
-
-    // ---
-
-    attachments: proxyOverrideAttibute( Array, 'attachments' ),
-
-    isUploading: CalendarEvent.prototype.isUploading,
-    files: CalendarEvent.prototype.files,
-    addFile: CalendarEvent.prototype.addFile,
-    removeFile: CalendarEvent.prototype.removeFile
-});
-
-JMAP.CalendarEvent = CalendarEvent;
-JMAP.CalendarEventOccurrence = CalendarEventOccurrence;
-
-}( JMAP ) );
-
-
-// -------------------------------------------------------------------------- \\
-// File: InfiniteDateSource.js                                                \\
-// Module: CalendarModel                                                      \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
-// -------------------------------------------------------------------------- \\
-
-/*global O, JMAP */
-
-( function ( JMAP ) {
-
-var InfiniteDateSource = O.Class({
-
-    Extends: O.ObservableArray,
-
-    init: function ( mixin ) {
-        InfiniteDateSource.parent.init.call( this, null, mixin );
-        this.windowLengthDidChange();
-    },
-
-    start: new Date(),
-
-    getNext: function ( date ) {
-        return new Date( date ).add( 1 );
-    },
-
-    getPrev: function ( date ) {
-        return new Date( date ).subtract( 1 );
-    },
-
-    windowLength: 10,
-
-    windowLengthDidChange: function () {
-        var windowLength = this.get( 'windowLength' ),
-            length = this.get( 'length' ),
-            anchor, array, i;
-        if ( length < windowLength ) {
-            anchor = this.last();
-            array = this._array;
-            for ( i = length; i < windowLength; i += 1 ) {
-                array[i] = anchor = anchor ?
-                    this.getNext( anchor ) : this.get( 'start' );
-            }
-            this.rangeDidChange( length, windowLength );
-        }
-        this.set( 'length', windowLength );
-    }.observes( 'windowLength' ),
-
-    shiftWindow: function ( offset ) {
-        var current = this._array.slice(),
-            length = this.get( 'windowLength' ),
-            anchor;
-        if ( offset < 0 ) {
-            anchor = current[0];
-            while ( offset++ ) {
-                anchor = this.getPrev( anchor );
-                current.unshift( anchor );
-            }
-            current = current.slice( 0, length );
-        } else {
-            anchor = current.last();
-            while ( offset-- ) {
-                anchor = this.getNext( anchor );
-                current.push( anchor );
-            }
-            current = current.slice( -length );
-        }
-        this.set( '[]', current );
-    }
-});
-
-JMAP.InfiniteDateSource = InfiniteDateSource;
 
 }( JMAP ) );
 
@@ -3048,18 +4112,19 @@ var nonRepeatingEvents = new O.Object({
     },
 
     buildIndex: function () {
-        var index = this.index = {},
-            timeZone = JMAP.calendar.get( 'timeZone' ),
-            storeKeys = store.findAll( CalendarEvent, function ( data ) {
-                return !data.recurrence;
-            }),
-            i = 0, l = storeKeys.length,
-            event, timestamp, end, events;
+        var index = this.index = {};
+        var timeZone = JMAP.calendar.get( 'timeZone' );
+        var storeKeys = store.findAll( CalendarEvent, function ( data ) {
+            return !data.recurrenceRule && !data.recurrenceOverrides;
+        });
+        var i = 0;
+        var l = storeKeys.length;
+        var event, timestamp, end, events;
         for ( ; i < l; i += 1 ) {
             event = store.materialiseRecord( storeKeys[i], CalendarEvent );
-            timestamp = +event.getStartDateInTZ( timeZone );
+            timestamp = +event.getStartInTimeZone( timeZone );
             timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
-            end = +event.getEndDateInTZ( timeZone );
+            end = +event.getEndInTimeZone( timeZone );
             while ( timestamp < end ) {
                 events = index[ timestamp ] || ( index[ timestamp ] = [] );
                 events.push( event );
@@ -3070,11 +4135,11 @@ var nonRepeatingEvents = new O.Object({
     },
 
     getEventsForDate: function ( date ) {
+        var timestamp = +date;
+        timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
         if ( !this.index ) {
             this.buildIndex();
         }
-        var timestamp = +date;
-        timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
         return this.index[ timestamp ] || null;
     }
 });
@@ -3087,10 +4152,11 @@ var repeatingEvents = new O.Object({
 
     records: function () {
         var storeKeys = store.findAll( CalendarEvent, function ( data ) {
-                return !!data.recurrence;
-            }),
-            i = 0, l = storeKeys.length,
-            records = new Array( l );
+            return !!data.recurrenceRule || !!data.recurrenceOverrides;
+        });
+        var i = 0;
+        var l = storeKeys.length;
+        var records = new Array( l );
         for ( ; i < l; i += 1 ) {
             records[i] = store.materialiseRecord( storeKeys[i], CalendarEvent );
         }
@@ -3107,21 +4173,26 @@ var repeatingEvents = new O.Object({
     buildIndex: function ( date ) {
         var start = this.start = new Date( date ).subtract( 60 );
         var end = this.end = new Date( date ).add( 120 );
-        var index = this.index = {},
-            timeZone = JMAP.calendar.get( 'timeZone' ),
-            records = this.get( 'records' ),
-            i = 0, l = records.length,
-            event, occurs, j, ll, occurrence,
-            timestamp, endStamp, events;
+        var startIndexStamp = +start;
+        var endIndexStamp = +end;
+        var index = this.index = {};
+        var timeZone = JMAP.calendar.get( 'timeZone' );
+        var records = this.get( 'records' );
+        var i = 0;
+        var l = records.length;
+        var event, occurs, j, ll, occurrence, timestamp, endStamp, events;
 
         while ( i < l ) {
             event = records[i];
-            occurs = event.getOccurrencesForDateRange( start, end, timeZone );
+            occurs = event
+                .getOccurrencesThatMayBeInDateRange( start, end, timeZone );
             for ( j = 0, ll = occurs ? occurs.length : 0; j < ll; j += 1 ) {
                 occurrence = occurs[j];
-                timestamp = +occurrence.getStartDateInTZ( timeZone );
+                timestamp = +occurrence.getStartInTimeZone( timeZone );
                 timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
-                endStamp = +occurrence.getEndDateInTZ( timeZone );
+                timestamp = Math.max( startIndexStamp, timestamp );
+                endStamp = +occurrence.getEndInTimeZone( timeZone );
+                endStamp = Math.min( endIndexStamp, endStamp );
                 while ( timestamp < endStamp ) {
                     events = index[ timestamp ] || ( index[ timestamp ] = [] );
                     events.push( occurrence );
@@ -3134,11 +4205,11 @@ var repeatingEvents = new O.Object({
     },
 
     getEventsForDate: function ( date ) {
+        var timestamp = +date;
+        timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
         if ( !this.index || date < this.start || date >= this.end ) {
             this.buildIndex( date );
         }
-        var timestamp = +date;
-        timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
         return this.index[ timestamp ] || null;
     }
 });
@@ -3155,8 +4226,8 @@ var NO_EVENTS = [];
 var eventSources = [ nonRepeatingEvents, repeatingEvents ];
 var sortByStartInTimeZone = function ( timeZone ) {
     return function ( a, b ) {
-        var aStart = a.getStartDateInTZ( timeZone ),
-            bStart = b.getStartDateInTZ( timeZone );
+        var aStart = a.getStartInTimeZone( timeZone ),
+            bStart = b.getStartInTimeZone( timeZone );
         return aStart < bStart ? -1 : aStart > bStart ? 1 : 0;
     };
 };
@@ -3177,7 +4248,7 @@ var getEventsForDate = function ( date, timeZone, allDay ) {
         // Filter out all-day and invisible calendars.
         results = results.filter( function ( event ) {
             return event.get( 'calendar' ).get( 'isVisible' ) &&
-                ( showDeclined || event.get( 'rsvp' ) !== 'no' ) &&
+                ( showDeclined || event.get( 'rsvp' ) !== 'declined' ) &&
                 ( !allDay || event.get( 'isAllDay' ) === ( allDay > 0 ) );
         });
 
@@ -3190,23 +4261,27 @@ var getEventsForDate = function ( date, timeZone, allDay ) {
 
 // ---
 
-var eventLists = [];
+var eventsLists = [];
 
 var EventsList = O.Class({
+
     Extends: O.ObservableArray,
+
     init: function ( date, allDay ) {
         this.date = date;
         this.allDay = allDay;
 
-        eventLists.push( this );
+        eventsLists.push( this );
 
-        EventsList.parent.init.call( this, getEventsForDate(
-            date, JMAP.calendar.get( 'timeZone' ), allDay ));
+        EventsList.parent.init.call( this,
+            getEventsForDate( date, JMAP.calendar.get( 'timeZone' ), allDay ));
     },
+
     destroy: function () {
-        eventLists.erase( this );
+        eventsLists.erase( this );
         EventsList.parent.destroy.call( this );
     },
+
     recalculate: function () {
         return this.set( '[]', getEventsForDate(
             this.date, JMAP.calendar.get( 'timeZone' ), this.allDay ));
@@ -3218,12 +4293,14 @@ var EventsList = O.Class({
 var toUTCDay = function ( date ) {
     return new Date( date - ( date % ( 24 * 60 * 60 * 1000 ) ) );
 };
+
 var twelveWeeks = 12 * 7 * 24 * 60 * 60 * 1000;
 var now = new Date();
-
+var usedTimeZones = {};
 var editStore;
 
 O.extend( JMAP.calendar, {
+
     editStore: editStore = new O.NestedStore( store ),
 
     undoManager: new O.StoreUndoManager({
@@ -3237,6 +4314,7 @@ O.extend( JMAP.calendar, {
 
     showDeclined: false,
     timeZone: null,
+    usedTimeZones: usedTimeZones,
 
     loadingEventsStart: now,
     loadingEventsEnd: now,
@@ -3254,12 +4332,12 @@ O.extend( JMAP.calendar, {
         var loadingEventsEnd = this.loadingEventsEnd;
         var start, end;
         if ( loadingEventsStart === loadingEventsEnd ) {
-            start = toUTCDay( date ).subtract( 24, 'week' );
-            end = toUTCDay( date ).add( 24, 'week' );
+            start = toUTCDay( date ).subtract( 16, 'week' );
+            end = toUTCDay( date ).add( 48, 'week' );
             this.callMethod( 'getCalendarEventList', {
                 filter: {
-                    after: start,
-                    before: end
+                    after: start.toJSON() + 'Z',
+                    before: end.toJSON() + 'Z'
                 },
                 fetchCalendarEvents: true
             }, function () {
@@ -3267,8 +4345,8 @@ O.extend( JMAP.calendar, {
                     .set( 'loadedEventsStart', start )
                     .set( 'loadedEventsEnd', end );
             });
-            this.loadingEventsStart = start;
-            this.loadingEventsEnd = end;
+            this.set( 'loadingEventsStart', start );
+            this.set( 'loadingEventsEnd', end );
             return;
         }
         if ( date < +loadingEventsStart + twelveWeeks ) {
@@ -3277,14 +4355,14 @@ O.extend( JMAP.calendar, {
             ).subtract( 24, 'week' );
             this.callMethod( 'getCalendarEventList', {
                 filter: {
-                    after: start,
-                    before: loadingEventsStart
+                    after: start.toJSON() + 'Z',
+                    before: loadingEventsStart.toJSON() + 'Z'
                 },
                 fetchCalendarEvents: true
             }, function () {
                 JMAP.calendar.set( 'loadedEventsStart', start );
             });
-            this.loadingEventsStart = start;
+            this.set( 'loadingEventsStart', start );
         }
         if ( date > +loadingEventsEnd - twelveWeeks ) {
             end = toUTCDay( date > loadingEventsEnd ?
@@ -3292,14 +4370,14 @@ O.extend( JMAP.calendar, {
             ).add( 24, 'week' );
             this.callMethod( 'getCalendarEventList', {
                 filter: {
-                    after: loadingEventsEnd,
-                    before: end
+                    after: loadingEventsEnd.toJSON() + 'Z',
+                    before: end.toJSON() + 'Z'
                 },
                 fetchCalendarEvents: true
             }, function () {
                 JMAP.calendar.set( 'loadedEventsEnd', end );
             });
-            this.loadingEventsEnd = end;
+            this.set( 'loadingEventsEnd', end );
         }
     },
 
@@ -3310,8 +4388,8 @@ O.extend( JMAP.calendar, {
     }.observes( 'timeZone' ),
 
     recalculate: function () {
-        eventLists.forEach( function ( eventList ) {
-            eventList.recalculate();
+        eventsLists.forEach( function ( eventsList ) {
+            eventsList.recalculate();
         });
     }.queue( 'before' ).observes( 'showDeclined' ),
 
@@ -3319,11 +4397,20 @@ O.extend( JMAP.calendar, {
         this.replaceEvents = true;
         this.callMethod( 'getCalendarEventList', {
             filter: {
-                after: this.loadedEventsStart,
-                before: this.loadedEventsEnd
+                after: this.loadedEventsStart.toJSON() + 'Z',
+                before: this.loadedEventsEnd.toJSON() + 'Z'
             },
             fetchCalendarEvents: true
         });
+    },
+
+    seenTimeZone: function ( timeZone ) {
+        if ( timeZone ) {
+            var timeZoneId = timeZone.id;
+            usedTimeZones[ timeZoneId ] =
+                ( usedTimeZones[ timeZoneId ] || 0 ) + 1;
+        }
+        return this;
     }
 });
 store.on( Calendar, JMAP.calendar, 'recalculate' )
@@ -3599,8 +4686,8 @@ JMAP.AmbiguousDate = AmbiguousDate;
 
 ( function ( JMAP ) {
 
-var Record = O.Record,
-    attr = Record.attr;
+var Record = O.Record;
+var attr = Record.attr;
 
 var Contact = O.Class({
 
@@ -3705,7 +4792,7 @@ var Contact = O.Class({
 
     emailName: function () {
         var name = this.get( 'name' ).replace( /["\\]/g, '' );
-        if ( /[,;@]/.test( name ) ) {
+        if ( /[,;<>@()]/.test( name ) ) {
             name = '"' + name + '"';
         }
         return name;
@@ -3824,10 +4911,13 @@ var ContactGroup = O.Class({
     }),
 
     contactIndex: function () {
-        return this.get( 'contacts' ).reduce( function ( index, contact ) {
-            index[ contact.get( 'storeKey' ) ] = true;
-            return index;
-        }, {} );
+        var storeKeys = this.contacts.getRaw( this, 'contacts' );
+        var index = {};
+        var i, l;
+        for ( i = 0, l = storeKeys.length; i < l; i += 1 ) {
+            index[ storeKeys[i] ] = true;
+        }
+        return index;
     }.property( 'contacts' ),
 
     contains: function ( contact ) {
@@ -3937,8 +5027,8 @@ O.extend( JMAP.contacts, {
 
 ( function ( JMAP ) {
 
-var Record = O.Record,
-    attr = Record.attr;
+var Record = O.Record;
+var attr = Record.attr;
 
 var ValidationError = O.ValidationError;
 var REQUIRED        = ValidationError.REQUIRED;
@@ -4079,11 +5169,11 @@ var Mailbox = O.Class({
                 siblings.indexOf( dest ) + ( where === 'next' ? 1 : 0 ),
             prev = index ? siblings.getObjectAt( index - 1 ) : null,
             next = siblings.getObjectAt( index ),
-            prevPrec = prev ? prev.get( 'sortOrder' ) : 0,
-            nextPrec = next ? next.get( 'sortOrder' ) : ( index + 2 ) * 32,
+            prevSortOrder = prev ? prev.get( 'sortOrder' ) : 0,
+            nextSortOrder = next ? next.get( 'sortOrder' ) : ( index + 2 ) * 32,
             i, p, l, folder;
 
-        if ( nextPrec - prevPrec < 2 ) {
+        if ( nextSortOrder - prevSortOrder < 2 ) {
             for ( i = 0, p = 32, l = siblings.get( 'length' );
                     i < l; i += 1, p += 32 ) {
                 folder = siblings.getObjectAt( i );
@@ -4094,11 +5184,11 @@ var Mailbox = O.Class({
                     }
                 }
             }
-            if ( prev ) { prevPrec = prev.get( 'sortOrder' ); }
-            if ( next ) { nextPrec = next.get( 'sortOrder' ); }
+            if ( prev ) { prevSortOrder = prev.get( 'sortOrder' ); }
+            if ( next ) { nextSortOrder = next.get( 'sortOrder' ); }
         }
         this.set( 'parent', parent || null )
-            .set( 'sortOrder', ( nextPrec + prevPrec ) >> 1 );
+            .set( 'sortOrder', ( nextSortOrder + prevSortOrder ) >> 1 );
     },
 
     // ---
@@ -4214,7 +5304,8 @@ var Message = O.Class({
     isDraft: attr( Boolean ),
     hasAttachment: attr( Boolean ),
 
-    from: attr( Object ),
+    sender: attr( Object ),
+    from: attr( Array ),
     to: attr( Array ),
     subject: attr( String ),
     date: attr( Date ),
@@ -4248,13 +5339,38 @@ var Message = O.Class({
 
     fromName: function () {
         var from = this.get( 'from' );
-        return from ? from.name || from.email.split( '@' )[0] : '';
+        var emailer = from && from [0] || null;
+        return emailer ? emailer.name || emailer.email.split( '@' )[0] : '';
     }.property( 'from' ),
 
     fromEmail: function () {
         var from = this.get( 'from' );
-        return from ? from.email : '';
+        var emailer = from && from [0] || null;
+        return emailer ? emailer.email : '';
     }.property( 'from' ),
+
+    // ---
+
+    fullDate: function () {
+        var date = this.get( 'date' );
+        return O.i18n.date( date, 'fullDateAndTime' );
+    }.property( 'date' ),
+
+    relativeDate: function () {
+        var date = this.get( 'date' ),
+            now = new Date();
+        // As the server clock may not be exactly in sync with the client's
+        // clock, it's possible to get a message which appears to be dated a
+        // few seconds into the future! Make sure we always display this as
+        // a few minutes ago instead.
+        return date < now ?
+            date.relativeTo( now, true ) :
+            now.relativeTo( date, true );
+    }.property().nocache(),
+
+    formattedSize: function () {
+        return O.i18n.fileSize( this.get( 'size' ), 1 );
+    }.property( 'size' ),
 
     // ---
 
@@ -4284,7 +5400,7 @@ var Message = O.Class({
 
     cc: attr( Array ),
     bcc: attr( Array ),
-    replyTo: attr( Object ),
+    replyTo: attr( Array ),
 
     textBody: attr( String ),
     htmlBody: attr( String ),
@@ -4311,8 +5427,9 @@ var Message = O.Class({
     detailsProperties: [
         'blobId',
         'inReplyToMessageId',
-        'headers.List-Id',
-        'headers.List-Post',
+        'headers.list-id',
+        'headers.list-post',
+        'sender',
         'cc',
         'bcc',
         'replyTo',
@@ -4510,7 +5627,11 @@ var Thread = O.Class({
     // senders is [{name: String, email: String}]
     senders: function () {
         return this.get( 'messages' ).map( function ( message ) {
-            return message.isIn( 'trash' ) ? null : message.get( 'from' );
+            if ( message.isIn( 'trash' ) ) {
+                return null;
+            }
+            var from = message.get( 'from' );
+            return from && from[0] || null;
         }).filter( O.Transform.toBoolean );
     }.property( 'messages' ).nocache(),
 
@@ -4536,7 +5657,11 @@ var Thread = O.Class({
 
     sendersInTrash: function () {
         return this.get( 'messages' ).map( function ( message ) {
-            return message.isIn( 'trash' ) ? message.get( 'from' ) : null;
+            if ( !message.isIn( 'trash' ) ) {
+                return null;
+            }
+            var from = message.get( 'from' );
+            return from && from[0] || null;
         }).filter( O.Transform.toBoolean );
     }.property( 'messages' ).nocache(),
 
@@ -4630,13 +5755,16 @@ JMAP.Thread = Thread;
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP */
+/*global O, JMAP, JSON */
 
 ( function ( JMAP, undefined ) {
 
-var Status = O.Status,
-    EMPTY = Status.EMPTY,
-    OBSOLETE = Status.OBSOLETE;
+var Status = O.Status;
+var EMPTY = Status.EMPTY;
+var OBSOLETE = Status.OBSOLETE;
+
+var Message = JMAP.Message;
+var Thread = JMAP.Thread;
 
 var isFetched = function ( message ) {
     return !message.is( EMPTY|OBSOLETE );
@@ -4679,42 +5807,40 @@ var MessageList = O.Class({
     sort: [ 'date desc' ],
     collapseThreads: true,
 
-    Type: JMAP.Message,
+    Type: Message,
 
     init: function ( options ) {
         this._snippets = {};
         this._snippetsNeeded = [];
 
-        this.messageToThreadId = {};
+        this.messageToThreadSK = {};
 
         MessageList.parent.init.call( this, options );
     },
 
     // Precondition: All ids are fetched for the window to be checked.
     checkIfWindowIsFetched: function ( index ) {
-        var store = this.get( 'store' ),
-            Type = this.get( 'Type' ),
-            windowSize = this.get( 'windowSize' ),
-            list = this._list,
-            i = index * windowSize,
-            l = Math.min( i + windowSize, this.get( 'length' ) ),
-            collapseThreads = this.get( 'collapseThreads' ),
-            messageToThreadId = this.messageToThreadId,
-            messageId, threadId, thread;
+        var store = this.get( 'store' );
+        var windowSize = this.get( 'windowSize' );
+        var list = this._list;
+        var i = index * windowSize;
+        var l = Math.min( i + windowSize, this.get( 'length' ) );
+        var collapseThreads = this.get( 'collapseThreads' );
+        var messageToThreadSK = this.messageToThreadSK;
+        var messageSK, threadSK, thread;
         for ( ; i < l; i += 1 ) {
-            messageId = list[i];
+            messageSK = list[i];
             // No message, or out-of-date
-            if ( store.getRecordStatus( Type, messageId ) & (EMPTY|OBSOLETE) ) {
+            if ( store.getStatus( messageSK ) & (EMPTY|OBSOLETE) ) {
                 return false;
             }
             if ( collapseThreads ) {
-                threadId = messageToThreadId[ messageId ];
+                threadSK = messageToThreadSK[ messageSK ];
                 // No thread, or out-of-date
-                if ( store.getRecordStatus( JMAP.Thread, threadId ) &
-                        (EMPTY|OBSOLETE) ) {
+                if ( store.getStatus( Thread, threadSK ) & (EMPTY|OBSOLETE) ) {
                     return false;
                 }
-                thread = store.getRecord( JMAP.Thread, threadId );
+                thread = store.getRecord( Thread, '#' + threadSK );
                 return thread.get( 'messages' ).every( isFetched );
             }
         }
@@ -4725,41 +5851,40 @@ var MessageList = O.Class({
         var req = MessageList.parent.sourceWillFetchQuery.call( this );
 
         // If we have all the ids already, optimise the loading of the records.
-        var store = this.get( 'store' ),
-            list = this._list,
-            length = this.get( 'length' ),
-            collapseThreads = this.get( 'collapseThreads' ),
-            messageToThreadId = this.messageToThreadId,
-            threadId;
+        var store = this.get( 'store' );
+        var list = this._list;
+        var length = this.get( 'length' );
+        var collapseThreads = this.get( 'collapseThreads' );
+        var messageToThreadSK = this.messageToThreadSK;
 
         req.records = req.records.filter( function ( req ) {
-            var i = req.start,
-                l = i + req.count,
-                message, thread;
+            var i = req.start;
+            var l = i + req.count;
+            var message, thread, messageSK, threadSK;
 
             if ( length ) {
                 l = Math.min( l, length );
             }
 
             while ( i < l ) {
-                var id = list[i];
-                if ( id ) {
+                messageSK = list[i];
+                if ( messageSK ) {
                     i += 1;
                 } else {
-                    id = list[ l - 1 ];
-                    if ( !id ) { break; }
+                    messageSK = list[ l - 1 ];
+                    if ( !messageSK ) { break; }
                     l -= 1;
                 }
                 // Fetch the Message objects (if not already fetched).
                 // If already fetched, fetch the updates
                 if ( collapseThreads ) {
-                    threadId = messageToThreadId[ id ];
-                    thread = store.getRecord( JMAP.Thread, threadId );
+                    threadSK = messageToThreadSK[ messageSK ];
+                    thread = store.getRecord( Thread, '#' + threadSK );
                     // If already fetched, fetch the updates
                     refresh( thread );
                     thread.get( 'messages' ).forEach( refresh );
                 } else {
-                    message = store.getRecord( JMAP.Message, id );
+                    message = store.getRecord( Message, '#' + messageSK );
                     refresh( message );
                 }
             }
@@ -4816,25 +5941,26 @@ var MessageList = O.Class({
 
 JMAP.mail.handle( MessageList, {
     query: function ( query ) {
-        var filter = query.get( 'filter' ),
-            sort = query.get( 'sort' ),
-            collapseThreads = query.get( 'collapseThreads' ),
-            canGetDeltaUpdates = query.get( 'canGetDeltaUpdates' ),
-            state = query.get( 'state' ),
-            request = query.sourceWillFetchQuery(),
-            hasMadeRequest = false;
+        var filter = query.get( 'filter' );
+        var sort = query.get( 'sort' );
+        var collapseThreads = query.get( 'collapseThreads' );
+        var canGetDeltaUpdates = query.get( 'canGetDeltaUpdates' );
+        var state = query.get( 'state' );
+        var request = query.sourceWillFetchQuery();
+        var hasMadeRequest = false;
+        var toMessageId = JMAP.store.getIdFromStoreKey.bind( JMAP.store );
 
         if ( canGetDeltaUpdates && state && request.refresh ) {
-            var list = query._list,
-                length = list.length,
-                upto = ( length === query.get( 'length' ) ) ?
+            var list = query._list;
+            var length = list.length;
+            var upto = ( length === query.get( 'length' ) ) ?
                     undefined : list[ length - 1 ];
             this.callMethod( 'getMessageListUpdates', {
                 filter: filter,
                 sort: sort,
                 collapseThreads: collapseThreads,
                 sinceState: state,
-                uptoMessageId: upto,
+                uptoMessageId: upto ? toMessageId( upto ) : null,
                 maxChanges: 250
             });
         }
@@ -4850,7 +5976,7 @@ JMAP.mail.handle( MessageList, {
                 sort: sort,
                 collapseThreads: collapseThreads,
                 position: start,
-                anchor: anchor,
+                anchor: anchor && toMessageId( anchor ),
                 anchorOffset: offset,
                 limit: count,
                 fetchThreads: collapseThreads && fetchData,
@@ -4882,18 +6008,20 @@ JMAP.mail.handle( MessageList, {
     // ---
 
     messageList: function ( args ) {
-        var store = this.get( 'store' ),
-            query = store.getQuery( getId( args ) ),
-            messageToThreadId, messageIds, threadIds, l;
+        var store = this.get( 'store' );
+        var query = store.getQuery( getId( args ) );
+        var messageToThreadSK, messageIds, threadIds, l;
 
         if ( query &&
                 args.collapseThreads === query.get( 'collapseThreads' ) ) {
-            messageToThreadId = query.messageToThreadId;
+            messageToThreadSK = query.messageToThreadSK;
             threadIds = args.threadIds;
             messageIds = args.idList = args.messageIds;
             l = messageIds.length;
             while ( l-- ) {
-                messageToThreadId[ messageIds[l] ] = threadIds[l];
+                messageToThreadSK[
+                    store.getStoreKey( Message, messageIds[l] )
+                ] = store.getStoreKey( Thread, threadIds[l] );
             }
             query.set( 'canGetDeltaUpdates', args.canCalculateUpdates );
             query.sourceDidFetchIdList( args );
@@ -4906,21 +6034,27 @@ JMAP.mail.handle( MessageList, {
     },
 
     messageListUpdates: function ( args ) {
-        var store = this.get( 'store' ),
-            query = store.getQuery( getId( args ) ),
-            messageToThreadId;
+        var store = this.get( 'store' );
+        var query = store.getQuery( getId( args ) );
+        var messageToThreadSK;
 
         if ( query &&
                 args.collapseThreads === query.get( 'collapseThreads' ) ) {
-            messageToThreadId = query.messageToThreadId;
+            messageToThreadSK = query.messageToThreadSK;
             args.upto = args.uptoMessageId;
             args.removed = args.removed.map( function ( obj ) {
-                delete messageToThreadId[ obj.messageId ];
-                return obj.messageId;
+                var messageId = obj.messageId;
+                delete messageToThreadSK[
+                    store.getStoreKey( Message, messageId )
+                ];
+                return messageId;
             });
             args.added = args.added.map( function ( obj ) {
-                messageToThreadId[ obj.messageId ] = obj.threadId;
-                return [ obj.index, obj.messageId ];
+                var messageId = obj.messageId;
+                messageToThreadSK[
+                    store.getStoreKey( Message, messageId )
+                ] = store.getStoreKey( Thread, obj.threadId );
+                return [ obj.index, messageId ];
             });
             query.sourceDidFetchUpdate( args );
         }
@@ -5079,6 +6213,8 @@ var isFalse = function () {
 
 // ---
 
+var READY = O.Status.READY;
+
 var reOrFwd = /^(?:(?:re|fwd):\s*)+/;
 var comparators = {
     id: function ( a, b ) {
@@ -5094,12 +6230,10 @@ var comparators = {
         return a.get( 'size' ) - b.get( 'size' );
     },
     from: function ( a, b ) {
-        var aFrom = a.get( 'from' );
-        var bFrom = b.get( 'from' );
-        var aFromPart = aFrom ? aFrom.name || aFrom.email : '';
-        var bFromPart = bFrom ? bFrom.name || bFrom.email : '';
+        var aFrom = a.get( 'fromName' ) || a.get( 'fromEmail' );
+        var bFrom = b.get( 'fromName' ) || b.get( 'fromEmail' );
 
-        return aFromPart < bFromPart ? -1 : aFromPart > bFromPart ? 1 : 0;
+        return aFrom < bFrom ? -1 : aFrom > bFrom ? 1 : 0;
     },
     to: function ( a, b ) {
         var aTo = a.get( 'to' );
@@ -5127,9 +6261,9 @@ var comparators = {
     }
 };
 
-var compareToId = function ( fields, id, message ) {
-    var otherMessage = id && ( store.getRecordStatus( Message, id ) & READY ) ?
-            store.getRecord( Message, id ) : null;
+var compareToStoreKey = function ( fields, storeKey, message ) {
+    var otherMessage = storeKey && ( store.getStatus( storeKey ) & READY ) ?
+            store.getRecord( Message, '#' + storeKey ) : null;
     var i, l, comparator, result;
     if ( !otherMessage ) {
         return 1;
@@ -5158,9 +6292,9 @@ var compareToMessage = function ( fields, aData, bData ) {
 
 var splitDirection = function ( fields, collapseThreads ) {
     return fields.map( function ( field ) {
-        var space = field.indexOf( ' ' ),
-            prop = space ? field.slice( 0, space ) : field,
-            dir = space && field.slice( space + 1 ) === 'asc' ? 1 : -1;
+        var space = field.indexOf( ' ' );
+        var prop = space ? field.slice( 0, space ) : field;
+        var dir = space && field.slice( space + 1 ) === 'asc' ? 1 : -1;
 
         if ( collapseThreads && /^is/.test( prop ) ) {
             prop += 'Thread';
@@ -5170,32 +6304,26 @@ var splitDirection = function ( fields, collapseThreads ) {
 };
 
 var calculatePreemptiveAdd = function ( query, addedMessages ) {
-    var idList = query._list;
+    var storeKeyList = query._list;
     var sort = splitDirection(
-        query.get( 'sort' ), query.get( 'collapseThreads' ) );
-    var comparator = compareToId.bind( null, sort );
+            query.get( 'sort' ), query.get( 'collapseThreads' ) );
+    var comparator = compareToStoreKey.bind( null, sort );
     var added = addedMessages.reduce( function ( added, message ) {
-            var messageId = message.get( 'id' );
-            if ( messageId ) {
-                added.push({
-                    message: message,
-                    messageId: messageId,
-                    threadId: message.get( 'threadId' ),
-                    // Can't insert draft messages for now; would need to use
-                    // store keys in the remote quries instead of message ids.
-                    index: messageId ?
-                        idList.binarySearch( message, comparator ) : -1
-                });
-            }
+            added.push({
+                message: message,
+                messageSK: message.get( 'storeKey' ),
+                threadSK: message.get( 'thread' ).get( 'storeKey' ),
+                index: storeKeyList.binarySearch( message, comparator )
+            });
             return added;
         }, [] );
 
     var collapseThreads = query.get( 'collapseThreads' );
-    var messageToThreadId = query.get( 'messageToThreadId' );
-    var threadToMessageId = collapseThreads && added.length ?
-            idList.reduce( function ( map, messageId ) {
-                if ( messageId ) {
-                    map[ messageToThreadId[ messageId ] ] = messageId;
+    var messageToThreadSK = query.get( 'messageToThreadSK' );
+    var threadToMessageSK = collapseThreads && added.length ?
+            storeKeyList.reduce( function ( map, messageSK ) {
+                if ( messageSK ) {
+                    map[ messageToThreadSK[ messageSK ] ] = messageSK;
                 }
                 return map;
             }, {} ) :
@@ -5204,12 +6332,12 @@ var calculatePreemptiveAdd = function ( query, addedMessages ) {
     added.sort( compareToMessage.bind( null, sort ) );
 
     return added.length ? added.reduce( function ( result, item ) {
-        var messageId = item.messageId;
-        var threadId = item.threadId;
-        if ( !collapseThreads || !threadToMessageId[ threadId ] ) {
-            threadToMessageId[ threadId ] = messageId;
-            messageToThreadId[ messageId ] = threadId;
-            result.push([ item.index + result.length, messageId ]);
+        var messageSK = item.messageSK;
+        var threadSK = item.threadSK;
+        if ( !collapseThreads || !threadToMessageSK[ threadSK ] ) {
+            threadToMessageSK[ threadSK ] = messageSK;
+            messageToThreadSK[ messageSK ] = threadSK;
+            result.push([ item.index + result.length, messageSK ]);
         }
         return result;
     }, [] ) : null;
@@ -5246,7 +6374,7 @@ var updateQueries = function ( filterTest, sortTest, deltas ) {
 
 var identity = function ( v ) { return v; };
 
-var addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messageId ) {
+var addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messageSK ) {
     var l = willRemove ? willRemove.length : 1;
     var i, addMailboxId, removeMailboxId, data;
     for ( i = 0; i < l; i += 1 ) {
@@ -5256,7 +6384,7 @@ var addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messa
         if ( !data ) {
             data = {
                 method: 'move',
-                messageIds: [],
+                messageSKs: [],
                 args: [
                     null,
                     willRemove && removeMailboxId,
@@ -5267,25 +6395,23 @@ var addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messa
             inverse[ addMailboxId + removeMailboxId ] = data;
             undoManager.pushUndoData( data );
         }
-        data.messageIds.push( messageId );
+        data.messageSKs.push( messageSK );
         willAdd = null;
     }
 };
 
 // ---
 
-var READY = O.Status.READY;
-
 var NO = 0;
 var TO_THREAD = 1;
 var TO_MAILBOX = 2;
 
-var getMessages = function getMessages ( ids, expand, mailbox, messageToThreadId, callback, hasDoneLoad ) {
+var getMessages = function getMessages ( messageSKs, expand, mailbox, messageToThreadSK, callback, hasDoneLoad ) {
     // Map to threads, then make sure all threads, including headers
     // are loaded
-    var allLoaded = true,
-        messages = [],
-        inTrash;
+    var allLoaded = true;
+    var messages = [];
+    var inTrash;
 
     var checkMessage = function ( message ) {
         if ( message.is( READY ) ) {
@@ -5305,13 +6431,13 @@ var getMessages = function getMessages ( ids, expand, mailbox, messageToThreadId
         }
     };
 
-    ids.forEach( function ( id ) {
-        var message = store.getRecord( Message, id ),
-            threadId = messageToThreadId[ id ],
-            thread;
+    messageSKs.forEach( function ( messageSK ) {
+        var message = store.getRecord( Message, '#' + messageSK );
+        var threadSK = messageToThreadSK[ messageSK ];
+        var thread;
         inTrash = message.isIn( 'trash' );
-        if ( expand && threadId ) {
-            thread = store.getRecord( Thread, threadId );
+        if ( expand && threadSK ) {
+            thread = store.getRecord( Thread, '#' + threadSK );
             if ( thread.is( READY ) ) {
                 thread.get( 'messages' ).forEach( checkMessage );
             } else {
@@ -5331,7 +6457,7 @@ var getMessages = function getMessages ( ids, expand, mailbox, messageToThreadId
         JMAP.mail.gc.isPaused = true;
         JMAP.mail.addCallback(
             getMessages.bind( null,
-                ids, expand, mailbox, messageToThreadId, callback, true )
+                messageSKs, expand, mailbox, messageToThreadSK, callback, true )
         );
     }
     return true;
@@ -5352,83 +6478,38 @@ var doUndoAction = function ( method, args ) {
 
 // ---
 
-var byFolderTreeOrder = function ( a, b ) {
-    if ( a === b ) {
-        return 0;
-    }
-    if ( a.get( 'parent' ) !== b.get( 'parent' ) ) {
-        var aParents = [a],
-            bParents = [b],
-            parent = a,
-            al, bl;
-
-        while ( parent = parent.get( 'parent' ) ) {
-            if ( parent === b ) {
-                return 1;
-            }
-            aParents.push( parent );
-        }
-        parent = b;
-        while ( parent = parent.get( 'parent' ) ) {
-            if ( parent === a ) {
-                return -1;
-            }
-            bParents.push( parent );
-        }
-
-        al = aParents.length;
-        bl = bParents.length;
-        while ( al-- && bl-- ) {
-            if ( ( a = aParents[ al ] ) !== ( b = bParents[ bl ] ) ) {
-                break;
-            }
-        }
-    }
-    return ( a.get( 'sortOrder' ) - b.get( 'sortOrder' ) ) ||
-        O.i18n.compare( a.get( 'displayName' ), b.get( 'displayName' ) ) ||
-        ( a.get( 'id' ) < b.get( 'id' ) ? -1 : 1 );
-};
-
-var rootMailboxes = store.getQuery( 'rootMailboxes', O.LiveQuery, {
-    Type: Mailbox,
-    filter: function ( data ) {
-        return !data.parentId;
+var roleIndex = new O.Object({
+    index: null,
+    clearIndex: function () {
+        this.index = null;
     },
-    sort: [ 'sortOrder', 'name' ]
-});
-
-var allMailboxes = new O.ObservableArray( null, {
-    content: store.getQuery( 'allMailboxes', O.LiveQuery, {
-        Type: Mailbox
-    }),
-    contentDidChange: function () {
-        var mailboxes = this.get( 'content' ).get( '[]' );
-        mailboxes.sort( byFolderTreeOrder );
-        return this.set( '[]', mailboxes );
-    }
-}).contentDidChange();
-store.on( Mailbox, allMailboxes, 'contentDidChange' );
-
-var systemMailboxIds = new O.Object({
-    foldersDidChange: function () {
-        rootMailboxes.forEach( function ( mailbox ) {
-            var role = mailbox.get( 'role' );
-            if ( role ) {
-                this.set( role, mailbox.get( 'id' ) );
-            }
-            if ( mailbox.get( 'name' ) === 'Templates' ) {
-                this.set( 'templates', mailbox.get( 'id' ) );
-            }
-        }, this );
+    buildIndex: function () {
+        return this.index = store.getAll( Mailbox ).reduce(
+            function ( index, mailbox ) {
+                var role = mailbox.get( 'role' );
+                if ( role ) {
+                    index[ role ] = mailbox.get( 'id' );
+                }
+                return index;
+            }, {} );
+    },
+    getIndex: function () {
+        return this.index || this.buildIndex();
     }
 });
-rootMailboxes.addObserverForKey( '[]', systemMailboxIds, 'foldersDidChange' );
+store.on( Mailbox, roleIndex, 'clearIndex' );
 
 // ---
 
 O.extend( JMAP.mail, {
 
     getMessages: getMessages,
+
+    getMailboxIdForRole: function ( role ) {
+        return roleIndex.getIndex()[ role ] || null;
+    },
+
+    // ---
 
     gc: new O.MemoryManager( store, [
         {
@@ -5486,18 +6567,17 @@ O.extend( JMAP.mail, {
         },
 
         applyChange: function ( data ) {
-            var mail = JMAP.mail;
             var pending = this.pending;
             var sequence = new JMAP.Sequence();
             var l = data.length;
-            var call, ids;
+            var call, messageSKs;
 
             while ( l-- ) {
                 call = data[l];
-                ids = call.messageIds;
-                if ( ids ) {
+                messageSKs = call.messageSKs;
+                if ( messageSKs ) {
                     sequence.then(
-                        mail.getMessages.bind( null, ids, NO, null, {} ) );
+                        getMessages.bind( null, messageSKs, NO, null, {} ) );
                 }
                 sequence.then( doUndoAction( call.method, call.args ) );
             }
@@ -5524,23 +6604,13 @@ O.extend( JMAP.mail, {
 
     // ---
 
-    byFolderTreeOrder: byFolderTreeOrder,
-
-    rootMailboxes: rootMailboxes,
-
-    allMailboxes: allMailboxes,
-
-    systemMailboxIds: systemMailboxIds,
-
-    // ---
-
     setUnread: function ( messages, isUnread, allowUndo ) {
         var mailboxDeltas = {};
-        var trashId = systemMailboxIds.get( 'trash' );
-        var inverseMessageIds = allowUndo ? [] : null;
+        var trashId = this.getMailboxIdForRole( 'trash' );
+        var inverseMessageSKs = allowUndo ? [] : null;
         var inverse = allowUndo ? {
                 method: 'setUnread',
-                messageIds: inverseMessageIds,
+                messageSKs: inverseMessageSKs,
                 args: [
                     null,
                     !isUnread,
@@ -5570,7 +6640,7 @@ O.extend( JMAP.mail, {
 
             // Add inverse for undo
             if ( allowUndo ) {
-                inverseMessageIds.push( message.get( 'id' ) );
+                inverseMessageSKs.push( message.get( 'storeKey' ) );
             }
 
             // Draft messages unread status don't count in mailbox unread counts
@@ -5620,7 +6690,7 @@ O.extend( JMAP.mail, {
         // Update message list queries, or mark in need of refresh
         updateQueries( isFilteredOnUnread, isSortedOnUnread, null );
 
-        if ( allowUndo && inverseMessageIds.length ) {
+        if ( allowUndo && inverseMessageSKs.length ) {
             this.undoManager.pushUndoData( inverse );
         }
 
@@ -5628,10 +6698,10 @@ O.extend( JMAP.mail, {
     },
 
     setFlagged: function ( messages, isFlagged, allowUndo ) {
-        var inverseMessageIds = allowUndo ? [] : null;
+        var inverseMessageSKs = allowUndo ? [] : null;
         var inverse = allowUndo ? {
                 method: 'setFlagged',
-                messageIds: inverseMessageIds,
+                messageSKs: inverseMessageSKs,
                 args: [
                     null,
                     !isFlagged,
@@ -5650,14 +6720,14 @@ O.extend( JMAP.mail, {
 
             // Add inverse for undo
             if ( allowUndo ) {
-                inverseMessageIds.push( message.get( 'id' ) );
+                inverseMessageSKs.push( message.get( 'storeKey' ) );
             }
         });
 
         // Update message list queries, or mark in need of refresh
         updateQueries( isFilteredOnFlagged, isSortedOnFlagged, null );
 
-        if ( allowUndo && inverseMessageIds.length ) {
+        if ( allowUndo && inverseMessageSKs.length ) {
             this.undoManager.pushUndoData( inverse );
         }
 
@@ -5705,7 +6775,7 @@ O.extend( JMAP.mail, {
         }
 
         messages.forEach( function ( message ) {
-            var messageId = message.get( 'id' );
+            var messageSK = message.get( 'storeKey' );
             var mailboxes = message.get( 'mailboxes' );
 
             // Calculate the set of mailboxes to add/remove
@@ -5767,7 +6837,7 @@ O.extend( JMAP.mail, {
             // Add inverse for undo
             if ( allowUndo ) {
                 addMoveInverse( inverse, undoManager,
-                    willAdd, willRemove, messageId );
+                    willAdd, willRemove, messageSK );
             }
 
             // Calculate any changes to the mailbox message counts
@@ -5780,7 +6850,7 @@ O.extend( JMAP.mail, {
             decrementMailboxCount = function ( mailbox ) {
                 var delta = getMailboxDelta(
                         mailboxDeltas, mailbox.get( 'id' ) );
-                delta.removed.push( messageId );
+                delta.removed.push( message.get( 'storeKey' ) );
                 delta.totalMessages -= 1;
                 if ( isUnread ) {
                     delta.unreadMessages -= 1;
@@ -5966,8 +7036,12 @@ O.extend( JMAP.mail, {
     },
 
     report: function ( messages, asSpam, allowUndo ) {
-        var messageIds = messages.map( function ( message ) {
-            return message.get( 'id' );
+        var messageIds = [];
+        var messageSKs = [];
+
+        messages.forEach( function ( message ) {
+            messageIds.push( message.get( 'id' ) );
+            messageSKs.push( message.get( 'storeKey' ) );
         });
 
         this.callMethod( 'reportMessages', {
@@ -5978,7 +7052,7 @@ O.extend( JMAP.mail, {
         if ( allowUndo ) {
             this.undoManager.pushUndoData({
                 method: 'reportMessages',
-                messageIds: messageIds,
+                messageSKs: messageSKs,
                 args: [
                     null,
                     !asSpam,
@@ -5993,12 +7067,11 @@ O.extend( JMAP.mail, {
     // ---
 
     saveDraft: function ( message ) {
-        var inReplyToMessageId = message.get( 'inReplyToMessageId' ),
-            inReplyToMessage = null,
-            thread = null,
-            messages = null,
-            isFirstDraft = true,
-            READY = O.Status.READY;
+        var inReplyToMessageId = message.get( 'inReplyToMessageId' );
+        var inReplyToMessage = null;
+        var thread = null;
+        var messages = null;
+        var isFirstDraft = true;
         if ( inReplyToMessageId &&
                 ( store.getRecordStatus(
                     Message, inReplyToMessageId ) & READY ) ) {
@@ -6011,7 +7084,7 @@ O.extend( JMAP.mail, {
 
         // Save message
         message.get( 'mailboxes' ).add(
-            store.getRecord( Mailbox, systemMailboxIds.get( 'drafts' ) )
+            store.getRecord( Mailbox, this.getMailboxIdForRole( 'drafts' ) )
         );
         message.saveToStore();
 
@@ -6026,7 +7099,7 @@ O.extend( JMAP.mail, {
         }
 
         // Pre-emptively update draft mailbox counts
-        store.getRecord( Mailbox, systemMailboxIds.get( 'drafts' ) )
+        store.getRecord( Mailbox, this.getMailboxIdForRole( 'drafts' ) )
             .increment( 'totalMessages', 1 )
             .increment( 'totalThreads', isFirstDraft ? 1 : 0 )
             .setObsolete()

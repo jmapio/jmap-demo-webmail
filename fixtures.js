@@ -14,7 +14,7 @@ var API = {
                     name: 'Inbox',
                     role: 'inbox',
                     parentId: null,
-                    order: 0,
+                    sortOrder: 0,
                     totalMessages: 23,
                     unreadMessages: 8,
                     totalThreads: 23,
@@ -25,7 +25,7 @@ var API = {
                     name: 'Outbox',
                     role: 'outbox',
                     parentId: null,
-                    order: 1,
+                    sortOrder: 1,
                     totalMessages: 0,
                     unreadMessages: 0,
                     totalThreads: 0,
@@ -36,7 +36,7 @@ var API = {
                     name: 'Drafts',
                     role: 'drafts',
                     parentId: null,
-                    order: 2,
+                    sortOrder: 2,
                     totalMessages: 142,
                     unreadMessages: 0,
                     totalThreads: 142,
@@ -47,7 +47,7 @@ var API = {
                     name: 'Sent',
                     role: 'sent',
                     parentId: null,
-                    order: 5,
+                    sortOrder: 5,
                     totalMessages: 144,
                     unreadMessages: 5,
                     totalThreads: 144,
@@ -58,7 +58,7 @@ var API = {
                     name: 'Archive',
                     role: 'archive',
                     parentId: null,
-                    order: 1,
+                    sortOrder: 1,
                     totalMessages: 24,
                     unreadMessages: 0,
                     totalThreads: 24,
@@ -69,7 +69,7 @@ var API = {
                     name: 'Trash',
                     role: 'trash',
                     parentId: null,
-                    order: 20,
+                    sortOrder: 20,
                     totalMessages: 2,
                     unreadMessages: 0,
                     totalThreads: 2,
@@ -80,7 +80,7 @@ var API = {
                     name: 'Spam',
                     role: 'spam',
                     parentId: null,
-                    order: 10,
+                    sortOrder: 10,
                     totalMessages: 1,
                     unreadMessages: 4,
                     totalThreads: 1,
@@ -195,7 +195,7 @@ var API = {
                 date: new Date(
                     Date.now() - ~~( Math.random() * 10000000000 ) ).toJSON(),
                 subject: 'The sophisticated subject',
-                from: {name: 'Arthur Dent', email: 'arthur@example.com'},
+                from: [{name: 'Arthur Dent', email: 'arthur@example.com'}],
                 to: [ {name: 'Ford Prefect', email: 'ford@example.com'},
                     {name: 'Trillian McMillan', email: 'trills@example.com'} ],
                 size: ~~( Math.random() * Math.random() * 100000 ),
@@ -274,7 +274,6 @@ var API = {
                 {
                     id: 'c1',
 
-                    isShared: true,
                     isFlagged: false,
 
                     importance: 5,
@@ -324,7 +323,6 @@ var API = {
                 {
                     id: 'c2',
 
-                    isShared: true,
                     isFlagged: true,
 
                     importance: 2,
@@ -354,7 +352,6 @@ var API = {
                 {
                     id: 'c3',
 
-                    isShared: false,
                     isFlagged: false,
 
                     importance: 5,
@@ -384,7 +381,6 @@ var API = {
                 {
                     id: 'c4',
 
-                    isShared: false,
                     isFlagged: false,
 
                     importance: 1,
@@ -452,495 +448,9 @@ var API = {
     getCalendarEventList: function ( results, args ) {
         if ( args.eventIds ) {
             results.push([ 'calendarEvents', {
-                list: [{
-                    id: args.eventIds[0],
-
-                    calendarId: 'personal',
-
-                    summary: 'My awesome party',
-                    description: "So, I'm like, totally having an awesome party. It's going to be the best thing since Kylie Minogue.",
-                    location: "My house. In the middle of our street.",
-
-                    isAllDay: false,
-                    start: '2015-07-18T12:00:00',
-                    end: '2015-07-18T13:00:00',
-
-                    startTimeZone: null,
-                    endTimeZone: null,
-
-                    recurrence: null,
-                    inclusions: null,
-                    exceptions: null,
-
-                    organiser: {
-                        name: 'Joe Bloggs',
-                        email: 'joe@booyah.com',
-                        isYou: false
-                    },
-                    attendees: [
-                      { name: 'Joe Bloggs', email: 'joe@booyah.com',
-                        isYou: true, rsvp: 'yes' },
-                      { name: 'Hermione Watson', email: 'herm@watto.com',
-                        isYou: false, rsvp: 'maybe' }
-                    ]
-                }]
+                list: []
             }]);
-            return;
         }
-        results.push([ 'calendarEvents', {
-            list: [{
-                id: 'cal1',
-                state: 'foo',
-
-                calendarId: 'personal',
-
-                summary: 'Party',
-                description: 'The party of the century',
-                location: 'Melbourne',
-                showAsFree: false,
-
-                isAllDay: false,
-                start: '2015-07-18T12:00:00',
-                end: '2015-07-18T13:00:00',
-                startTimeZone: 'Europe/London',
-                endTimeZone: 'Europe/London',
-                recurrence: {
-                    frequency: 'daily',
-                    count: 3
-                },
-                inclusions: null,
-                exceptions: null,
-
-                alerts: [
-                    {
-                        minutesBefore: 60,
-                        type: 'email'
-                    },
-                    {
-                        minutesBefore: 15,
-                        type: 'alert'
-                    }
-                ],
-
-                attachments: [
-                    {
-                        name: 'file.doc',
-                        size: 1421323,
-                        url: '/d/test/download/file.doc'
-                    },
-                    {
-                        name: 'file.xls',
-                        size: 149150444123,
-                        url: '/d/test/download/file.xls'
-                    },
-                    {
-                        name: 'file.ppt',
-                        size: 149150444123,
-                        url: '/d/test/download/file.ppt'
-                    },
-                    {
-                        name: 'Flower.jpg',
-                        size: 1633,
-                        url: 'http://farm7.staticflickr.com/6146/5994894196_5b989248e2_b.jpg'
-                    },
-                    {
-                        name: 'Train.jpg',
-                        size: 1633,
-                        url: 'http://farm7.staticflickr.com/6005/5994325683_1441d5ba7d_b.jpg'
-                    },
-                ]
-            },
-            {
-                id: 'cal2',
-                state: 'foo',
-
-                calendarId: 'personal',
-
-                summary: 'After the party of the century',
-                description: 'After the party of the century',
-                location: 'Sydney',
-                showAsFree: false,
-
-                isAllDay: false,
-                start: '2013-11-04T18:00:00',
-                end: '2013-11-04T18:00:00',
-                startTimeZone: 'Etc/UTC',
-                endTimeZone: 'Etc/UTC',
-                recurrence: null,
-                inclusions: null,
-                exceptions: null,
-
-                alerts: null
-            },
-            {
-                id: 'cal3',
-                state: 'foo',
-
-                calendarId: 'work',
-
-                summary: 'This is a long all day event',
-                description: '',
-                location: 'Sydney',
-                showAsFree: false,
-
-                isAllDay: true,
-                start: '2013-11-03T00:00:00',
-                end: '2013-11-07T00:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: null,
-                inclusions: null,
-                exceptions: null,
-
-                alerts: null
-            },
-            {
-                id: 'cal4',
-                state: 'foo',
-
-                calendarId: 'choir',
-
-                summary: 'Do they stack 1?',
-                description: '',
-                location: 'Sydney',
-                showAsFree: false,
-
-                isAllDay: true,
-                start: '2013-11-04T00:00:00',
-                end: '2013-11-06T00:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: null,
-                inclusions: null,
-                exceptions: null,
-
-                alerts: null
-            },
-            {
-                id: 'cal5',
-                state: 'foo',
-
-                calendarId: 'gym',
-
-                summary: 'Do they stack 2?',
-                description: '',
-                location: 'Sydney',
-                showAsFree: false,
-
-                isAllDay: true,
-                start: '2013-11-05T00:00:00',
-                end: '2013-11-07T00:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: null,
-                inclusions: null,
-                exceptions: null,
-
-                alerts: [
-                    {
-                        minutesBefore: 0,
-                        type: 'email'
-                    }
-                ]
-            },
-            {
-                id: 'cal6',
-                state: 'foo',
-
-                calendarId: 'personal',
-
-                summary: 'Sundays in Jan',
-                description: '',
-                location: 'Sydney',
-                showAsFree: false,
-
-                isAllDay: false,
-                start: '2015-01-04T08:00:00',
-                end: '2015-01-04T08:30:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {frequency:'yearly', interval:2,byMonth:[0],byDay:[0],byHour:[8,9],byMinute:[30]},
-                inclusions: null,
-                exceptions: null,
-
-                alerts: null
-            },
-            {
-                id: 'cal7',
-                state: 'foo',
-
-                calendarId: 'personal',
-
-                summary: 'Last weekday of month',
-                description: 'After the party of the century',
-                location: 'Sydney',
-                showAsFree: false,
-
-                isAllDay: false,
-                start: '2014-10-31T14:43:00',
-                end: '2014-10-31T15:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {
-                    frequency: 'monthly',
-                    byDay: [ 1, 2, 3, 4, 5 ],
-                    bySetPosition: [ -1 ],
-                    count: 12
-                },
-                inclusions: null,
-                exceptions: {
-                    '2013-11-29T13:43:00': null
-                },
-
-                alerts: null
-            },
-            {
-                id: 'cal8',
-                state: 'foo',
-
-                calendarId: 'personal',
-
-                summary: 'Repeat five setTimeouts',
-                description: 'But skip the middle 3',
-                location: '',
-                showAsFree: false,
-
-                isAllDay: true,
-                start: '2013-10-21T00:00:00',
-                end: '2013-10-22T00:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {
-                    frequency: 'daily',
-                    count: 5
-                },
-                inclusions: null,
-                exceptions: {
-                    '2013-10-22T00:00:00': null,
-                    '2013-10-23T00:00:00': {
-                        summary: 'The middle one (exceptional)'
-                    },
-                    '2013-10-24T00:00:00': null
-                },
-
-                alerts: null
-            },
-            {
-                id: 'cal9',
-
-                calendarId: 'personal',
-
-                summary: 'Inclusions test',
-                description: '',
-                location: '',
-                showAsFree: false,
-
-                isAllDay: false,
-                start: '2014-05-05T03:00:00',
-                end: '2014-05-05T04:00:00',
-                startTimeZone: 'Australia/Melbourne',
-                endTimeZone: 'Australia/Melbourne',
-                recurrence: {
-                    frequency: 'daily',
-                    interval: 4,
-                    count: 5
-                },
-                inclusions: [
-                    '2014-05-08T14:00:00',
-                    '2014-05-09T14:00:00',
-                    '2014-05-10T14:00:00'
-                ],
-                exceptions: null,
-
-                organiser: {
-                    name: 'Neil Jenkins',
-                    email: 'neilj@fastmail.fm',
-                    isYou: false
-                },
-                attendees: [
-                    {
-                        name: 'Neil Jenkins',
-                        email: 'neilj@fastmail.fm',
-                        rsvp: 'yes',
-                        isYou: false
-                    },
-                    {
-                        name: 'Joe Bloggs',
-                        email: 'joe@bloggs.com',
-                        rsvp: 'no',
-                        isYou: true
-                    },
-                    {
-                        name: 'John Smith',
-                        email: 'hohoho@smial.com',
-                        rsvp: 'no',
-                        isYou: false
-                    }
-                ],
-
-                alerts: null
-            },
-            {
-                id: 'r1',
-                calendarId: 'personal',
-                summary: 'An example where an invalid date (i.e., February 30) is ignored.',
-                description: '(2007 EST) January 15,30 (2007 EST) February 15 (2007 EDT) March 15,30',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '1997-01-15T09:00:00',
-                end: '1997-01-15T10:00:00',
-                startTimeZone: 'America/New_York',
-                endTimeZone: 'America/New_York',
-                recurrence: {
-                    frequency: 'monthly',
-                    byDate: [ 15, 30 ],
-                    count: 5
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            },
-            //DTSTART;TZID=America/New_York:19970805T090000
-            //RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=MO
-            {
-                id: 'r2',
-                calendarId: 'personal',
-                summary: 'WKST=MO',
-                description: '(1997 EDT) August 5,10,19,24',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '1997-08-05T09:00:00',
-                end: '1997-08-05T10:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {
-                    frequency: 'weekly',
-                    interval: 2,
-                    byDay: [ 0, 2 ],
-                    count: 4
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            },
-            //DTSTART;TZID=America/New_York:19970805T090000
-            //RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=MO
-            {
-                id: 'r3',
-                calendarId: 'personal',
-                summary: 'WKST=SU',
-                description: '(1997 EDT) August 5,17,19,31',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '1997-08-05T09:00:00',
-                end: '1997-08-05T10:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {
-                    firstDayOfWeek: 0,
-                    frequency: 'weekly',
-                    interval: 2,
-                    byDay: [ 0, 2 ],
-                    count: 4
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            },
-            //DTSTART;TZID=America/New_York:19961105T090000
-            //RRULE:FREQ=YEARLY;INTERVAL=4;BYMONTH=11;BYDAY=TU;BYMONTHDAY=2,3,4,5,6,7,8
-            {
-                id: 'r4',
-                calendarId: 'personal',
-                summary: 'President',
-                description: '',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '1996-11-05T09:00:00',
-                end: '1996-11-05T10:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {
-                    firstDayOfWeek: 0,
-                    frequency: 'yearly',
-                    interval: 4,
-                    byMonth: [ 10 ],
-                    byDay: [ 2 ],
-                    byDate: [ 2, 3, 4, 5, 6, 7, 8 ]
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            },
-            //DTSTART;TZID=America/New_York:19970913T090000
-            //RRULE:FREQ=MONTHLY;BYDAY=SA;BYMONTHDAY=7,8,9,10,11,12,13
-            {
-                id: 'r5',
-                calendarId: 'personal',
-                summary: 'First Sat after Sun',
-                description: '',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '1997-09-13T09:00:00',
-                end: '1997-09-13T10:00:00',
-                startTimeZone: null,
-                endTimeZone: null,
-                recurrence: {
-                    frequency: 'monthly',
-                    byDay: [ 6 ],
-                    byDate: [ 7, 8, 9, 10, 11, 12, 13 ]
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            },
-            {
-                id: 'r6',
-                calendarId: 'personal',
-                summary: 'TZ shift',
-                description: '',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '2007-03-09T07:30:00',
-                end: '2007-03-09T07:45:00',
-                startTimeZone: 'America/New_York',
-                endTimeZone: 'America/New_York',
-                recurrence: {
-                    frequency: 'daily',
-                    count: 5
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            },
-            {
-                id: 'r7',
-                calendarId: 'personal',
-                summary: 'TZ shift',
-                description: '',
-                location: '',
-                showAsFree: false,
-                isAllDay: false,
-                start: '2015-04-03T15:30:00',
-                end: '2015-04-03T16:30:00',
-                startTimeZone: 'Australia/Melbourne',
-                endTimeZone: 'Australia/Melbourne',
-                recurrence: {
-                    frequency: 'daily',
-                    count: 5
-                },
-                inclusions: null,
-                exceptions: null,
-                alerts: null
-            }
-            ]
-        }]);
     },
     setCalendarEvents: function( results, args ) {
         results.push([ 'calendarEventsSet', {

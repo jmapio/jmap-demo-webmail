@@ -439,7 +439,7 @@ html {
     font-size: 15px;
 }
 
-.v-EventItem-summary,
+.v-EventItem-title,
 .v-EventItem-location {
     overflow: hidden;
     text-overflow: ellipsis;

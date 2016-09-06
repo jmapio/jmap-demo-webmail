@@ -51,7 +51,7 @@ var EventItemView = O.Class({
             date = this.getParent( O.ListView ).get( 'content' ).get( 'date' ),
             isAllDay = event.get( 'isAllDay' ),
             start = event.get( 'start' ),
-            summary = event.get( 'summary' ),
+            title = event.get( 'title' ),
             location = event.get( 'location' ),
             time, end;
 
@@ -67,9 +67,9 @@ var EventItemView = O.Class({
         }
 
         return [
-            el( 'h3.v-EventItem-summary', {
+            el( 'h3.v-EventItem-title', {
                 style: 'color:' + event.get( 'calendar' ).get( 'color' ),
-                text: summary || ' ' // nbsp;
+                text: title || ' ' // nbsp;
             }),
             el( 'h4.v-EventItem-time', [ time ] ),
             location ? el( 'p.v-EventItem-location', [ location ] ) : null
