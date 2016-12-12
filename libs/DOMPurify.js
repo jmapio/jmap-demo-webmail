@@ -30,7 +30,7 @@
      * Version label, exposed for easier checks
      * if DOMPurify is up to date or not
      */
-    DOMPurify.version = '0.8.0';
+    DOMPurify.version = '0.8.4';
 
     /**
      * Array of elements that DOMPurify removed during sanitation.
@@ -49,6 +49,7 @@
     var originalDocument = document;
     var DocumentFragment = window.DocumentFragment;
     var HTMLTemplateElement = window.HTMLTemplateElement;
+    var Node = window.Node;
     var NodeFilter = window.NodeFilter;
     var NamedNodeMap = window.NamedNodeMap || window.MozNamedAttrMap;
     var Text = window.Text;
@@ -338,6 +339,9 @@
             }
             _addToSet(ALLOWED_ATTR, cfg.ADD_ATTR);
         }
+        if (cfg.ADD_URI_SAFE_ATTR) {
+            _addToSet(URI_SAFE_ATTRIBUTES, cfg.ADD_URI_SAFE_ATTR);
+        }
 
         /* Add #text in case KEEP_CONTENT is set to true */
         if (KEEP_CONTENT) { ALLOWED_TAGS['#text'] = true; }
@@ -449,6 +453,20 @@
     };
 
     /**
+     * _isNode
+     *
+     * @param object to check whether it's a DOM node
+     * @return true is object is a DOM node
+     */
+    var _isNode = function(obj) {
+        return (
+            typeof Node === "object" ? obj instanceof Node : obj
+                && typeof obj === "object" && typeof obj.nodeType === "number"
+                && typeof obj.nodeName==="string"
+        );
+    };
+
+    /**
      * _sanitizeElements
      *
      * @protect nodeName
@@ -474,7 +492,8 @@
 
         /* Execute a hook if present */
         _executeHook('uponSanitizeElement', currentNode, {
-            tagName: tagName
+            tagName: tagName,
+            allowedTags: ALLOWED_TAGS
         });
 
         /* Remove element if anything forbids its presence */
@@ -499,14 +518,15 @@
         }
 
         /* Sanitize element content to be template-safe */
-        if (SAFE_FOR_TEMPLATES && currentNode.nodeType === 3 &&
-                (MUSTACHE_EXPR.test(currentNode.textContent) || ERB_EXPR.test(currentNode.textContent))) {
-            DOMPurify.removed.push({element: currentNode.cloneNode()});
+        if (SAFE_FOR_TEMPLATES && currentNode.nodeType === 3) {
             /* Get the element's text content */
             content = currentNode.textContent;
             content = content.replace(MUSTACHE_EXPR, ' ');
             content = content.replace(ERB_EXPR, ' ');
-            currentNode.textContent = content;
+            if (currentNode.textContent !== content) {
+                DOMPurify.removed.push({element: currentNode.cloneNode()});
+                currentNode.textContent = content;
+            }
         }
 
         /* Execute a hook if present */
@@ -545,7 +565,8 @@
         hookEvent = {
             attrName: '',
             attrValue: '',
-            keepAttr: true
+            keepAttr: true,
+            allowedAttributes: ALLOWED_ATTR
         };
         l = attributes.length;
 
@@ -639,6 +660,10 @@
                 !IS_SCRIPT_OR_DATA.test(value.replace(ATTR_WHITESPACE,''))) {
                 // This attribute is safe
             }
+            /* Check for binary attributes */
+            else if (!value) {
+                // binary attributes are safe at this point
+            }
             /* Anything else, presume unsafe, do not add it back */
             else {
                 continue;
@@ -709,11 +734,11 @@
      * sanitize
      * Public method providing core sanitation functionality
      *
-     * @param {String} dirty string
+     * @param {String|Node} dirty string or DOM node
      * @param {Object} configuration object
      */
     DOMPurify.sanitize = function(dirty, cfg) {
-        var body, currentNode, oldNode, nodeIterator, returnNode;
+        var body, importedNode, currentNode, oldNode, nodeIterator, returnNode;
         /* Make sure we have a string to sanitize.
            DO NOT return early, as this will return the wrong type if
            the user has requested a DOM object rather than a string */
@@ -722,7 +747,7 @@
         }
 
         /* Stringify, in case dirty is an object */
-        if (typeof dirty !== 'string') {
+        if (typeof dirty !== 'string' && !_isNode(dirty)) {
             if (typeof dirty.toString !== 'function') {
                 throw new TypeError('toString is not a function');
             } else {
@@ -734,7 +759,11 @@
         if (!DOMPurify.isSupported) {
             if (typeof window.toStaticHTML === 'object'
                 || typeof window.toStaticHTML === 'function') {
-                return window.toStaticHTML(dirty);
+                if (typeof dirty === 'string') {
+                    return window.toStaticHTML(dirty);
+                } else if (_isNode(dirty)) {
+                    return window.toStaticHTML(dirty.outerHTML);
+                }
             }
             return dirty;
         }
@@ -745,17 +774,30 @@
         /* Clean up removed elements */
         DOMPurify.removed = [];
 
-        /* Exit directly if we have nothing to do */
-        if (!RETURN_DOM && !WHOLE_DOCUMENT && dirty.indexOf('<') === -1) {
-            return dirty;
-        }
+        if (dirty instanceof Node) {
+            /* If dirty is a DOM element, append to an empty document to avoid
+               elements being stripped by the parser */
+            body = _initDocument('<!-->');
+            importedNode = body.ownerDocument.importNode(dirty, true);
+            if (importedNode.nodeType === 1 && importedNode.nodeName === 'BODY') {
+                /* Node is already a body, use as is */
+                body = importedNode;
+            } else {
+                body.appendChild( importedNode );
+            }
+        } else {
+            /* Exit directly if we have nothing to do */
+            if (!RETURN_DOM && !WHOLE_DOCUMENT && dirty.indexOf('<') === -1) {
+                return dirty;
+            }
 
-        /* Initialize the document to work on */
-        body = _initDocument(dirty);
+            /* Initialize the document to work on */
+            body = _initDocument(dirty);
 
-        /* Check we have a DOM node from the data */
-        if (!body) {
-            return RETURN_DOM ? null : '';
+            /* Check we have a DOM node from the data */
+            if (!body) {
+                return RETURN_DOM ? null : '';
+            }
         }
 
         /* Get node iterator */

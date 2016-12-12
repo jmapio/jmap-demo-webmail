@@ -6611,7 +6611,14 @@ NS.AnimatableView = {
             property, value;
 
         // Animate
-        if ( this.get( 'animateLayer' ) && this.get( 'isInDocument' ) ) {
+        if ( this.get( 'animateLayer' ) ) {
+            // Must wait until in document to animate
+            if ( !this.get( 'isInDocument' ) ) {
+                O.RunLoop.invokeInNextFrame(
+                    this.propertyNeedsRedraw.bind(
+                        this, this, 'layerStyles', oldStyles ) );
+                return;
+            }
             if ( !layerAnimation.current ) {
                 layerAnimation.current = oldStyles || newStyles;
             }
@@ -9022,7 +9029,7 @@ var LiveQuery = NS.Class({
         this._sort = results.sortFn;
         this._filter = results.filterFn;
 
-        this.status = store.getTypeStatus( Type ) & READY;
+        this.status = READY;
 
         this.length = results.length;
 
@@ -9314,6 +9321,7 @@ var LiveQuery = NS.Class({
                 )
                 .endPropertyChanges()
                 .fire( 'query:updated', {
+                    query: this,
                     removed: removed,
                     removedIndexes: removedIndexes,
                     added: added,
@@ -10613,6 +10621,7 @@ var RemoteQuery = NS.Class({
 
         if ( oldTotal !== null && firstChange < lastChangeNew ) {
             this.fire( 'query:updated', {
+                query: this,
                 removed: removedStoreKeys,
                 removedIndexes: removedIndexes,
                 added: addedStoreKeys,
@@ -11364,6 +11373,7 @@ var WindowedRemoteQuery = NS.Class({
         // which were removed. Also, keyboard indicator will need to know the
         // indexes of those removed or added.
         this.fire( 'query:updated', {
+            query: this,
             removed: removedStoreKeys,
             removedIndexes: removedIndexes,
             added: addedStoreKeys,
@@ -12021,7 +12031,11 @@ var RecordAttribute = NS.Class({
     },
 
     __teardownProperty__: function ( metadata, propKey, object ) {
-        metadata.attrs[ this.key || propKey ] = null;
+        var attrs = metadata.attrs;
+        if ( !metadata.hasOwnProperty( 'attrs' ) ) {
+            attrs = metadata.attrs = Object.create( attrs );
+        }
+        attrs[ this.key || propKey ] = null;
         object.constructor.clientSettableAttributes = null;
     },
 
@@ -12781,6 +12795,8 @@ NS.AggregateSource = AggregateSource;
 // License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
+/*global JSON */
+
 /**
     Module: DataStore
 
@@ -12809,21 +12825,28 @@ var OBSOLETE     = 256; // Record may have changes not yet requested
 // Error messages.
 var Status = NS.Status;
 var CANNOT_CREATE_EXISTING_RECORD_ERROR =
-        'O.Store Error: Cannot create existing record',
-    CANNOT_WRITE_TO_UNREADY_RECORD_ERROR =
-        'O.Store Error: Cannot write to unready record',
-    FETCHED_IS_DESTROYED_OR_NON_EXISTENT_ERROR =
-        'O.Store Error: Record loaded which has status destroyed or non-existent',
-    SOURCE_COMMIT_CREATE_MISMATCH_ERROR =
-        'O.Store Error: Source committed a create on a record not marked new',
-    SOURCE_COMMIT_DESTROY_MISMATCH_ERROR =
-        'O.Store Error: Source commited a destroy on a record not marked destroyed';
+    'O.Store Error: Cannot create existing record';
+var CANNOT_WRITE_TO_UNREADY_RECORD_ERROR =
+    'O.Store Error: Cannot write to unready record';
+var FETCHED_IS_DESTROYED_OR_NON_EXISTENT_ERROR =
+    'O.Store Error: Record loaded which has status destroyed or non-existent';
+var SOURCE_COMMIT_CREATE_MISMATCH_ERROR =
+    'O.Store Error: Source committed a create on a record not marked new';
+var SOURCE_COMMIT_DESTROY_MISMATCH_ERROR =
+    'O.Store Error: Source commited a destroy on a record not marked destroyed';
 
 // ---
 
 var sk = 1;
 var generateStoreKey = function () {
     return 'k' + ( sk++ );
+};
+
+// ---
+
+var mayHaveChanges = function ( store ) {
+    NS.RunLoop.queueFn( 'before', store.checkForChanges, store );
+    return store;
 };
 
 // ---
@@ -12949,7 +12972,7 @@ var convertForeignKeysToId = function ( store, Type, data ) {
 */
 var Store = NS.Class({
 
-    Mixin: NS.EventTarget,
+    Extends: NS.Object,
 
     /**
         Property: O.Store#autoCommit
@@ -12979,6 +13002,13 @@ var Store = NS.Class({
         Is this a nested store?
     */
     isNested: false,
+
+    /**
+        Property: O.Store#hasChanges
+        Type: Boolean
+
+        Are there any changes in the store?
+    */
 
     /**
         Constructor: O.Store
@@ -13015,6 +13045,8 @@ var Store = NS.Class({
         this._created = {};
         // Set of store keys for destroyed records
         this._destroyed = {};
+        // Any changes waiting to be committed?
+        this.hasChanges = false;
 
         // Queries
         // Map id -> query
@@ -13044,7 +13076,7 @@ var Store = NS.Class({
 
         this._commitCallbacks = [];
 
-        NS.extend( this, mixin );
+        Store.parent.init.call( this, mixin );
 
         mixin.source.set( 'store', this );
     },
@@ -13267,24 +13299,18 @@ var Store = NS.Class({
         return new NS.RecordArray( this, Type, storeKeys );
     },
 
-    /**
-        Method: O.Store#hasChanges
-
-        Returns:
-            {Boolean} Are there any changes in the store?
-    */
-    hasChanges: function () {
+    checkForChanges: function () {
         var storeKey;
         for ( storeKey in this._created ) {
-            return true;
+            return this.set( 'hasChanges', true );
         }
         for ( storeKey in this._skToChanged ) {
-            return true;
+            return this.set( 'hasChanges', true );
         }
         for ( storeKey in this._destroyed ) {
-            return true;
+            return this.set( 'hasChanges', true );
         }
-        return false;
+        return this.set( 'hasChanges', false );
     },
 
     /**
@@ -13307,6 +13333,7 @@ var Store = NS.Class({
         }
         NS.RunLoop.queueFn( 'middle', this._commitChanges, this );
     },
+
     _commitChanges: function () {
         // Don't commit if another commit is already in progress. We can't
         // reference a foreign ID if it is currently being created in an
@@ -13423,7 +13450,8 @@ var Store = NS.Class({
                     this._checkServerStatus( types[ typeId ] );
                 }
                 this.isCommitting = false;
-                if ( this.hasChanges() && this.autoCommit ) {
+                if ( this.autoCommit &&
+                        this.checkForChanges().get( 'hasChanges' ) ) {
                     this.commitChanges();
                 }
             }.bind( this ) );
@@ -13431,6 +13459,7 @@ var Store = NS.Class({
             this.isCommitting = false;
         }
 
+        mayHaveChanges( this );
         this.fire( 'didCommit' );
     },
 
@@ -13463,7 +13492,7 @@ var Store = NS.Class({
         this._created = {};
         this._destroyed = {};
 
-        return this;
+        return this.set( 'hasChanges', false );
     },
 
     getInverseChanges: function () {
@@ -13775,7 +13804,7 @@ var Store = NS.Class({
             this.commitChanges();
         }
 
-        return this;
+        return this.set( 'hasChanges', true );
     },
 
     /**
@@ -13824,7 +13853,7 @@ var Store = NS.Class({
                 this.commitChanges();
             }
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     undestroyRecord: function ( storeKey, Type, data ) {
@@ -13843,6 +13872,7 @@ var Store = NS.Class({
             delete this._destroyed[ storeKey ];
             this.setStatus( storeKey, ( status & ~(DESTROYED|DIRTY) ) | READY );
         }
+        return mayHaveChanges( this );
     },
 
     // ---
@@ -14036,7 +14066,7 @@ var Store = NS.Class({
             seenChange = false,
             Type, key, value, oldValue, committed, changed;
 
-        if ( !( status & READY ) ) {
+        if ( !current || ( changeIsDirty && !( status & READY ) ) ) {
             Type = this._skToType[ storeKey ];
             NS.RunLoop.didError({
                 name: CANNOT_WRITE_TO_UNREADY_RECORD_ERROR,
@@ -14094,6 +14124,7 @@ var Store = NS.Class({
                     delete _skToData[ storeKey ];
                 }
             }
+            mayHaveChanges( this );
         } else {
             for ( key in data ) {
                 value = data[ key ];
@@ -14393,7 +14424,7 @@ var Store = NS.Class({
             this.updateData( storeKey, update, false );
             this.setStatus( storeKey, READY );
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     /**
@@ -14432,7 +14463,7 @@ var Store = NS.Class({
                 this.unloadRecord( storeKey );
             }
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     // ---
@@ -14570,8 +14601,9 @@ var Store = NS.Class({
         <O.Source#commitChanges>.
 
         Parameters:
-            skToId - {Object} A map of the store key to the record id for all
-            newly created records.
+            skToPartialData - {Object} A map of the store key to an object
+            with properties for the newly created record, which MUST include
+            the id.
 
         Returns:
             {O.Store} Returns self.
@@ -14580,7 +14612,8 @@ var Store = NS.Class({
         var _skToType = this._skToType,
             _typeToSkToId = this._typeToSkToId,
             _typeToIdToSk = this._typeToIdToSk,
-            storeKey, status, data, Type, typeId, idPropKey, idAttrKey, id;
+            storeKey, status, data, Type, typeId, idPropKey, idAttrKey, id,
+            foreignRefAttrs;
         for ( storeKey in skToPartialData ) {
             status = this.getStatus( storeKey );
             if ( status & NEW ) {
@@ -14595,6 +14628,11 @@ var Store = NS.Class({
                 // Set id internally
                 _typeToSkToId[ typeId ][ storeKey ] = id;
                 _typeToIdToSk[ typeId ][ id ] = storeKey;
+
+                foreignRefAttrs = getForeignRefAttrs( Type );
+                if ( foreignRefAttrs.length ) {
+                    convertForeignKeysToSK( this, foreignRefAttrs, data );
+                }
 
                 // Notify record, and update with any other data
                 this.updateData( storeKey, data, false );
@@ -14676,7 +14714,7 @@ var Store = NS.Class({
         if ( this.autoCommit ) {
             this.commitChanges();
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     /**
@@ -14795,7 +14833,7 @@ var Store = NS.Class({
         if ( this.autoCommit ) {
             this.commitChanges();
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     /**
@@ -14840,7 +14878,7 @@ var Store = NS.Class({
         if ( this.autoCommit ) {
             this.commitChanges();
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     /**
@@ -14904,7 +14942,7 @@ var Store = NS.Class({
         if ( this.autoCommit ) {
             this.commitChanges();
         }
-        return this;
+        return mayHaveChanges( this );
     },
 
     _notifyRecordOfError: function ( storeKey, error ) {
@@ -15464,6 +15502,7 @@ var NestedStore = NS.Class({
 
         this._created = {};
         this._destroyed = {};
+        this.hasChanges = false;
 
         // Own queries
         // Map id -> query
@@ -15559,7 +15598,7 @@ var NestedStore = NS.Class({
 
         if ( callback ) { callback(); }
 
-        return this.fire( 'didCommit' );
+        return this.set( 'hasChanges', false ).fire( 'didCommit' );
     },
 
     /**
@@ -15736,6 +15775,7 @@ var NestedStore = NS.Class({
             store.parentDidUpdateData( storeKey, changedKeys );
         });
         this._recordDidChange( storeKey );
+        NS.RunLoop.queueFn( 'before', this.checkForChanges, this );
     },
 
     // === A nested store is not directly connected to a source ================
@@ -15886,7 +15926,8 @@ var StoreUndoManager = NS.Class({
 
     getUndoData: function () {
         var store = this.get( 'store' );
-        return store.hasChanges() ? store.getInverseChanges() : null;
+        return store.checkForChanges().get( 'hasChanges' ) ?
+            store.getInverseChanges() : null;
     },
 
     applyChange: function ( data ) {
@@ -15899,7 +15940,7 @@ var StoreUndoManager = NS.Class({
     },
 
     undo: function () {
-        if ( this._isInUndoState || !this.get( 'store' ).hasChanges() ) {
+        if ( this._isInUndoState || !this.get( 'store' ).get( 'hasChanges' ) ) {
             StoreUndoManager.parent.undo.call( this );
         }
         return this;
@@ -19364,7 +19405,7 @@ var XHR = NS.Class({
         Returns:
             {O.XHR} Returns self.
     */
-    send: function ( method, url, data, headers ) {
+    send: function ( method, url, data, headers, withCredentials ) {
         if ( this._isRunning ) {
             this.abort();
         }
@@ -19376,6 +19417,7 @@ var XHR = NS.Class({
             name;
 
         xhr.open( method, url, this.makeAsyncRequests );
+        xhr.withCredentials = !!withCredentials;
         for ( name in headers || {} ) {
             // Let the browser set the Content-type automatically if submitting
             // FormData, otherwise it might be missing the boundary marker.
@@ -19432,13 +19474,15 @@ var XHR = NS.Class({
 
         if ( io ) {
             allHeaders = xhr.getAllResponseHeaders();
-            // IE returns 200 status code when there's no network! But for a
-            // real connection there must have been at least one header, so
-            // check that's not empty
-            isSuccess = !!allHeaders && ( status >= 200 && status < 300 );
             responseHeaders = parseHeaders( allHeaders );
             responseType = this.getResponseType();
             response = this.getResponse();
+            // IE returns 200 status code when there's no network! But for a
+            // real connection there must have been at least one header, so
+            // check that's not empty. Except for cross-domain requests no
+            // headers may be returned, so also check for a body
+            isSuccess = ( status >= 200 && status < 300 ) &&
+                ( !!allHeaders || !!response );
             io.set( 'uploadProgress', 100 )
               .set( 'progress', 100 )
               .set( 'status', status )
@@ -20296,6 +20340,15 @@ var HttpRequest = NS.Class({
         'Accept': 'application/json, */*'
     },
 
+    /**
+        Property: O.HttpRequest#withCredentials
+        Type: Boolean
+        Default: false
+
+        Send cookies with cross-domain requests?
+    */
+    withCredentials: false,
+
     // ---
 
     init: function ( mixin ) {
@@ -20354,14 +20407,15 @@ var HttpRequest = NS.Class({
     // ---
 
     send: function () {
-        var method = this.get( 'method' ).toUpperCase(),
-            url = this.get( 'url' ),
-            data = this.get( 'data' ) || null,
-            headers = this.get( 'headers' ),
-            transport =
-                ( data instanceof FormData && NS.FormUploader !== NS.XHR ) ?
-                    new NS.FormUploader() : getXhr(),
-            contentType;
+        var method = this.get( 'method' ).toUpperCase();
+        var url = this.get( 'url' );
+        var data = this.get( 'data' ) || null;
+        var headers = this.get( 'headers' );
+        var withCredentials = this.get( 'withCredentials' );
+        var transport =
+            ( data instanceof FormData && NS.FormUploader !== NS.XHR ) ?
+                new NS.FormUploader() : getXhr();
+        var contentType;
 
         if ( data && method === 'GET' ) {
             url += ( url.contains( '?' ) ? '&' : '?' ) + data;
@@ -20378,7 +20432,7 @@ var HttpRequest = NS.Class({
         // Send the request
         this._transport = transport;
         transport.io = this;
-        transport.send( method, url, data, headers );
+        transport.send( method, url, data, headers, withCredentials );
 
         return this;
     },
@@ -23207,10 +23261,9 @@ var TimeZone = NS.Class({
     init: function ( id, periods ) {
         var name = id.replace( /_/g, ' ' );
         // The IANA ids have the +/- the wrong way round for historical reasons.
-        // Display correctly for the user in name and suffix.
+        // Display correctly for the user.
         if ( /GMT[+-]/.test( name ) ) {
             name = switchSign( name );
-            periods[0][3] = switchSign( periods[0][3] );
         }
 
         this.id = id;
@@ -24264,6 +24317,11 @@ var AbstractControlView = NS.Class({
                 NS.ViewEventsController.kbShortcuts
                     .deregister( key, this, 'activate' );
             }, this );
+        }
+        // iOS is very buggy if you remove a focussed control from the doc;
+        // the picker/keyboard stays up and cannot be dismissed
+        if ( NS.UA.isIOS && this.get( 'isFocussed' ) ) {
+            this.blur();
         }
         return AbstractControlView.parent.willLeaveDocument.call(
             this );
@@ -25943,12 +26001,13 @@ var execCommand = function ( command ) {
     };
 };
 
-var queryCommandState = function ( tag, regexp ) {
+var queryCommandState = function ( tag ) {
+    var regexp = new RegExp( '(?:^|>)' + tag + '\\b' );
     return function () {
         var path = this.get( 'path' );
         return path === '(selection)' ?
-            this.get( 'editor' )
-                .hasFormat( tag ) : ( regexp ).test( path );
+            this.get( 'editor' ).hasFormat( tag ) :
+            regexp.test( path );
     }.property( 'path' );
 };
 
@@ -26835,11 +26894,11 @@ var RichTextView = NS.Class({
         this.propertyDidChange( 'path' );
     }.on( 'select' ),
 
-    isBold: queryCommandState( 'B', ( />B\b/ ) ),
-    isItalic: queryCommandState( 'I', ( />I\b/ ) ),
-    isUnderlined: queryCommandState( 'U', ( />U\b/ ) ),
-    isStriked: queryCommandState( 'S', ( />S\b/ ) ),
-    isLink: queryCommandState( 'A', ( />A\b/ ) ),
+    isBold: queryCommandState( 'B' ),
+    isItalic: queryCommandState( 'I' ),
+    isUnderlined: queryCommandState( 'U' ),
+    isStriked: queryCommandState( 'S' ),
+    isLink: queryCommandState( 'A' ),
 
     alignment: function () {
         var path = this.get( 'path' ),
@@ -26883,8 +26942,8 @@ var RichTextView = NS.Class({
         return dir;
     }.property( 'path' ),
 
-    isUnorderedList: queryCommandState( 'UL', ( />UL\b/ ) ),
-    isOrderedList: queryCommandState( 'OL', ( />OL\b/ ) ),
+    isUnorderedList: queryCommandState( 'UL' ),
+    isOrderedList: queryCommandState( 'OL' ),
 
     // --- Keep state in sync with render ---
 
@@ -27697,12 +27756,21 @@ var SelectView = NS.Class({
         changes.
     */
     redrawOptions: function ( layer, oldOptions ) {
-        var options = this.get( 'options' ),
-            select;
+        var options = this.get( 'options' );
+        var select, isFocussed;
         if ( !isEqual( options, oldOptions ) ) {
+            // Must blur before removing from DOM in iOS, otherwise
+            // the slot-machine selector will not hide
+            isFocussed = this.get( 'isFocussed' );
             select = this._drawSelect( options );
+            if ( isFocussed ) {
+                this.blur();
+            }
             layer.replaceChild( select, this._domControl );
             this._domControl = select;
+            if ( isFocussed ) {
+                this.focus();
+            }
         }
     },
 
@@ -27997,6 +28065,7 @@ NS.ListKBFocusView = ListKBFocusView;
 var byIndex = function ( a, b ) {
     return a.get( 'index' ) - b.get( 'index' );
 };
+
 var addToTable = function ( array, table ) {
     var i, l;
     for ( i = 0, l = array.length; i < l; i += 1 ) {
@@ -28005,14 +28074,26 @@ var addToTable = function ( array, table ) {
     return table;
 };
 
+var getNextViewIndex = function ( childViews, newRendered, fromIndex ) {
+    var length = childViews.length;
+    var view, item;
+    while ( fromIndex < length ) {
+        view = childViews[ fromIndex ];
+        item = view.get( 'content' );
+        if ( item && newRendered[ NS.guid( item ) ] ) {
+            break;
+        }
+        fromIndex += 1;
+    }
+    return fromIndex;
+};
+
 var ListView = NS.Class({
 
     Extends: NS.View,
 
     content: null,
     contentLength: NS.bind( 'content.length' ),
-
-    renderInOrder: true,
 
     ItemView: null,
     itemHeight: 0,
@@ -28047,7 +28128,7 @@ var ListView = NS.Class({
             var content = this.get( 'content' );
             if ( content ) {
                 content.removeObserverForRange(
-                    this._renderRange, this, '_redraw' );
+                    this._renderRange, this, 'viewNeedsRedraw' );
                 content.off( 'query:updated', this, 'contentWasUpdated' );
             }
         }
@@ -28058,14 +28139,14 @@ var ListView = NS.Class({
         if ( this.get( 'isRendered' ) ) {
             var range = this._renderRange;
             if ( oldVal ) {
-                oldVal.removeObserverForRange( range, this, '_redraw' );
+                oldVal.removeObserverForRange( range, this, 'viewNeedsRedraw' );
                 oldVal.off( 'query:updated', this, 'contentWasUpdated' );
             }
             if ( newVal ) {
-                newVal.addObserverForRange( range, this, '_redraw' );
+                newVal.addObserverForRange( range, this, 'viewNeedsRedraw' );
                 newVal.on( 'query:updated', this, 'contentWasUpdated' );
             }
-            this._redraw();
+            this.viewNeedsRedraw();
         }
     }.observes( 'content' ),
 
@@ -28091,13 +28172,14 @@ var ListView = NS.Class({
             Element.appendChildren( layer, children );
         }
         if ( content ) {
-            content.addObserverForRange( this._renderRange, this, '_redraw' );
+            content.addObserverForRange(
+                this._renderRange, this, 'viewNeedsRedraw' );
             content.on( 'query:updated', this, 'contentWasUpdated' );
             this.redrawLayer( layer );
         }
     },
 
-    _redraw: function () {
+    viewNeedsRedraw: function () {
         this.propertyNeedsRedraw( this, 'layer' );
     },
 
@@ -28123,72 +28205,27 @@ var ListView = NS.Class({
         view.destroy();
     },
 
-    calculateDirtyRange: function ( list, start, end ) {
-        var lastExistingView = null,
-            childViews = this.get( 'childViews' ),
-            l = childViews.length,
-            view, item;
-        while ( end && l ) {
-            view = childViews[ l - 1 ];
-            item = list.getObjectAt( end - 1 );
-            if ( !this.isCorrectItemView( view, item, end - 1 ) ) {
-                break;
-            }
-            lastExistingView = view;
-            l -= 1;
-            end -= 1;
-        }
-        while ( start < end && start < l ) {
-            view = childViews[ start ];
-            item = list.getObjectAt( start );
-            if ( !this.isCorrectItemView( view, item, start ) ) {
-                break;
-            }
-            start += 1;
-        }
-        return [ start, end, lastExistingView ];
-    },
-
     redrawLayer: function ( layer ) {
-        var list = this.get( 'content' ) || [],
-            childViews = this.get( 'childViews' ),
+        var list = this.get( 'content' ) || [];
+        var childViews = this.get( 'childViews' );
+        var isInDocument = this.get( 'isInDocument' );
+        // Limit to this range in the content array.
+        var renderRange = this._renderRange;
+        var start = Math.max( 0, renderRange.start );
+        var end = Math.min( list.get( 'length' ), renderRange.end );
+        // Set of already rendered views.
+        var rendered = this._rendered;
+        var newRendered = this._rendered = {};
+        // Are they new or always been there?
+        var added = this._added;
+        var removed = this._removed;
+        // Bookkeeping
+        var viewsDidEnterDoc = [];
+        var frag = null;
+        var currentViewIndex;
+        var viewIsInCorrectPosition, i, l, item, id, view, isAdded, isRemoved;
 
-            // Limit to this range in the content array.
-            renderRange = this._renderRange,
-            renderInOrder = this.get( 'renderInOrder' ),
-
-            start = Math.max( 0, renderRange.start ),
-            end = Math.min( list.get( 'length' ), renderRange.end ),
-
-            dirty, dirtyStart, dirtyEnd,
-            lastExistingView = null,
-
-            // Set of already rendered views.
-            rendered = this._rendered,
-            newRendered = {},
-            viewsToInsert = [],
-
-            // Are they new or always been there?
-            added = this._added,
-            removed = this._removed,
-
-            isInDocument = this.get( 'isInDocument' ),
-            frag = layer.ownerDocument.createDocumentFragment(),
-
-            i, l, item, id, view, isAdded, isRemoved, viewToInsert,
-            renderedViewIds;
-
-        // If we have to keep the DOM order the same as the list order, we'll
-        // have to remove existing views from the DOM. To optimise this, we
-        // check from both ends whether the views are already correct.
-        if ( renderInOrder ) {
-            dirty = this.calculateDirtyRange( list, start, end );
-            dirtyStart = dirty[0];
-            dirtyEnd = dirty[1];
-            lastExistingView = dirty[2];
-        }
-
-        // Mark views we still need.
+        // Mark views we still need
         for ( i = start, l = end; i < l; i += 1 ) {
             item = list.getObjectAt( i );
             id = item ? NS.guid( item ) : 'null:' + i;
@@ -28198,40 +28235,32 @@ var ListView = NS.Class({
             }
         }
 
-        // Remove ones which are no longer needed
         this.beginPropertyChanges();
-        renderedViewIds = Object.keys( rendered );
-        for ( i = 0, l = renderedViewIds.length; i < l; i += 1 ) {
-            id = renderedViewIds[i];
-            view = rendered[ id ];
+
+        // Remove ones which are no longer needed
+        for ( id in rendered ) {
             if ( !newRendered[ id ] ) {
+                view = rendered[ id ];
                 isRemoved = removed && ( item = view.get( 'content' ) ) ?
                     removed[ item.get( 'storeKey' ) ] : false;
                 view.detach( isRemoved );
                 this.destroyItemView( view );
             }
         }
-        this._rendered = newRendered;
+        currentViewIndex = getNextViewIndex( childViews, newRendered, 0 );
 
         // Create/update views in render range
         for ( i = start, l = end; i < l; i += 1 ) {
             item = list.getObjectAt( i );
             id = item ? NS.guid( item ) : 'null:' + i;
             view = newRendered[ id ];
-            if ( !view ) {
-                isAdded = added && item ?
-                    added[ item.get( 'storeKey' ) ] : false;
-                view = this.createItemView( item, i, list, isAdded );
-                if ( view ) {
-                    newRendered[ id ] = view;
-                    childViews.include( view );
-                }
-                // If reusing views, may not need to reinsert.
-                viewToInsert = !!view && !view.get( 'isInDocument' );
-            } else {
-                viewToInsert = ( renderInOrder &&
-                    i >= dirtyStart && i < dirtyEnd );
-                if ( viewToInsert ) {
+            // Was the view already in the list?
+            if ( view ) {
+                // Is it in the correct position?
+                viewIsInCorrectPosition =
+                    childViews[ currentViewIndex ] === view;
+                // If not, remove
+                if ( !viewIsInCorrectPosition ) {
                     if ( isInDocument ) {
                         view.willLeaveDocument();
                     }
@@ -28240,35 +28269,49 @@ var ListView = NS.Class({
                         view.didLeaveDocument();
                     }
                 }
+                // Always update list/index
                 view.set( 'index', i )
                     .set( 'list', list );
-            }
-            if ( viewToInsert ) {
-                frag.appendChild( view.render().get( 'layer' ) );
-                if ( isInDocument ) {
-                    view.willEnterDocument();
+                // If in correct position, all done
+                if ( viewIsInCorrectPosition ) {
+                    if ( frag ) {
+                        layer.insertBefore( frag, view.get( 'layer' ) );
+                        frag = null;
+                    }
+                    currentViewIndex =
+                        getNextViewIndex(
+                            childViews, newRendered, currentViewIndex + 1 );
+                    continue;
                 }
-                viewsToInsert.push( view );
-            }
-        }
-
-        // Append new views to layer
-        if ( viewsToInsert.length ) {
-            if ( lastExistingView ) {
-                layer.insertBefore( frag, lastExistingView.get( 'layer' ) );
             } else {
-                layer.appendChild( frag );
-            }
-            if ( isInDocument ) {
-                for ( i = 0, l = viewsToInsert.length; i < l; i += 1 ) {
-                    viewsToInsert[i].didEnterDocument();
+                isAdded = added && item ?
+                    added[ item.get( 'storeKey' ) ] : false;
+                view = this.createItemView( item, i, list, isAdded );
+                if ( !view ) {
+                    continue;
                 }
+                newRendered[ id ] = view;
+                childViews.push( view );
+            }
+            if ( !frag ) {
+                frag = layer.ownerDocument.createDocumentFragment();
+            }
+            frag.appendChild( view.render().get( 'layer' ) );
+            if ( isInDocument ) {
+                view.willEnterDocument();
+                viewsDidEnterDoc.push( view );
+            }
+        }
+        if ( frag ) {
+            layer.appendChild( frag );
+        }
+        if ( isInDocument && viewsDidEnterDoc.length ) {
+            for ( i = 0, l = viewsDidEnterDoc.length; i < l; i += 1 ) {
+                viewsDidEnterDoc[i].didEnterDocument();
             }
         }
 
-        if ( renderInOrder ) {
-            childViews.sort( byIndex );
-        }
+        childViews.sort( byIndex );
 
         this._added = null;
         this._removed = null;
@@ -28371,7 +28414,6 @@ var ProgressiveListView = NS.Class({
 
     Mixin: NS.TrueVisibleRect,
 
-    renderInOrder: false,
     batchSize: 10,
     triggerInPx: 200,
 
@@ -28460,7 +28502,7 @@ var ProgressiveListView = NS.Class({
             if ( start !== _renderRange.start || end !== _renderRange.end ) {
                 _renderRange.start = start;
                 _renderRange.end = end;
-                this._redraw();
+                this.viewNeedsRedraw();
             }
         }
     }.queue( 'middle' ).observes( 'visibleRect', 'itemHeight' )
@@ -29483,8 +29525,9 @@ var ScrollView = NS.Class({
     */
     scrollTo: function ( x, y, withAnimation ) {
         // Can't have negative scroll values.
-        if ( x < 0 ) { x = 0; }
-        if ( y < 0 ) { y = 0; }
+        // Can't scroll to fractional positions
+        x = x < 0 ? 0 : Math.round( x );
+        y = y < 0 ? 0 : Math.round( y );
 
         var scrollAnimation = this.get( 'scrollAnimation' );
         scrollAnimation.stop();

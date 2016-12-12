@@ -55,19 +55,33 @@ JMAP.auth = new O.Object({
 
     username: '',
     accessToken: '',
+    accounts: {},
+    capabilities: {},
 
     authenticationUrl: '',
     apiUrl: '',
-    eventSourceUrl: '',
-    uploadUrl: '',
     downloadUrl: '',
+    uploadUrl: '',
+    eventSourceUrl: '',
 
     _isFetchingEndPoints: false,
 
+    defaultAccountId: function () {
+        var accounts = this.get( 'accounts' );
+        var id;
+        for ( id in accounts ) {
+            if ( accounts[ id ].isPrimary ) {
+                return id;
+            }
+        }
+        return null;
+    }.property( 'accounts' ),
+
     // ---
 
-    getUrlForBlob: function ( blobId, name ) {
+    getUrlForBlob: function ( accountId, blobId, name ) {
         return this.get( 'downloadUrl' )
+            .replace( '{accountId}', encodeURIComponent( accountId ) )
             .replace( '{blobId}', encodeURIComponent( blobId ) )
             .replace( '{name}', encodeURIComponent( name ) );
     },
@@ -102,8 +116,9 @@ JMAP.auth = new O.Object({
             method: 'GET',
             url: this.get( 'authenticationUrl' ),
             headers: {
-                'Authorization': this.get( 'accessToken' )
+                'Authorization': 'Bearer ' + auth.get( 'accessToken' )
             },
+            withCredentials: true,
             success: function ( event ) {
                 auth.didAuthenticate( JSON.parse( event.data ) );
             }.on( 'io:success' ),
@@ -155,7 +170,7 @@ JMAP.auth = new O.Object({
                 !this._failedConnections.contains( connection ) ) {
             return true;
         }
-        if ( !isAuthenticated ) {
+        if ( !isAuthenticated || this._isFetchingEndPoints ) {
             this._awaitingAuthentication.include( connection );
         }
         return false;
@@ -273,7 +288,7 @@ var handleProps = {
 };
 
 /**
-    Class: O.Connection
+    Class: JMAP.Connection
 
     Extends: O.Source
 
@@ -299,14 +314,14 @@ var handleProps = {
         ]
 
     The response is expected to be in the same format, with methods from
-    <O.Connection#response> available to the server to call.
+    <JMAP.Connection#response> available to the server to call.
 */
 var Connection = O.Class({
 
     Extends: O.Source,
 
     /**
-        Constructor: O.Connection
+        Constructor: JMAP.Connection
 
         Parameters:
             mixin - {Object} (optional) Any properties in this object will be
@@ -343,7 +358,7 @@ var Connection = O.Class({
     prettyPrint: false,
 
     /**
-        Property: O.Connection#willRetry
+        Property: JMAP.Connection#willRetry
         Type: Boolean
 
         If true, retry the request if the connection fails or times out.
@@ -351,7 +366,7 @@ var Connection = O.Class({
     willRetry: true,
 
     /**
-        Property: O.Connection#timeout
+        Property: JMAP.Connection#timeout
         Type: Number
 
         Time in milliseconds at which to time out the request. Set to 0 for no
@@ -360,7 +375,7 @@ var Connection = O.Class({
     timeout: 30000,
 
     /**
-        Property: O.Connection#inFlightRequest
+        Property: JMAP.Connection#inFlightRequest
         Type: (O.HttpRequest|null)
 
         The HttpRequest currently in flight.
@@ -368,10 +383,10 @@ var Connection = O.Class({
     inFlightRequest: null,
 
     /**
-        Method: O.Connection#ioDidSucceed
+        Method: JMAP.Connection#ioDidSucceed
 
         Callback when the IO succeeds. Parses the JSON and passes it on to
-        <O.Connection#receive>.
+        <JMAP.Connection#receive>.
 
         Parameters:
             event - {IOEvent}
@@ -386,7 +401,7 @@ var Connection = O.Class({
         // Check it's in the correct format
         if ( !( data instanceof Array ) ) {
             O.RunLoop.didError({
-                name: 'O.Connection#ioDidSucceed',
+                name: 'JMAP.Connection#ioDidSucceed',
                 message: 'Data from server is not JSON.',
                 details: 'Data:\n' + event.data +
                     '\n\nin reponse to request:\n' +
@@ -404,7 +419,7 @@ var Connection = O.Class({
     }.on( 'io:success' ),
 
     /**
-        Method: O.Connection#ioDidFail
+        Method: JMAP.Connection#ioDidFail
 
         Callback when the IO fails.
 
@@ -412,19 +427,55 @@ var Connection = O.Class({
             event - {IOEvent}
     */
     ioDidFail: function ( event ) {
-        var status = event.status,
-            serverFailed = ( 500 <= status && status < 600 );
-        if ( status === 401 || status === 403 ) {
-            JMAP.auth.didLoseAuthentication()
-                     .connectionWillSend( this );
-        } else if ( !serverFailed && this.get( 'willRetry' ) ) {
-            JMAP.auth.connectionFailed( this );
-        } else if ( status === 503 ) {
-            JMAP.auth.connectionFailed( this, 30 );
-        } else {
-            if ( serverFailed ) {
-                alert( O.loc( 'FEEDBACK_SERVER_FAILED' ) );
+        var discardRequest = false;
+        var auth = JMAP.auth;
+
+        switch ( event.status ) {
+        // 400: Bad Request
+        // 413: Payload Too Large
+        case 400:
+        case 413:
+            O.RunLoop.didError({
+                name: 'JMAP.Connection#ioDidFail',
+                message: 'Bad request made: ' + status,
+                details: 'Request was:\n' +
+                    JSON.stringify( this._inFlightRemoteCalls, null, 2 )
+            });
+            discardRequest = true;
+            break;
+        // 401: Unauthorized
+        case 401:
+            auth.didLoseAuthentication()
+                .connectionWillSend( this );
+            break;
+        // 404: Not Found
+        case 404:
+            auth.refindEndpoints()
+                .connectionWillSend( this );
+            break;
+        // 429: Rate Limited
+        // 503: Service Unavailable
+        // Wait a bit then try again
+        case 429:
+        case 503:
+            auth.connectionFailed( this, 30 );
+            break;
+        // 500: Internal Server Error
+        case 500:
+            alert( O.loc( 'FEEDBACK_SERVER_FAILED' ) );
+            discardRequest = true;
+            break;
+        // Presume a connection error. Try again if willRetry is set,
+        // otherwise discard.
+        default:
+            if ( this.get( 'willRetry' ) ) {
+                auth.connectionFailed( this );
+            } else {
+                discardRequest = true;
             }
+        }
+
+        if ( discardRequest ) {
             this.receive(
                 [], this._inFlightCallbacks, this._inFlightRemoteCalls );
             this._inFlightRemoteCalls = this._inFlightCallbacks = null;
@@ -432,7 +483,7 @@ var Connection = O.Class({
     }.on( 'io:failure', 'io:abort' ),
 
     /**
-        Method: O.Connection#ioDidEnd
+        Method: JMAP.Connection#ioDidEnd
 
         Callback when the IO ends.
 
@@ -448,7 +499,7 @@ var Connection = O.Class({
     }.on( 'io:end' ),
 
     /**
-        Method: O.Connection#callMethod
+        Method: JMAP.Connection#callMethod
 
         Add a method call to be sent on the next request and trigger a request
         to be sent at the end of the current run loop.
@@ -495,12 +546,12 @@ var Connection = O.Class({
         return {
             'Content-type': 'application/json',
             'Accept': 'application/json',
-            'Authorization': JMAP.auth.get( 'accessToken' )
+            'Authorization': 'Bearer ' + JMAP.auth.get( 'accessToken' )
         };
     }.property().nocache(),
 
     /**
-        Method: O.Connection#send
+        Method: JMAP.Connection#send
 
         Send any queued method calls at the end of the current run loop.
     */
@@ -527,6 +578,7 @@ var Connection = O.Class({
                 method: 'POST',
                 url: JMAP.auth.get( 'apiUrl' ),
                 headers: this.get( 'headers' ),
+                withCredentials: true,
                 data: JSON.stringify( remoteCalls,
                     null, this.get( 'prettyPrint' ) ? 2 : 0 )
             }).send()
@@ -534,7 +586,7 @@ var Connection = O.Class({
     }.queue( 'after' ),
 
     /**
-        Method: O.Connection#receive
+        Method: JMAP.Connection#receive
 
         After completing a request, this method is called to process the
         response returned by the server.
@@ -587,9 +639,9 @@ var Connection = O.Class({
     },
 
     /**
-        Method: O.Connection#makeRequest
+        Method: JMAP.Connection#makeRequest
 
-        This will make calls to O.Connection#(record|query)(Fetchers|Refreshers)
+        This will make calls to JMAP.Connection#(record|query)(Fetchers|Refreshers)
         to add any final API calls to the send queue, then return a tuple of the
         queue of method calls and the list of callbacks.
 
@@ -678,10 +730,10 @@ var Connection = O.Class({
     // ---
 
     /**
-        Method: O.Connection#fetchRecord
+        Method: JMAP.Connection#fetchRecord
 
         Fetches a particular record from the source. Just passes the call on to
-        <O.Connection#fetchRecords>.
+        <JMAP.Connection#fetchRecords>.
 
         Parameters:
             Type     - {O.Class} The record type.
@@ -697,10 +749,10 @@ var Connection = O.Class({
     },
 
     /**
-        Method: O.Connection#fetchAllRecords
+        Method: JMAP.Connection#fetchAllRecords
 
         Fetches all records of a particular type from the source. Just passes
-        the call on to <O.Connection#fetchRecords>.
+        the call on to <JMAP.Connection#fetchRecords>.
 
         Parameters:
             Type     - {O.Class} The record type.
@@ -716,10 +768,10 @@ var Connection = O.Class({
     },
 
     /**
-        Method: O.Connection#refreshRecord
+        Method: JMAP.Connection#refreshRecord
 
         Fetches any new data for a record since the last fetch if a handler for
-        the type is defined in <O.Connection#recordRefreshers>, or refetches the
+        the type is defined in <JMAP.Connection#recordRefreshers>, or refetches the
         whole record if not.
 
         Parameters:
@@ -736,7 +788,7 @@ var Connection = O.Class({
     },
 
     /**
-        Method: O.Connection#fetchRecords
+        Method: JMAP.Connection#fetchRecords
 
         Fetches a set of records of a particular type from the source.
 
@@ -783,7 +835,7 @@ var Connection = O.Class({
     },
 
     /**
-        Property: O.Connection#commitPrecedence
+        Property: JMAP.Connection#commitPrecedence
         Type: String[Number]|null
         Default: null
 
@@ -794,7 +846,7 @@ var Connection = O.Class({
     commitPrecedence: null,
 
     /**
-        Method: O.Connection#commitChanges
+        Method: JMAP.Connection#commitChanges
 
         Commits a set of creates/updates/destroys to the source. These are
         specified in a single object, which has record type guids as keys and an
@@ -845,11 +897,11 @@ var Connection = O.Class({
         handling their own types.
 
         In a RPC source, this method considers each type in the changes. If that
-        type has a handler defined in <O.Connection#recordCommitters>, then this
+        type has a handler defined in <JMAP.Connection#recordCommitters>, then this
         will be called with the create/update/destroy object as the sole
         argument, otherwise it will look for separate handlers in
-        <O.Connection#recordCreators>, <O.Connection#recordUpdaters> and
-        <O.Connection#recordDestroyers>. If handled by one of these, the method
+        <JMAP.Connection#recordCreators>, <JMAP.Connection#recordUpdaters> and
+        <JMAP.Connection#recordDestroyers>. If handled by one of these, the method
         will remove the type from the changes object.
 
         Parameters:
@@ -921,7 +973,7 @@ var Connection = O.Class({
     },
 
     /**
-        Method: O.Connection#fetchQuery
+        Method: JMAP.Connection#fetchQuery
 
         Fetches the data for a remote query from the source.
 
@@ -947,7 +999,7 @@ var Connection = O.Class({
     },
 
     /**
-        Method: O.Connection#handle
+        Method: JMAP.Connection#handle
 
         Helper method to register handlers for a particular type. The handler
         object may include methods with the following keys:
@@ -970,7 +1022,7 @@ var Connection = O.Class({
                        as described above.
 
         Returns:
-            {O.Connection} Returns self.
+            {JMAP.Connection} Returns self.
     */
     handle: function ( Type, handlers ) {
         var typeId = O.guid( Type ),
@@ -992,7 +1044,7 @@ var Connection = O.Class({
     },
 
     /**
-        Property: O.Connection#recordFetchers
+        Property: JMAP.Connection#recordFetchers
         Type: String[Function]
 
         A map of type guids to functions which will fetch records of that type.
@@ -1003,7 +1055,7 @@ var Connection = O.Class({
     recordFetchers: {},
 
     /**
-        Property: O.Connection#recordRefreshers
+        Property: JMAP.Connection#recordRefreshers
         Type: String[Function]
 
         A map of type guids to functions which will refresh records of that
@@ -1014,7 +1066,7 @@ var Connection = O.Class({
     recordRefreshers: {},
 
     /**
-        Property: O.Connection#recordCommitters
+        Property: JMAP.Connection#recordCommitters
         Type: String[Function]
 
         A map of type guids to functions which will commit all creates, updates
@@ -1023,7 +1075,7 @@ var Connection = O.Class({
     recordCommitters: {},
 
     /**
-        Property: O.Connection#recordCreators
+        Property: JMAP.Connection#recordCreators
         Type: String[Function]
 
         A map of type guids to functions which will commit creates for a
@@ -1043,7 +1095,7 @@ var Connection = O.Class({
     recordCreators: {},
 
     /**
-        Property: O.Connection#recordUpdaters
+        Property: JMAP.Connection#recordUpdaters
         Type: String[Function]
 
         A map of type guids to functions which will commit updates for a
@@ -1067,7 +1119,7 @@ var Connection = O.Class({
     recordUpdaters: {},
 
     /**
-        Property: O.Connection#recordDestroyers
+        Property: JMAP.Connection#recordDestroyers
         Type: String[Function]
 
         A map of type guids to functions which will commit destroys for a
@@ -1086,7 +1138,7 @@ var Connection = O.Class({
     recordDestroyers: {},
 
     /**
-        Property: O.Connection#queryFetchers
+        Property: JMAP.Connection#queryFetchers
         Type: String[Function]
 
         A map of query type guids to functions which will fetch the requested
@@ -1160,7 +1212,7 @@ var Connection = O.Class({
     },
 
     /**
-        Property: O.Connection#response
+        Property: JMAP.Connection#response
         Type: String[Function]
 
         A map of method names to functions which the server can call in a
@@ -1251,51 +1303,6 @@ JMAP.store = new O.Store({
 
 
 // -------------------------------------------------------------------------- \\
-// File: Account.js                                                           \\
-// Module: API                                                                \\
-// Requires: connections.js                                                   \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
-// -------------------------------------------------------------------------- \\
-
-/*global O, JMAP */
-
-( function ( JMAP ) {
-
-var Record = O.Record,
-    attr = Record.attr;
-
-var Account = O.Class({
-
-    Extends: Record,
-
-    name: attr( String ),
-
-    isPrimary: attr( Boolean),
-    isReadOnly: attr( Boolean ),
-
-    hasMail: attr( Boolean ),
-    hasContacts: attr( Boolean ),
-    hasCalendars: attr( Boolean ),
-
-    capabilities: attr( Object )
-});
-
-JMAP.peripheral.handle( Account, {
-    fetch: 'getAccounts',
-    refresh: 'getAccounts',
-    // Response handlers
-    accounts: function ( args ) {
-        this.didFetch( Account, args, true );
-    }
-});
-
-JMAP.Account = Account;
-
-}( JMAP ) );
-
-
-// -------------------------------------------------------------------------- \\
 // File: LocalFile.js                                                         \\
 // Module: API                                                                \\
 // Requires: connections.js                                                   \\
@@ -1350,8 +1357,10 @@ var LocalFile = O.Class({
                     method: 'POST',
                     url: JMAP.auth.get( 'uploadUrl' ),
                     headers: {
-                        'Authorization': JMAP.auth.get( 'accessToken' )
+                        'Authorization':
+                            'Bearer ' + JMAP.auth.get( 'accessToken' )
                     },
+                    withCredentials: true,
                     data: this.file
                 })
             );
@@ -1878,23 +1887,23 @@ var frequencyNumbers = {
 };
 
 var dayToNumber = {
-    monday: 1,
-    tuesday: 2,
-    wednesday: 3,
-    thursday: 4,
-    friday: 5,
-    saturday: 6,
-    sunday: 0
+    su: 0,
+    mo: 1,
+    tu: 2,
+    we: 3,
+    th: 4,
+    fr: 5,
+    sa: 6
 };
 
 var numberToDay = [
-    'sunday',
-    'monday',
-    'tuesday',
-    'wednesday',
-    'thursday',
-    'friday',
-    'saturday'
+    'su',
+    'mo',
+    'tu',
+    'we',
+    'th',
+    'fr',
+    'sa'
 ];
 
 // ---
@@ -2484,13 +2493,7 @@ var CalendarEvent = O.Class({
         defaultValue: ''
     }),
 
-    // htmlDescription: attr( String, {
-    //     defaultValue: ''
-    // }),
-
-    // links: attr( Array ),
-
-    attachments: attr( Array, {
+    links: attr( Object, {
         defaultValue: null
     }),
 
@@ -2499,11 +2502,23 @@ var CalendarEvent = O.Class({
     }.property( 'files' ),
 
     files: function () {
-        var attachments = this.get( 'attachments' ) || [];
-        return attachments.map( function ( attachment ) {
-            return new O.Object( attachment );
-        }).concat( JMAP.calendar.eventUploads.get( this ) );
-    }.property( 'attachments' ),
+        var links = this.get( 'links' ) || {};
+        var files = [];
+        var id, link;
+        for ( id in links ) {
+            link = links[ id ];
+            if ( link.rel === 'enclosure' ) {
+                links.push( new O.Object({
+                    id: id,
+                    name: link.title,
+                    url: link.href,
+                    type: link.type,
+                    size: link.size
+                }));
+            }
+        }
+        return files.concat( JMAP.calendar.eventUploads.get( this ) );
+    }.property( 'links' ),
 
     addFile: function ( file ) {
         var attachment = new JMAP.CalendarAttachment( file, this );
@@ -2516,17 +2531,17 @@ var CalendarEvent = O.Class({
         if ( file instanceof JMAP.CalendarAttachment ) {
             JMAP.calendar.eventUploads.remove( this, file );
         } else {
-            var attachments = this.get( 'attachments' ).slice();
-            attachments.splice( this.get( 'files' ).indexOf( file ), 1 );
-            this.set( 'attachments', attachments.length ? attachments : null );
+            var links = O.clone( this.get( 'links' ) );
+            delete links[ file.id ];
+            this.set( 'links', Object.keys( links ).length ? links : null );
         }
         return this;
     },
 
     // ---
 
-    // language: attr( String ),
-    // translations: attr( Object ),
+    // locale: attr( String ),
+    // localizations: attr( Object ),
 
     // --- Where ---
 
@@ -2594,7 +2609,15 @@ var CalendarEvent = O.Class({
         defaultValue: false
     }),
 
-    start: attr( Date ),
+    start: attr( Date, {
+        willSet: function ( propValue, propKey, record ) {
+            var oldStart = record.get( 'start' );
+            if ( typeof oldStart !== undefined ) {
+                record._updateRecurrenceOverrides( oldStart, propValue );
+            }
+            return true;
+        }
+    }),
 
     duration: attr( JMAP.Duration, {
         defaultValue: JMAP.Duration.ZERO
@@ -2605,7 +2628,13 @@ var CalendarEvent = O.Class({
     }),
 
     recurrenceRule: attr( JMAP.RecurrenceRule, {
-        defaultValue: null
+        defaultValue: null,
+        willSet: function ( propValue, propKey, record ) {
+            if ( !propValue ) {
+                record.set( 'recurrenceOverrides', null );
+            }
+            return true;
+        }
     }),
 
     recurrenceOverrides: attr( Object, {
@@ -2705,11 +2734,11 @@ var CalendarEvent = O.Class({
         return date;
     }.property( 'isAllDay', 'start', 'duration', 'timeZone' ),
 
-    _updateRecurrenceOverrides: function ( _, __, oldStart ) {
+    _updateRecurrenceOverrides: function ( oldStart, newStart ) {
         var recurrenceOverrides = this.get( 'recurrenceOverrides' );
         var newRecurrenceOverrides, delta, date;
-        if ( this.get( 'store' ).isNested && recurrenceOverrides ) {
-            delta = this.get( 'start' ) - oldStart;
+        if ( recurrenceOverrides ) {
+            delta = newStart - oldStart;
             newRecurrenceOverrides = {};
             for ( date in recurrenceOverrides ) {
                 newRecurrenceOverrides[
@@ -2718,13 +2747,7 @@ var CalendarEvent = O.Class({
             }
             this.set( 'recurrenceOverrides', newRecurrenceOverrides );
         }
-    }.observes( 'start' ),
-
-    _removeRecurrenceOverrides: function () {
-        if ( this.get( 'store' ).isNested && !this.get( 'recurrenceRule' ) ) {
-            this.set( 'recurrenceOverrides', null );
-        }
-    }.observes( 'recurrenceRule' ),
+    },
 
     removedDates: function () {
         var recurrenceOverrides = this.get( 'recurrenceOverrides' );
@@ -2934,7 +2957,7 @@ var CalendarEvent = O.Class({
         defaultValue: false
     }),
 
-    replyTo: attr( String, {
+    replyTo: attr( Object, {
         defaultValue: null
     }),
 
@@ -3113,9 +3136,50 @@ var CalendarEvent = JMAP.CalendarEvent;
 
 // ---
 
-var applyPatch = function ( path, patch, value ) {
+var mayPatch = {
+    links: true,
+    translations: true,
+    locations: true,
+    participants: true,
+    alerts: true
+};
+
+var makePatches = function ( path, patches, original, current ) {
+    var key;
+    if ( original && current && typeof current === 'object' &&
+            !( current instanceof Array ) ) {
+        for ( key in current ) {
+            makePatches(
+                path + '/' + key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
+                patches,
+                original[ key ],
+                current[ key ]
+            );
+        }
+        for ( key in original ) {
+            if ( !( key in current ) ) {
+                makePatches(
+                    path + '/' +
+                        key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
+                    patches,
+                    original[ key ],
+                    null
+                );
+            }
+        }
+    } else if ( !O.isEqual( original, current ) ) {
+        patches.push([ path, current || null ]);
+    }
+    return patches;
+};
+
+var applyPatch = function ( object, path, patch ) {
     var slash, key;
     while ( true ) {
+        // Invalid patch; path does not exist
+        if ( !object ) {
+            return;
+        }
         slash = path.indexOf( '/' );
         if ( slash > -1 ) {
             key = path.slice( 0, slash );
@@ -3125,12 +3189,12 @@ var applyPatch = function ( path, patch, value ) {
             key = key.replace( /~1/g, '/' ).replace( /~0/g, '~' );
         }
         if ( slash > -1 ) {
-            value = value[ key ];
+            object = object[ key ];
         } else {
             if ( patch !== null ) {
-                value[ key ] = patch;
+                object[ key ] = patch;
             } else {
-                delete value[ key ];
+                delete object[ key ];
             }
             break;
         }
@@ -3142,8 +3206,8 @@ var proxyOverrideAttibute = function ( Type, key ) {
         var original = this.get( 'original' );
         var originalValue = this.getOriginalForKey( key );
         var id = this.id;
-        var keyPath = '/' + key;
-        var recurrenceOverrides, overrides, keepOverride, path, recurrenceRule;
+        var recurrenceOverrides, recurrenceRule;
+        var overrides, keepOverride, path, patches;
 
         if ( value !== undefined ) {
             // Get current overrides for occurrence
@@ -3155,16 +3219,24 @@ var proxyOverrideAttibute = function ( Type, key ) {
             // Clear any previous overrides for this key
             keepOverride = false;
             for ( path in overrides ) {
-                if ( path.indexOf( keyPath ) === 0 ) {
+                if ( path.indexOf( key ) === 0 ) {
                     delete overrides[ path ];
                 } else {
                     keepOverride = true;
                 }
             }
             // Set if different to parent
-            if ( !O.isEqual( value, originalValue ) ) {
+            if ( mayPatch[ key ] ) {
+                patches = makePatches( key, [], originalValue, value );
+                if ( patches.length ) {
+                    keepOverride = true;
+                    patches.forEach( function ( patch ) {
+                        overrides[ patch[0] ] = patch[1];
+                    });
+                }
+            } else if ( !O.isEqual( originalValue, value ) ) {
                 keepOverride = true;
-                overrides[ keyPath ] = value && value.toJSON ?
+                overrides[ key ] = value && value.toJSON ?
                     value.toJSON() : value;
             }
 
@@ -3187,18 +3259,20 @@ var proxyOverrideAttibute = function ( Type, key ) {
             original.set( 'recurrenceOverrides', recurrenceOverrides );
         } else {
             overrides = this.get( 'overrides' );
-            if ( keyPath in overrides ) {
+            if ( key in overrides ) {
                 return Type.fromJSON ?
-                    Type.fromJSON( overrides[ keyPath ] ) :
-                    overrides[ keyPath ];
+                    Type.fromJSON( overrides[ key ] ) :
+                    overrides[ key ];
             }
             value = originalValue;
-            for ( path in overrides ) {
-                if ( path.indexOf( keyPath ) === 0 ) {
-                    if ( value === originalValue ) {
-                        value = O.clone( originalValue );
+            if ( value && mayPatch[ key ] ) {
+                for ( path in overrides ) {
+                    if ( path.indexOf( key ) === 0 ) {
+                        if ( value === originalValue ) {
+                            value = O.clone( originalValue );
+                        }
+                        applyPatch( value, path, overrides[ path ] );
                     }
-                    applyPatch( path, overrides[ path ], value );
                 }
             }
         }
@@ -3301,10 +3375,8 @@ var CalendarEventOccurrence = O.Class({
 
     title: proxyOverrideAttibute( String, 'title' ),
     description: proxyOverrideAttibute( String, 'description' ),
-    // htmlDescription: proxyOverrideAttibute( String, 'htmlDescription' ),
-    // links: proxyOverrideAttibute( Array, 'links' ),
 
-    attachments: proxyOverrideAttibute( Array, 'attachments' ),
+    links: proxyOverrideAttibute( Object, 'links' ),
 
     isUploading: CalendarEvent.prototype.isUploading,
     files: CalendarEvent.prototype.files,
@@ -3313,8 +3385,8 @@ var CalendarEventOccurrence = O.Class({
 
     // ---
 
-    // language: proxyOverrideAttibute( String, 'language' ),
-    // translations: proxyOverrideAttibute( Object, 'translations' ),
+    // locale: proxyOverrideAttibute( String, 'locale' ),
+    // localizations: proxyOverrideAttibute( Object, 'localizations' ),
 
     // ---
 
@@ -3465,622 +3537,6 @@ var InfiniteDateSource = O.Class({
 });
 
 JMAP.InfiniteDateSource = InfiniteDateSource;
-
-}( JMAP ) );
-
-
-// -------------------------------------------------------------------------- \\
-// File: RecurringDate.js                                                     \\
-// Module: CalendarModel                                                      \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
-// -------------------------------------------------------------------------- \\
-
-/*global O, JMAP */
-
-( function ( JMAP ) {
-
-// --- Filtering ---
-
-var none = 1 << 15;
-
-var getMonth = function ( date, results ) {
-    results[0] = date.getUTCMonth();
-    results[1] = none;
-    results[2] = none;
-};
-var getDate = function ( date, results, total ) {
-    var daysInMonth = total || Date.getDaysInMonth(
-            date.getUTCMonth(), date.getUTCFullYear() ) + 1;
-    results[0] = date.getUTCDate();
-    results[1] = results[0] - daysInMonth;
-    results[2] = none;
-};
-var getDay = function ( date, results ) {
-    results[0] = date.getUTCDay();
-    results[1] = none;
-    results[2] = none;
-};
-var getDayMonthly = function ( date, results, total ) {
-    var day = date.getUTCDay(),
-        monthDate = date.getUTCDate(),
-        occurrence = Math.floor( ( monthDate - 1 ) / 7 ) + 1,
-        daysInMonth = total || Date.getDaysInMonth(
-            date.getUTCMonth(), date.getUTCFullYear() ),
-        occurrencesInMonth = occurrence +
-            Math.floor( ( daysInMonth - monthDate ) / 7 );
-    results[0] = day;
-    results[1] = day + ( 7 * occurrence );
-    results[2] = day + ( 7 * ( occurrence - occurrencesInMonth - 1 ) );
-};
-var getDayYearly = function ( date, results, daysInYear ) {
-    var day = date.getUTCDay(),
-        dayOfYear = date.getDayOfYear( true ),
-        occurrence = Math.floor( ( dayOfYear - 1 ) / 7 ) + 1,
-        occurrencesInYear = occurrence +
-            Math.floor( ( daysInYear - dayOfYear ) / 7 );
-    results[0] = day;
-    results[1] = day + ( 7 * occurrence );
-    results[2] = day + ( 7 * ( occurrence - occurrencesInYear - 1 ) );
-};
-var getYearDay = function ( date, results, total ) {
-    results[0] = date.getDayOfYear( true );
-    results[1] = results[0] - total;
-    results[2] = none;
-};
-var getWeekNo = function ( firstDayOfWeek, date, results, total ) {
-    results[0] = date.getISOWeekNumber( firstDayOfWeek, true );
-    results[1] = results[0] - total;
-    results[2] = none;
-};
-var getPosition = function ( date, results, total, index ) {
-    results[0] = index + 1;
-    results[1] = index - total;
-    results[2] = none;
-};
-
-var filter = function ( array, getValues, allowedValues, total ) {
-    var l = array.length,
-        results = [ none, none, none ],
-        date, i, ll, a, b, c, allowed;
-    ll = allowedValues.length;
-    outer: while ( l-- ) {
-        date = array[l];
-        if ( date ) {
-            getValues( date, results, total, l );
-            a = results[0];
-            b = results[1];
-            c = results[2];
-            for ( i = 0; i < ll; i += 1 ) {
-                allowed = allowedValues[i];
-                if ( allowed === a || allowed === b || allowed === c ) {
-                    continue outer;
-                }
-            }
-            array[l] = null;
-        }
-    }
-};
-var expand = function ( array, property, values ) {
-    var l = array.length, ll = values.length,
-        i, j, k = 0,
-        results = new Array( l * ll ),
-        candidate, newCandidate;
-    for ( i = 0; i < l; i += 1 ) {
-        candidate = array[i];
-        for ( j = 0; j < ll; j += 1 ) {
-            if ( candidate ) {
-                newCandidate = new Date( candidate );
-                newCandidate[ property ]( values[j] );
-            } else {
-                newCandidate = null;
-            }
-            results[ k ] = newCandidate;
-            k += 1;
-        }
-    }
-    return results;
-};
-
-var numerically = function ( a, b ) {
-    return a - b;
-};
-var toBoolean = O.Transform.toBoolean;
-
-// ---
-
-var YEARLY = 1,
-    MONTHLY = 2,
-    WEEKLY = 3,
-    DAILY = 4,
-    HOURLY = 5,
-    MINUTELY = 6,
-    SECONDLY = 7;
-
-var frequencyNumbers = {
-    yearly: YEARLY,
-    monthly: MONTHLY,
-    weekly: WEEKLY,
-    daily: DAILY,
-    hourly: HOURLY,
-    minutely: MINUTELY,
-    secondly: SECONDLY
-};
-
-// ---
-
-var RecurringDate = O.Class({
-
-    init: function ( mixin ) {
-        this.frequency = mixin.frequency || '';
-        this.interval = mixin.interval || 1;
-
-        // [0-6] +- (1/2/3/4/...) * 7 e.g. -1MO => 1 - 7 = -6
-        // e.g. [ 0, 1, 9, -5 ]
-        this.byDay = mixin.byDay || null;
-        this.byDate = mixin.byDate || null;
-        this.byMonth = mixin.byMonth || null;
-        this.byYearDay = mixin.byYearDay || null;
-        this.byWeekNo = mixin.byWeekNo || null;
-
-        var byHour = this.byHour = mixin.byHour || null;
-        var byMinute = this.byMinute = mixin.byMinute || null;
-        var bySecond = this.bySecond = mixin.bySecond || null;
-
-        if ( byHour ) {
-            byHour.sort( numerically );
-        }
-        if ( byMinute ) {
-            byMinute.sort( numerically );
-        }
-        if ( bySecond ) {
-            bySecond.sort( numerically );
-        }
-
-        this.bySetPosition = mixin.bySetPosition || null;
-
-        var firstDayOfWeek = mixin.firstDayOfWeek;
-        this.firstDayOfWeek =
-            0 <= firstDayOfWeek && firstDayOfWeek < 7 ? firstDayOfWeek : 1;
-
-        this.until = mixin.until || null;
-        this.count = mixin.count || null;
-
-        this._isComplexAnchor = false;
-    },
-
-    toJSON: function () {
-        var result = {},
-            property, value;
-
-        for ( property in this ) {
-            if ( property.charAt( 0 ) !== '_' &&
-                    this.hasOwnProperty( property ) ) {
-                value = this[ property ];
-                if ( value !== null &&
-                        ( value !== 1 || property === 'count' ) ) {
-                    result[ property ] = value;
-                }
-            }
-        }
-        if ( value = result.until ) {
-            result.until = value.toJSON();
-        }
-        return result;
-    },
-
-    // Returns the next set of dates revolving around the interval defined by
-    // the fromDate. This may include dates *before* the from date.
-    iterate: function ( fromDate, startDate ) {
-        var frequency = frequencyNumbers[ this.frequency ] || DAILY,
-            interval = this.interval,
-
-            firstDayOfWeek = this.firstDayOfWeek,
-
-            byDay = this.byDay,
-            byDate = this.byDate,
-            byMonth = this.byMonth,
-            byYearDay = this.byYearDay,
-            byWeekNo = this.byWeekNo,
-
-            byHour = this.byHour,
-            byMinute = this.byMinute,
-            bySecond = this.bySecond,
-
-            bySetPosition = this.bySetPosition,
-
-            candidates = [],
-            maxAttempts =
-                ( frequency === YEARLY ) ? 10 :
-                ( frequency === MONTHLY ) ? 24 :
-                ( frequency === WEEKLY ) ? 53 :
-                ( frequency === DAILY ) ? 366 :
-                ( frequency === HOURLY ) ? 48 :
-                /* MINUTELY || SECONDLY */ 120,
-            useFastPath, i, daysInMonth, offset, candidate, lastDayInYear,
-            weeksInYear, year, month, date, hour, minute, second;
-
-        // Check it's sane.
-        if ( interval < 1 ) {
-            throw new Error( 'RecurringDate: Cannot have interval < 1' );
-        }
-
-        // Ignore illegal restrictions:
-        if ( frequency !== YEARLY ) {
-            byWeekNo = null;
-        }
-        switch ( frequency ) {
-            case WEEKLY:
-                byDate = null;
-                /* falls through */
-            case DAILY:
-            case MONTHLY:
-                byYearDay = null;
-                break;
-        }
-
-        // Only fill-in-the-blanks cases not handled by the fast path.
-        if ( frequency === YEARLY ) {
-            if ( byDate && !byMonth && !byDay && !byYearDay && !byWeekNo ) {
-                if ( byDate.length === 1 &&
-                        byDate[0] === fromDate.getUTCDate() ) {
-                    byDate = null;
-                } else {
-                    byMonth = [ fromDate.getUTCMonth() ];
-                }
-            }
-            if ( byMonth && !byDate && !byDay && !byYearDay && !byWeekNo ) {
-                byDate = [ fromDate.getUTCDate() ];
-            }
-        }
-        if ( frequency === MONTHLY && byMonth && !byDate && !byDay ) {
-            byDate = [ fromDate.getUTCDate() ];
-        }
-        if ( frequency === WEEKLY && byMonth && !byDay ) {
-            byDay = [ fromDate.getUTCDay() ];
-        }
-
-        // Deal with monthly/yearly repetitions where the anchor may not exist
-        // in some cycles. Must not use fast path.
-        if ( this._isComplexAnchor &&
-                !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo ) {
-            byDate = [ startDate.getUTCDate() ];
-            if ( frequency === YEARLY ) {
-                byMonth = [ startDate.getUTCMonth() ];
-            }
-        }
-
-        useFastPath = !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo;
-        switch ( frequency ) {
-            case SECONDLY:
-                useFastPath = useFastPath && !bySecond;
-                /* falls through */
-            case MINUTELY:
-                useFastPath = useFastPath && !byMinute;
-                /* falls through */
-            case HOURLY:
-                useFastPath = useFastPath && !byHour;
-                break;
-        }
-
-        // It's possible to write rules which don't actually match anything.
-        // Limit the maximum number of cycles we are willing to pass through
-        // looking for a new candidate.
-        while ( maxAttempts-- ) {
-            year = fromDate.getUTCFullYear();
-            month = fromDate.getUTCMonth();
-            date = fromDate.getUTCDate();
-            hour = fromDate.getUTCHours();
-            minute = fromDate.getUTCMinutes();
-            second = fromDate.getUTCSeconds();
-
-            // Fast path
-            if ( useFastPath ) {
-                candidates.push( fromDate );
-            } else {
-                // 1. Build set of candidates.
-                switch ( frequency ) {
-                // We do the filtering of bySecond/byMinute/byHour in the
-                // candidate generation phase for SECONDLY, MINUTELY and HOURLY
-                // frequencies.
-                case SECONDLY:
-                    if ( bySecond && bySecond.indexOf( second ) < 0 ) {
-                        break;
-                    }
-                    /* falls through */
-                case MINUTELY:
-                    if ( byMinute && byMinute.indexOf( minute ) < 0 ) {
-                        break;
-                    }
-                    /* falls through */
-                case HOURLY:
-                    if ( byHour && byHour.indexOf( hour ) < 0 ) {
-                        break;
-                    }
-                    lastDayInYear = new Date( Date.UTC(
-                        year, 11, 31, hour, minute, second
-                    ));
-                    /* falls through */
-                case DAILY:
-                    candidates.push( new Date( Date.UTC(
-                        year, month, date, hour, minute, second
-                    )));
-                    break;
-                case WEEKLY:
-                    offset = ( fromDate.getUTCDay() - firstDayOfWeek ).mod( 7 );
-                    for ( i = 0; i < 7; i += 1 ) {
-                        candidates.push( new Date( Date.UTC(
-                            year, month, date - offset + i, hour, minute, second
-                        )));
-                    }
-                    break;
-                case MONTHLY:
-                    daysInMonth = Date.getDaysInMonth( month, year );
-                    for ( i = 1; i <= daysInMonth; i += 1 ) {
-                        candidates.push( new Date( Date.UTC(
-                            year, month, i, hour, minute, second
-                        )));
-                    }
-                    break;
-                case YEARLY:
-                    candidate = new Date( Date.UTC(
-                        year, 0, 1, hour, minute, second
-                    ));
-                    lastDayInYear = new Date( Date.UTC(
-                        year, 11, 31, hour, minute, second
-                    ));
-                    while ( candidate <= lastDayInYear ) {
-                        candidates.push( candidate );
-                        candidate = new Date( +candidate + 86400000 );
-                    }
-                    break;
-                }
-
-                // 2. Apply restrictions and expansions
-                if ( byMonth ) {
-                    filter( candidates, getMonth, byMonth );
-                }
-                if ( byDate ) {
-                    filter( candidates, getDate, byDate,
-                        daysInMonth ? daysInMonth + 1 : 0
-                    );
-                }
-                if ( byDay ) {
-                    if ( frequency !== MONTHLY &&
-                            ( frequency !== YEARLY || byWeekNo ) ) {
-                        filter( candidates, getDay, byDay );
-                    } else if ( frequency === MONTHLY || byMonth ) {
-                        // Filter candidates using position of day in month
-                        filter( candidates, getDayMonthly, byDay,
-                            daysInMonth || 0 );
-                    } else {
-                        // Filter candidates using position of day in year
-                        filter( candidates, getDayYearly, byDay,
-                            Date.getDaysInYear( year ) );
-                    }
-                }
-                if ( byYearDay ) {
-                    filter( candidates, getYearDay, byYearDay,
-                        lastDayInYear.getDayOfYear( true ) + 1
-                    );
-                }
-                if ( byWeekNo ) {
-                    weeksInYear =
-                        lastDayInYear.getISOWeekNumber( firstDayOfWeek, true );
-                    if ( weeksInYear === 1 ) {
-                        weeksInYear = 52;
-                    }
-                    filter( candidates, getWeekNo.bind( null, firstDayOfWeek ),
-                        byWeekNo,
-                        weeksInYear + 1
-                    );
-                }
-            }
-            if ( byHour && frequency !== HOURLY &&
-                    frequency !== MINUTELY && frequency !== SECONDLY ) {
-                candidates = expand( candidates, 'setUTCHours', byHour );
-            }
-            if ( byMinute &&
-                    frequency !== MINUTELY && frequency !== SECONDLY ) {
-                candidates = expand( candidates, 'setUTCMinutes', byMinute );
-            }
-            if ( bySecond && frequency !== SECONDLY ) {
-                candidates = expand( candidates, 'setUTCSeconds', bySecond );
-            }
-            if ( bySetPosition ) {
-                candidates = candidates.filter( toBoolean );
-                filter( candidates, getPosition, bySetPosition,
-                    candidates.length );
-            }
-
-            // 3. Increment anchor by frequency/interval
-            fromDate = new Date( Date.UTC(
-                ( frequency === YEARLY ) ? year + interval : year,
-                ( frequency === MONTHLY ) ? month + interval : month,
-                ( frequency === WEEKLY ) ? date + 7 * interval :
-                ( frequency === DAILY ) ? date + interval : date,
-                ( frequency === HOURLY ) ? hour + interval : hour,
-                ( frequency === MINUTELY ) ? minute + interval : minute,
-                ( frequency === SECONDLY ) ? second + interval : second
-            ));
-
-            // 4. Do we have any candidates left?
-            candidates = candidates.filter( toBoolean );
-            if ( candidates.length ) {
-                return [ candidates, fromDate ];
-            }
-        }
-        return [ null, fromDate ];
-    },
-
-    // start = Date recurrence starts (should be first occurrence)
-    // begin = Beginning of time period to return occurrences within
-    // end = End of time period to return occurrences within
-    getOccurrences: function ( start, begin, end ) {
-        var frequency = frequencyNumbers[ this.frequency ] || DAILY,
-            count = this.count || 0,
-            until = this.until,
-            results = [],
-            interval, year, month, date, isComplexAnchor,
-            beginYear, beginMonth,
-            anchor, temp, occurrences, occurrence, i, l;
-
-        if ( !start ) {
-            start = new Date();
-        }
-        if ( !begin || begin <= start ) {
-            begin = start;
-        }
-        if ( !end && !until && !count ) {
-            count = 2;
-        }
-        if ( until && ( !end || end > until ) ) {
-            end = new Date( +until + 1000 );
-        }
-        if ( end && begin >= end ) {
-            return results;
-        }
-
-        // An anchor is a date == start + x * (interval * frequency)
-        // An anchor may return occurrences earlier than it.
-        // Anchor results do not overlap.
-        // For monthly/yearly recurrences, we have to generate a "false" anchor
-        // and use the slow path if the start date may not exist in some cycles
-        // e.g. 31st December repeat monthly -> no 31st in some months.
-        year = start.getUTCFullYear();
-        month = start.getUTCMonth();
-        date = start.getUTCDate();
-        isComplexAnchor = this._isComplexAnchor = date > 28 &&
-            ( frequency === MONTHLY || (frequency === YEARLY && month === 1) );
-
-        // Must always iterate from the start if there's a count
-        if ( count || begin === start ) {
-            // Anchor will be created below if complex
-            if ( !isComplexAnchor ) {
-                anchor = start;
-            }
-        } else {
-            // Find first anchor before or equal to "begin" date.
-            interval = this.interval;
-            switch ( frequency ) {
-            case YEARLY:
-                // Get year of range begin.
-                // Subtract year of start
-                // Find remainder modulo interval;
-                // Subtract from range begin year so we're on an interval.
-                beginYear = begin.getUTCFullYear();
-                year = beginYear - ( ( beginYear - year ) % interval );
-                break;
-            case MONTHLY:
-                beginYear = begin.getUTCFullYear();
-                beginMonth = begin.getUTCMonth();
-                // Get number of months from event start to range begin
-                month = 12 * ( beginYear - year ) + ( beginMonth - month );
-                // Calculate the first anchor month <= the begin month/year
-                month = beginMonth - ( month % interval );
-                year = beginYear;
-                // Month could be < 0 if anchor is in previous year
-                if ( month < 0 ) {
-                    year += Math.floor( month / 12 );
-                    month = month.mod( 12 );
-                }
-                break;
-            case WEEKLY:
-                interval *= 7;
-                /* falls through */
-            case DAILY:
-                interval *= 24;
-                /* falls through */
-            case HOURLY:
-                interval *= 60;
-                /* falls through */
-            case MINUTELY:
-                interval *= 60;
-                /* falls through */
-            case SECONDLY:
-                interval *= 1000;
-                anchor = new Date( begin - ( ( begin - start ) % interval ) );
-                break;
-            }
-        }
-        if ( !anchor ) {
-            anchor = new Date( Date.UTC(
-                year, month, isComplexAnchor ? 1 : date,
-                start.getUTCHours(),
-                start.getUTCMinutes(),
-                start.getUTCSeconds()
-            ));
-        }
-
-        // If anchor <= start, filter out any dates < start
-        // Always filter dates for begin <= date < end
-        // If we reach the count limit or find a date >= end, we're done.
-        // For sanity, set the count limit to be in the bounds [0,2^14], so
-        // we don't enter a near-infinite loop
-
-        if ( count <= 0 || count > 16384 ) {
-            count = 16384; // 2 ^ 14
-        }
-
-        // Start date is always included according to RFC5545, even if it
-        // doesn't match the recurrence
-        if ( anchor <= start ) {
-            results.push( start );
-            count -= 1;
-            if ( !count ) {
-                return results;
-            }
-        }
-
-        outer: while ( true ) {
-            temp = this.iterate( anchor, start );
-            occurrences = temp[0];
-            if ( !occurrences ) {
-                break;
-            }
-            if ( anchor <= start ) {
-                /* jshint ignore:start */
-                occurrences = occurrences.filter( function ( date ) {
-                    return date > start;
-                });
-                /* jshint ignore:end */
-            }
-            anchor = temp[1];
-            for ( i = 0, l = occurrences.length; i < l; i += 1 ) {
-                occurrence = occurrences[i];
-                if ( end && occurrence >= end ) {
-                    break outer;
-                }
-                if ( begin <= occurrence ) {
-                    results.push( occurrence );
-                }
-                count -= 1;
-                if ( !count ) {
-                    break outer;
-                }
-            }
-        }
-
-        return results;
-    },
-
-    matches: function ( start, date ) {
-        return !!this.getOccurrences( start, date, new Date( +date + 1000 ) )
-                     .length;
-    }
-});
-
-RecurringDate.fromJSON = function ( recurrenceRule ) {
-    var until = recurrenceRule.until;
-    if ( until ) {
-        recurrenceRule = O.extend({
-            until: Date.fromJSON( until )
-        }, recurrenceRule, true );
-    }
-    return new RecurringDate( recurrenceRule );
-};
-
-JMAP.RecurringDate = RecurringDate;
 
 }( JMAP ) );
 
@@ -4521,16 +3977,17 @@ JMAP.calendar.eventUploads = {
     didUpload: function ( file ) {
         var inEdit = file.inEdit,
             inServer = file.inServer,
-            attachment = {
-                url: file.get( 'url' ),
-                name: file.get( 'name' ),
+            link = {
+                href: file.get( 'url' ),
+                rel: 'enclosure',
+                title: file.get( 'name' ),
                 type: file.get( 'type' ),
                 size: file.get( 'size' )
             },
             editEvent = file.editEvent,
-            editAttachments = O.clone( editEvent.get( 'attachments' ) ) || [],
+            editLinks = O.clone( editEvent.get( 'links' ) ) || {},
             id, awaitingSave,
-            serverEvent, serverAttachments;
+            serverEvent, serverLinks;
 
         if ( !inServer ) {
             id = editEvent.get( 'storeKey' );
@@ -4538,22 +3995,21 @@ JMAP.calendar.eventUploads = {
             ( awaitingSave[ id ] ||
                 ( awaitingSave[ id ] = [] ) ).push([
                     file.get( 'path' ), file.get( 'name' ) ]);
-            editAttachments.push( attachment );
-            editEvent.set( 'attachments', editAttachments );
+            editLinks[ link.href ] = link;
+            editEvent.set( 'links', editLinks );
             this.remove( editEvent, file );
         } else {
             this.keepFile( file.get( 'path' ), file.get( 'name' ) );
             // Save new attachment to server
             serverEvent = editEvent.getDoppelganger( JMAP.store );
-            serverAttachments =
-                O.clone( serverEvent.get( 'attachments' ) ) || [];
-            serverAttachments.push( attachment );
-            serverEvent.set( 'attachments', serverAttachments );
+            serverLinks = O.clone( serverEvent.get( 'links' ) ) || {};
+            serverLinks[ link.href ] = link;
+            serverEvent.set( 'links', serverLinks );
             // If in edit, push to edit record as well.
             if ( inEdit ) {
-                editAttachments.push( attachment );
+                editLinks[ link.href ] = link;
             }
-            editEvent.set( 'attachments', editAttachments );
+            editEvent.set( 'links', editLinks );
             this.remove( serverEvent, file );
         }
     },
@@ -5274,6 +4730,7 @@ JMAP.Mailbox = Mailbox;
 var Status = O.Status,
     EMPTY = Status.EMPTY,
     READY = Status.READY,
+    LOADING = Status.LOADING,
     NEW = Status.NEW;
 
 var Record = O.Record,
@@ -5387,6 +4844,7 @@ var Message = O.Class({
     fetchDetails: function () {
         if ( this.get( 'detailsStatus' ) === EMPTY ) {
             JMAP.mail.fetchRecord( MessageDetails, this.get( 'id' ) );
+            this.set( 'detailsStatus', EMPTY|LOADING );
         }
     },
 
@@ -5540,7 +4998,7 @@ JMAP.mail.handle( Message, {
         this.recalculateAllFetchedWindows();
         // Tell the store we're now in the new state.
         store.sourceDidFetchUpdates(
-            Message, null, null, store.getTypeState( Message ), args.newState );
+            Message, null, null, store.getTypeState( Message ), '' );
 
     },
     messagesSet: function ( args ) {
@@ -5568,16 +5026,34 @@ JMAP.Message = Message;
 var Record = O.Record;
 
 var aggregateBoolean = function ( _, key ) {
-    return this.get( 'messages' ).reduce( function ( isProperty, message ) {
-        return isProperty || ( !message.isIn( 'trash' ) && message.get( key ) );
+    return this.get( 'messagesNotInTrash' ).reduce(
+    function ( isProperty, message ) {
+        return isProperty || message.get( key );
     }, false );
 }.property( 'messages' ).nocache();
 
 var aggregateBooleanInTrash = function ( _, key ) {
-    return this.get( 'messages' ).reduce( function ( isProperty, message ) {
-        return isProperty || ( message.isIn( 'trash' ) && message.get( key ) );
+    return this.get( 'messagesInTrash' ).reduce(
+    function ( isProperty, message ) {
+        return isProperty || message.get( key );
     }, false );
 }.property( 'messages' ).nocache();
+
+var toFrom = function ( message ) {
+    var from = message.get( 'from' );
+    return from && from[0] || null;
+};
+
+var sumSize = function ( size, message ) {
+    return size + message.get( 'size' );
+};
+
+var isInTrash = function ( message ) {
+    return message.isIn( 'trash' );
+};
+var notInTrash = function ( message ) {
+    return !message.isIn( 'trash' );
+};
 
 var Thread = O.Class({
 
@@ -5589,6 +5065,34 @@ var Thread = O.Class({
         recordType: JMAP.Message,
         key: 'messageIds'
     }),
+
+    messagesNotInTrash: function () {
+        return new O.ObservableArray(
+            this.get( 'messages' ).filter( notInTrash )
+        );
+    }.property(),
+
+    messagesInTrash: function () {
+        return new O.ObservableArray(
+            this.get( 'messages' ).filter( isInTrash )
+         );
+    }.property(),
+
+    _setMessagesArrayContent: function () {
+        var cache = O.meta( this ).cache;
+        var messagesNotInTrash = cache.messagesNotInTrash;
+        var messagesInTrash = cache.messagesInTrash;
+        if ( messagesNotInTrash ) {
+            messagesNotInTrash.set( '[]',
+                this.get( 'messages' ).filter( notInTrash )
+            );
+        }
+        if ( messagesInTrash ) {
+            messagesInTrash.set( '[]',
+                this.get( 'messages' ).filter( isInTrash )
+            );
+        }
+    }.observes( 'messages' ),
 
     isAll: function ( status ) {
         return this.is( status ) &&
@@ -5613,33 +5117,26 @@ var Thread = O.Class({
         return counts;
     }.property( 'messages' ).nocache(),
 
+    // ---
+
     isUnread: aggregateBoolean,
     isFlagged: aggregateBoolean,
     isDraft: aggregateBoolean,
     hasAttachment: aggregateBoolean,
 
     total: function () {
-        return this.get( 'messages' ).reduce( function ( count, message ) {
-            return count + ( message.isIn( 'trash' ) ? 0 : 1 );
-        }, 0 );
+        return this.get( 'messagesNotInTrash' ).get( 'length' );
     }.property( 'messages' ).nocache(),
 
     // senders is [{name: String, email: String}]
     senders: function () {
-        return this.get( 'messages' ).map( function ( message ) {
-            if ( message.isIn( 'trash' ) ) {
-                return null;
-            }
-            var from = message.get( 'from' );
-            return from && from[0] || null;
-        }).filter( O.Transform.toBoolean );
+        return this.get( 'messagesNotInTrash' )
+                   .map( toFrom )
+                   .filter( O.Transform.toBoolean );
     }.property( 'messages' ).nocache(),
 
     size: function () {
-        return this.get( 'messages' ).reduce( function ( size, message ) {
-            return size +
-                ( message.isIn( 'trash' ) ? 0 : message.get( 'size' ) );
-        }, 0 );
+        return this.get( 'messagesNotInTrash' ).reduce( sumSize, 0 );
     }.property( 'messages' ).nocache(),
 
     // ---
@@ -5650,26 +5147,17 @@ var Thread = O.Class({
     hasAttachmentInTrash: aggregateBooleanInTrash,
 
     totalInTrash: function () {
-        return this.get( 'messages' ).reduce( function ( count, message ) {
-            return count + ( message.isIn( 'trash' ) ? 1 : 0 );
-        }, 0 );
+        return this.get( 'messagesInTrash' ).get( 'length' );
     }.property( 'messages' ).nocache(),
 
     sendersInTrash: function () {
-        return this.get( 'messages' ).map( function ( message ) {
-            if ( !message.isIn( 'trash' ) ) {
-                return null;
-            }
-            var from = message.get( 'from' );
-            return from && from[0] || null;
-        }).filter( O.Transform.toBoolean );
+        return this.get( 'messagesInTrash' )
+                   .map( toFrom )
+                   .filter( O.Transform.toBoolean );
     }.property( 'messages' ).nocache(),
 
     sizeInTrash: function () {
-        return this.get( 'messages' ).reduce( function ( size, message ) {
-            return size +
-                ( message.isIn( 'trash' ) ? message.get( 'size' ) : 0 );
-        }, 0 );
+        return this.get( 'messagesInTrash' ).reduce( sumSize, 0 );
     }.property( 'messages' ).nocache()
 });
 
@@ -5738,7 +5226,7 @@ JMAP.mail.handle( Thread, {
         this.recalculateAllFetchedWindows();
         // Tell the store we're now in the new state.
         store.sourceDidFetchUpdates(
-            Thread, null, null, store.getTypeState( Thread ), args.newState );
+            Thread, null, null, store.getTypeState( Thread ), '' );
     }
 });
 
@@ -5948,7 +5436,6 @@ JMAP.mail.handle( MessageList, {
         var state = query.get( 'state' );
         var request = query.sourceWillFetchQuery();
         var hasMadeRequest = false;
-        var toMessageId = JMAP.store.getIdFromStoreKey.bind( JMAP.store );
 
         if ( canGetDeltaUpdates && state && request.refresh ) {
             var list = query._list;
@@ -5960,7 +5447,8 @@ JMAP.mail.handle( MessageList, {
                 sort: sort,
                 collapseThreads: collapseThreads,
                 sinceState: state,
-                uptoMessageId: upto ? toMessageId( upto ) : null,
+                uptoMessageId: upto ?
+                    JMAP.store.getIdFromStoreKey( upto ) : null,
                 maxChanges: 250
             });
         }
@@ -5976,7 +5464,7 @@ JMAP.mail.handle( MessageList, {
                 sort: sort,
                 collapseThreads: collapseThreads,
                 position: start,
-                anchor: anchor && toMessageId( anchor ),
+                anchor: anchor,
                 anchorOffset: offset,
                 limit: count,
                 fetchThreads: collapseThreads && fetchData,
