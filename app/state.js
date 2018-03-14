@@ -2,8 +2,6 @@
 // File: state.js                                                             \\
 // Module: Mail                                                               \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, App, JMAP, JSON */
@@ -22,6 +20,25 @@ var Mailbox = JMAP.Mailbox;
 var Thread = JMAP.Thread;
 var Message = JMAP.Message;
 
+// --- Temp hack to talk to proxy without implementing proper auth ---
+
+var userPath = ( /k=([0-9a-f\-]+)/.exec( location.href ) || [ '', '' ] )[1];
+
+JMAP.auth.didAuthenticate({
+    username:       'user@example.com',
+    accessToken:    'password',
+    accounts: {
+        [userPath]: {
+            isPrimary: true,
+            hasDataFor: [ 'mail', 'contacts', 'calendars' ],
+        }
+    },
+    apiUrl:         '/jmap/'   + userPath,
+    eventSourceUrl: '/events/' + userPath,
+    uploadUrl:      '/upload/' + userPath,
+    downloadUrl:    '/raw/'    + userPath + '/{blobId}/{name}'
+});
+
 // ---
 
 var byMailSourceOrder = function ( a, b ) {
@@ -34,14 +51,14 @@ var byMailSourceOrder = function ( a, b ) {
         var parent = a;
         var al, bl;
 
-        while ( parent = parent.get( 'parent' ) ) {
+        while (( parent = parent.get( 'parent' ) )) {
             if ( parent === b ) {
                 return 1;
             }
             aParents.push( parent );
         }
         parent = b;
-        while ( parent = parent.get( 'parent' ) ) {
+        while (( parent = parent.get( 'parent' ) )) {
             if ( parent === a ) {
                 return -1;
             }
@@ -61,7 +78,7 @@ var byMailSourceOrder = function ( a, b ) {
         ( a.get( 'id' ) < b.get( 'id' ) ? -1 : 1 );
 };
 
-var rootMailboxes = store.getQuery( 'rootMailboxes', O.LiveQuery, {
+var rootMailboxes = store.getQuery( 'rootMailboxes', O.LocalQuery, {
     Type: Mailbox,
     filter: function ( data ) {
         return !data.parentId;
@@ -70,14 +87,14 @@ var rootMailboxes = store.getQuery( 'rootMailboxes', O.LiveQuery, {
 });
 
 var allMailboxes = new O.ObservableArray( null, {
-    content: store.getQuery( 'allMailboxes', O.LiveQuery, {
+    content: store.getQuery( 'allMailboxes', O.LocalQuery, {
         Type: Mailbox
     }),
     contentDidChange: function () {
         var mailboxes = this.get( 'content' ).get( '[]' );
         mailboxes.sort( byMailSourceOrder );
         return this.set( '[]', mailboxes );
-    }
+    }.queue( 'before' )
 }).contentDidChange();
 store.on( Mailbox, allMailboxes, 'contentDidChange' );
 
@@ -117,40 +134,25 @@ App.state = new O.Router({
 
     // ---
 
-    mailboxId: '',
-    threadId: '',
+    mailbox: null,
+    thread: null,
     messageId: '',
 
-    mailbox: function () {
-        var id = this.get( 'mailboxId' );
-        return id ? store.getRecord( Mailbox, id ) : null;
-    }.property( 'mailboxId' ),
-
     mailboxMessageList: function () {
-        var mailboxId = this.get( 'mailboxId' );
+        var mailboxId = this.getFromPath( 'mailbox.id' );
         if ( !mailboxId ) {
             return null;
         }
         var args = {
-            filter: { inMailboxes: [ mailboxId ] },
-            sort: [ 'date desc' ],
+            autoRefresh: O.Query.AUTO_REFRESH_IF_OBSERVED,
+            accountId: this.get( 'mailbox' ).get( 'accountId' ),
+            where: { inMailbox: mailboxId },
+            sort: [{ property: 'receivedAt', isAscending: false }],
             collapseThreads: true
         };
         var id = MessageList.getId( args );
         return store.getQuery( id, MessageList, args );
-    }.property( 'mailboxId' ),
-
-    mailboxMessageListStatusDidChange: function ( _, __, ___, status ) {
-        if ( status &&
-                ( status & EMPTY_OR_OBSOLETE ) && !( status & LOADING ) ) {
-            this.get( 'mailboxMessageList' ).refresh( false );
-        }
-    }.observes( 'mailboxMessageList.status' ),
-
-    thread: function () {
-        var id = this.get( 'threadId' );
-        return id ? store.getRecord( Thread, id ) : null;
-    }.property( 'threadId' ),
+    }.property( 'mailbox' ),
 
     threadStatusDidChange: function ( thread, __, ___, status ) {
         if ( status ) {
@@ -161,11 +163,11 @@ App.state = new O.Router({
     }.observes( 'thread.status' ),
 
     threadMessageList: function () {
-        var threadId = this.get( 'threadId' );
-        return threadId ?
-            store.getRecord( Thread, threadId ).get( 'messages' ) :
+        var thread = this.get( 'thread' );
+        return thread ?
+            thread.get( 'messages' ) :
             null;
-    }.property( 'threadId' ),
+    }.property( 'thread' ),
 
     // --- Navigation ---
 
@@ -249,7 +251,8 @@ App.state = new O.Router({
 rootMailboxes.addObserverForKey( '[]', {
     go: function ( rootMailboxes, key ) {
         rootMailboxes.removeObserverForKey( key, this, 'go' );
-        App.state.set( 'mailboxId', JMAP.mail.getMailboxIdForRole( 'inbox' ) );
+        App.state.set( 'mailbox',
+            JMAP.mail.getMailboxForRole( null, 'inbox' ) );
     }
 }, 'go' );
 
@@ -259,7 +262,7 @@ App.state.selectedMessage = new O.SingleSelectionController({
     function ( value, syncForward ) {
         return syncForward ?
             value ?
-                store.getRecord( Message, value ) :
+                store.getRecord( null, Message, value ) :
                 null :
             value ?
                 value.get( 'id' ) :
@@ -269,10 +272,10 @@ App.state.selectedMessage = new O.SingleSelectionController({
         var message = this.get( 'record' );
         if ( message ) {
             if ( message.is( O.Status.READY ) ) {
-                App.state.set( 'threadId', message.get( 'threadId' ) );
+                App.state.set( 'thread', message.get( 'thread' ) );
             }
         } else {
-            App.state.set( 'threadId', '' );
+            App.state.set( 'thread', null );
         }
     }.observes( 'record.status' ),
 
@@ -343,19 +346,6 @@ App.kbshortcuts
     .register( 'cmd-shift-z', JMAP.mail.undoManager, 'redo' )
     .register( 'cmd-a', App.state.selection, 'selectAll' );
 
-// --- Temp hack to talk to proxy without implementing proper auth ---
-
-var userPath = ( /k=([0-9a-f\-]+)/.exec( location.href ) || [ '', '' ] )[1];
-
-JMAP.auth.didAuthenticate({
-    username:       'user@example.com',
-    accessToken:    'password',
-    apiUrl:         '/jmap/'   + userPath,
-    eventSourceUrl: '/events/' + userPath,
-    uploadUrl:      '/upload/' + userPath,
-    downloadUrl:    '/raw/'    + userPath + '/{blobId}/{name}'
-});
-
 // --- Connect to the push service ---
 
 App.push = new O.EventSource({
@@ -364,7 +354,7 @@ App.push = new O.EventSource({
     }.property().nocache(),
 
     onStateChange: function ( event ) {
-        var changed, accountId, accountState, type;
+        var changed, accountId, accountChanges, Type, type;
         try {
             changed = JSON.parse( event.data ).changed;
         } catch ( error ) {
@@ -379,10 +369,14 @@ App.push = new O.EventSource({
         }
 
         for ( accountId in changed ) {
-            accountState = changed[ accountId ];
-            for ( type in accountState ) {
+            accountChanges = changed[ accountId ];
+            for ( type in accountChanges ) {
+                if ( type.startsWith( 'Email' ) ) {
+                    type = type.replace( 'Email', 'Message' );
+                }
+                Type = JMAP[ type ];
                 store.sourceStateDidChange(
-                    JMAP[ type ], accountState[ type ] );
+                    accountId, Type, accountChanges[ type ] );
             }
         }
     }.on( 'state' )

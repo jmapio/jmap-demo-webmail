@@ -2,8 +2,6 @@
 // File: MailboxItemView.js                                                   \\
 // Module: Mail                                                               \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, App */
@@ -55,17 +53,17 @@ var MailboxSourceView = O.Class({
     },
 
     select: function () {
-        App.state.set( 'mailboxId', this.get( 'content' ).get( 'id' ) );
+        App.state.set( 'mailbox', this.get( 'content' ) );
     }.on( 'click' ),
 
     // --- DropTarget ---
 
     dropAcceptedDataTypes: {
-        MessageIds: true
+        MessageStoreKeys: true
     },
 
     dropEntered: function ( drag ) {
-        if ( this.get( 'content' ).get( 'mayAddItems' ) ) {
+        if ( this.get( 'content' ).get( 'myRights' ).mayAddItems ) {
             this.set( 'hasDragOver', true );
             drag.set( 'dropEffect', O.DragEffect.MOVE );
         }
@@ -76,10 +74,10 @@ var MailboxSourceView = O.Class({
     },
     drop: function ( drag ) {
         var mailbox = this.get( 'content' );
-        if ( mailbox.get( 'mayAddItems' ) ) {
-            drag.getDataOfType( 'MessageIds', function ( messageIds ) {
-                if ( messageIds ) {
-                    App.actions.move( messageIds, mailbox.get( 'id' ) );
+        if ( mailbox.get( 'myRights' ).mayAddItems ) {
+            drag.getDataOfType( 'MessageStoreKeys', function ( storeKeys ) {
+                if ( storeKeys ) {
+                    App.actions.move( storeKeys, mailbox );
                 }
             });
         }

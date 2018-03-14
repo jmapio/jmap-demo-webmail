@@ -2,8 +2,6 @@
 // File: MessageView.js                                                       \\
 // Module: Mail                                                               \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, App, JMAP */
@@ -30,8 +28,6 @@ var READY = O.Status.READY;
 var MessageView = O.Class({
 
     Extends: O.View,
-
-    allowTextSelection: true,
 
     isFlagged: O.bind( 'content.isFlagged' ),
     isUnread: O.bind( 'content.isUnread' ),
@@ -127,7 +123,7 @@ var MessageView = O.Class({
             detailsAreLoaded = message.get( 'detailsStatus' ) === READY,
             email = message.get( 'fromEmail' ),
             fromName = message.get( 'fromName' ),
-            date = message.get( 'date' ),
+            receivedAt = message.get( 'receivedAt' ),
             contact = JMAP.contacts.getContactFromEmail( email ),
             bind = O.bind,
             contactName;
@@ -162,9 +158,9 @@ var MessageView = O.Class({
                         })
                     }),
                     el( 'div.v-Message-time', [
-                        date.isToday() ?
-                            O.i18n.date( date, 'time' ) :
-                            O.i18n.date( date, 'date' )
+                        receivedAt.isToday() ?
+                            O.i18n.date( receivedAt, 'time' ) :
+                            O.i18n.date( receivedAt, 'date' )
                     ])
                 ]),
                 el( 'div.v-Message-to', [

@@ -2,8 +2,6 @@
 // File: views.js                                                             \\
 // Module: Mail                                                               \\
 // Requires: namespace.js, state.js, actions.js                               \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP, App */
@@ -141,14 +139,6 @@ var threadView = new O.ScrollView({
     className: 'app-content',
     layout: O.bind( contentSplitController, 'bottomRightLayout' ),
     showScrollbarX: true,
-    keys: {
-        'pagedown': 'scrollPage',
-        'pageup': 'reverseScrollPage',
-        'space': 'scrollPage',
-        'shift-space': 'reverseScrollPage',
-        'down': 'scrollLine',
-        'up': 'reverseScrollLine'
-    },
     childViews: [
         new O.SwitchView({
             list: O.bind( App.state, 'threadMessageList' ),
@@ -176,7 +166,6 @@ var threadView = new O.ScrollView({
                     }),
                     childViews: [
                         new O.LabelView({
-                            allowTextSelection: true,
                             layerTag: 'h1',
                             className: 'v-Thread-title',
                             value: O.bind( App.state, 'subject' )

@@ -7,8 +7,7 @@ h1, h2, h3, h4, h5, h6,
 pre, code,
 form, fieldset, legend, input, select, button, textarea,
 p,
-blockquote,
-table, tr, th, td {
+blockquote {
   margin: 0;
   padding: 0;
 }
@@ -19,6 +18,10 @@ iframe,
 fieldset,
 img {
   border: 0;
+}
+
+button {
+  border-radius: 0;
 }
 
 abbr,
@@ -33,10 +36,8 @@ button::-moz-focus-inner {
   padding: 0;
 }
 
-/* Remove Safari blue glow */
-button,
-a:focus,
-input:focus {
+/* Remove blue glow */
+:focus {
   outline: none;
 }
 
@@ -49,8 +50,9 @@ input:focus {
 
 /* Make iframes and tables default to 100% width */
 
-/* Many emails use <table width="foo"> to do their layout. If you assign
-   a CSS width to such a table, there is no way to undo it. */
+/* Some emails still use archaic HTML, like to do their layout, like
+  <table cellspacing="15" width="500">. If you use apply the equivalent CSS
+  property to such a table, there is no way to undo it. */
 table:not([cellspacing]):not([width]) {
   border-collapse: collapse;
   border-spacing: 0;
@@ -72,12 +74,15 @@ textarea {
   resize: none;
 }
 
-/* Colours and fonts */
+/* Colors and fonts */
 
 html {
-  color: #000;
-  background: #fff;
-  font: 13px/1.25 "Helvetica Neue", arial, sans-serif;
+  color: #000; // not themed
+  background: #fff; // not themed
+}
+
+body {
+  line-height: 1.25;
 }
 
 a,
@@ -95,14 +100,18 @@ code,
 em,
 strong,
 table, th,
-select,
 input,
 button,
 textarea,
 pre {
   color: inherit;
   font: inherit;
+  letter-spacing: inherit;
   text-align: inherit;
+}
+
+svg {
+  fill: currentColor;
 }
 
 /* Pre */
@@ -110,4 +119,5 @@ pre {
 pre {
   white-space: pre-wrap;
   word-wrap: break-word;
+  overflow-wrap: break-word;
 }

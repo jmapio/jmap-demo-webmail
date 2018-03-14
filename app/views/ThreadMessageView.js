@@ -2,8 +2,6 @@
 // File: ThreadMessageView.js                                                 \\
 // Module: Mail                                                               \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, App */

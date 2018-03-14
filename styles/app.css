@@ -24,6 +24,7 @@ html {
     background: #e74c3c;
     color: #fff;
     cursor: default;
+    user-select: none;
 }
 
 .app-list {
@@ -50,6 +51,7 @@ html {
     font-size: 17px;
     font-weight: 300;
     cursor: pointer;
+    user-select: none;
 }
 .v-MailboxSource.is-selected,
 .v-MailboxSource.is-underDrag,
@@ -105,6 +107,7 @@ html {
     display: flex;
     align-items: center;
     padding: 0 15px;
+    user-select: none;
 }
 
 .v-Toolbar .v-Button {
@@ -132,6 +135,7 @@ html {
     height: 96px;
     font-size: 13px;
     cursor: pointer;
+    user-select: none;
 }
 .v-MailboxItem.is-selected {
     background: #e3e6e6;
@@ -337,6 +341,7 @@ html {
     color: #fff;
     -webkit-text-stroke: 1px rgba(0,0,0,0.15);
     cursor: pointer;
+    user-select: none;
 }
 .v-Message-flagButton:hover {
     -webkit-text-stroke-color: #999;

@@ -3,9 +3,9 @@
 // -------------------------------------------------------------------------- \\
 // File: DateJSON.js                                                          \\
 // Module: API                                                                \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
+
+'use strict';
 
 Date.prototype.toJSON = function () {
     var year = this.getUTCFullYear(),
@@ -26,13 +26,17 @@ Date.prototype.toJSON = function () {
     );
 };
 
+Date.toUTCJSON = function ( date ) {
+    return date.toJSON() + 'Z';
+};
+
 
 // -------------------------------------------------------------------------- \\
 // File: namespace.js                                                         \\
 // Module: API                                                                \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
+
+'use strict';
 
 this.JMAP = {};
 
@@ -41,30 +45,42 @@ this.JMAP = {};
 // File: Auth.js                                                              \\
 // Module: API                                                                \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP, JSON */
+/*global O, JMAP */
+
+'use strict';
 
 ( function ( JMAP ) {
 
-JMAP.auth = new O.Object({
+const auth = new O.Object({
 
     isAuthenticated: false,
 
     username: '',
-    accessToken: '',
+
     accounts: {},
-    capabilities: {},
+    capabilities: {
+        'ietf:jmap': {
+            maxSizeUpload: 50000000,
+            maxConcurrentUpload: 10,
+            maxSizeRequest: 5000000,
+            maxConcurrentRequests: 8,
+            maxCallsInRequest: 32,
+            maxObjectsInGet: 1024,
+            maxObjectsInSet: 1024,
+            collationAlgorithms: [
+                'i;ascii-numeric',
+                'i;ascii-casemap',
+            ],
+        },
+    },
 
     authenticationUrl: '',
     apiUrl: '',
     downloadUrl: '',
     uploadUrl: '',
     eventSourceUrl: '',
-
-    _isFetchingEndPoints: false,
 
     defaultAccountId: function () {
         var accounts = this.get( 'accounts' );
@@ -79,72 +95,18 @@ JMAP.auth = new O.Object({
 
     // ---
 
-    getUrlForBlob: function ( accountId, blobId, name ) {
-        return this.get( 'downloadUrl' )
-            .replace( '{accountId}', encodeURIComponent( accountId ) )
-            .replace( '{blobId}', encodeURIComponent( blobId ) )
-            .replace( '{name}', encodeURIComponent( name ) );
-    },
-
-    // ---
-
     didAuthenticate: function ( data ) {
         for ( var property in data ) {
-            if ( property in this && typeof this[ property ] !== 'function' ) {
+            if ( typeof this[ property ] !== 'function' ) {
                 this.set( property, data[ property ] );
             }
         }
-        this.set( 'isAuthenticated', !!data.accessToken );
+        this.set( 'isAuthenticated', true );
 
         this._awaitingAuthentication.forEach( function ( connection ) {
             connection.send();
         });
         this._awaitingAuthentication.length = 0;
-
-        return this;
-    },
-
-    refindEndpoints: function () {
-        if ( this._isFetchingEndPoints || !this.get( 'isAuthenticated' ) ) {
-            return this;
-        }
-        this._isFetchingEndPoints = true;
-
-        var auth = this;
-        new O.HttpRequest({
-            timeout: 45000,
-            method: 'GET',
-            url: this.get( 'authenticationUrl' ),
-            headers: {
-                'Authorization': 'Bearer ' + auth.get( 'accessToken' )
-            },
-            withCredentials: true,
-            success: function ( event ) {
-                auth.didAuthenticate( JSON.parse( event.data ) );
-            }.on( 'io:success' ),
-            failure: function ( event ) {
-                switch ( event.status ) {
-                case 403: // Unauthorized
-                    auth.didLoseAuthentication();
-                    break;
-                case 404: // Not Found
-                    // Notify user?
-                    break;
-                case 500: // Internal Server Error
-                    // Notify user?
-                    break;
-                case 503: // Service Unavailable
-                    this.retry();
-                }
-            }.on( 'io:failure' ),
-            retry: function () {
-                O.RunLoop.invokeAfterDelay( auth.refindEndpoints, 30000, auth );
-            }.on( 'io:abort' ),
-            cleanup: function () {
-                this.destroy();
-                auth._isFetchingEndPoints = false;
-            }.on( 'io:end' )
-        }).send();
 
         return this;
     },
@@ -170,7 +132,7 @@ JMAP.auth = new O.Object({
                 !this._failedConnections.contains( connection ) ) {
             return true;
         }
-        if ( !isAuthenticated || this._isFetchingEndPoints ) {
+        if ( !isAuthenticated || this._isFetchingSession ) {
             this._awaitingAuthentication.include( connection );
         }
         return false;
@@ -230,6 +192,10 @@ JMAP.auth = new O.Object({
     }
 });
 
+// --- Export
+
+JMAP.auth = auth;
+
 }( JMAP ) );
 
 
@@ -237,54 +203,108 @@ JMAP.auth = new O.Object({
 // File: Connection.js                                                        \\
 // Module: API                                                                \\
 // Requires: Auth.js                                                          \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2014 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP, JSON, console, alert */
 
-( function ( JMAP ) {
+'use strict';
 
-var delta = function ( update ) {
-    var records = update.records,
-        changes = update.changes,
-        i, l = records.length,
-        delta = new Array( l );
+( function ( JMAP, undefined ) {
 
-    for ( i = 0; i < l; i += 1 ) {
-        delta[i] = Object.filter( records[i], changes[i] );
+const isEqual = O.isEqual;
+const loc = O.loc;
+const guid = O.guid;
+const Class = O.Class;
+const RunLoop = O.RunLoop;
+const HttpRequest = O.HttpRequest;
+const Source = O.Source;
+
+const auth = JMAP.auth;
+
+// ---
+
+const makePatches = function ( path, patches, original, current ) {
+    var key;
+    var didPatch = false;
+    if ( original && current &&
+            typeof current === 'object' && !( current instanceof Array ) ) {
+        for ( key in current ) {
+            didPatch = makePatches(
+                path + '/' + key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
+                patches,
+                original[ key ],
+                current[ key ]
+            ) || didPatch;
+        }
+        for ( key in original ) {
+            if ( !( key in current ) ) {
+                didPatch = makePatches(
+                    path + '/' +
+                        key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
+                    patches,
+                    original[ key ],
+                    null
+                ) || didPatch;
+            }
+        }
+    } else if ( !isEqual( original, current ) ) {
+        patches[ path ] = current !== undefined ? current : null;
+        didPatch = true;
     }
-    return delta;
+    return didPatch;
 };
 
-var toPrimaryKey = function ( primaryKey, record ) {
-    return record[ primaryKey ];
+const makeUpdate = function ( primaryKey, update, includeId ) {
+    const records = update.records;
+    const changes = update.changes;
+    const committed = update.committed;
+    const updates = {};
+    var record, change, previous, patches, i, l, key;
+    for ( i = 0, l = records.length; i < l; i +=1 ) {
+        record = records[i];
+        change = changes[i];
+        previous = committed[i];
+        patches = {};
+
+        for ( key in change ) {
+            if ( change[ key ] && key !== 'accountId' ) {
+                makePatches( key, patches, previous[ key ], record[ key ] );
+            }
+        }
+        if ( includeId ) {
+            patches[ primaryKey ] = record[ primaryKey ];
+        }
+
+        updates[ record[ primaryKey ] ] = patches;
+    }
+    return Object.keys( updates ).length ? updates : undefined;
 };
 
-var makeSetRequest = function ( change ) {
+const makeSetRequest = function ( change ) {
     var create = change.create;
     var update = change.update;
     var destroy = change.destroy;
-    return {
-        create: Object.zip( create.storeKeys, create.records ),
-        update: Object.zip(
-            update.records.map(
-                toPrimaryKey.bind( null, change.primaryKey )
-            ), delta( update )
-        ),
-        destroy: destroy.ids
-    };
+    var toCreate = create.storeKeys.length ?
+        Object.zip( create.storeKeys, create.records ) :
+        undefined;
+    var toUpdate = makeUpdate( change.primaryKey, update, false );
+    var toDestroy = destroy.ids.length ?
+        destroy.ids :
+        undefined;
+    return toCreate || toUpdate || toDestroy ? {
+        accountId: change.accountId,
+        create: toCreate,
+        update: toUpdate,
+        destroy: toDestroy,
+    } : null;
 };
 
-var handleProps = {
+const handleProps = {
     precedence: 'commitPrecedence',
     fetch: 'recordFetchers',
     refresh: 'recordRefreshers',
     commit: 'recordCommitters',
-    create: 'recordCreators',
-    update: 'recordUpdaters',
-    destroy: 'recordDestroyers',
-    query: 'queryFetchers'
+    query: 'queryFetchers',
 };
 
 /**
@@ -316,9 +336,9 @@ var handleProps = {
     The response is expected to be in the same format, with methods from
     <JMAP.Connection#response> available to the server to call.
 */
-var Connection = O.Class({
+const Connection = Class({
 
-    Extends: O.Source,
+    Extends: Source,
 
     /**
         Constructor: JMAP.Connection
@@ -336,23 +356,22 @@ var Connection = O.Class({
         // List of callback functions to be executed after the next request.
         this._callbackQueue = [];
 
-        // Map of id -> RemoteQuery for all queries to be fetched.
+        // Map of id -> O.Query for all queries to be fetched.
         this._queriesToFetch = {};
-        // Map of guid( Type ) -> state
+        // Map of accountId -> guid( Type ) -> state
         this._typesToRefresh = {};
-        // Map of guid( Type ) -> Id -> true
+        // Map of accountId -> guid( Type ) -> Id -> true
         this._recordsToRefresh = {};
-        // Map of guid( Type ) -> null
+        // Map of accountId -> guid( Type ) -> null
         this._typesToFetch = {};
-        // Map of guid( Type ) -> Id -> true
+        // Map of accountId -> guid( Type ) -> Id -> true
         this._recordsToFetch = {};
 
-        this._inFlightRemoteCalls = null;
-        this._inFlightCallbacks = null;
-
+        this.inFlightRemoteCalls = null;
+        this.inFlightCallbacks = null;
         this.inFlightRequest = null;
 
-        Connection.parent.init.call( this, mixin );
+        Connection.parent.constructor.call( this, mixin );
     },
 
     prettyPrint: false,
@@ -392,30 +411,27 @@ var Connection = O.Class({
             event - {IOEvent}
     */
     ioDidSucceed: function ( event ) {
-        // Parse data
-        var data;
-        try {
-            data = JSON.parse( event.data );
-        } catch ( error ) {}
-
-        // Check it's in the correct format
-        if ( !( data instanceof Array ) ) {
-            O.RunLoop.didError({
+        var methodResponses = event.data && event.data.methodResponses;
+        if ( !methodResponses ) {
+            RunLoop.didError({
                 name: 'JMAP.Connection#ioDidSucceed',
-                message: 'Data from server is not JSON.',
-                details: 'Data:\n' + event.data +
-                    '\n\nin reponse to request:\n' +
-                    JSON.stringify( this._inFlightRemoteCalls, null, 2 )
+                message: 'No method responses received.',
+                details: 'Request:\n' +
+                    JSON.stringify( this.get( 'inFlightRemoteCalls' ), null, 2 )
             });
-            data = [];
+            methodResponses = [];
         }
 
-        JMAP.auth.connectionSucceeded( this );
+        auth.connectionSucceeded( this );
 
         this.receive(
-            data, this._inFlightCallbacks, this._inFlightRemoteCalls );
+            methodResponses,
+            this.get( 'inFlightCallbacks' ),
+            this.get( 'inFlightRemoteCalls' )
+        );
 
-        this._inFlightRemoteCalls = this._inFlightCallbacks = null;
+        this.set( 'inFlightRemoteCalls', null )
+            .set( 'inFlightCallbacks', null );
     }.on( 'io:success' ),
 
     /**
@@ -428,18 +444,23 @@ var Connection = O.Class({
     */
     ioDidFail: function ( event ) {
         var discardRequest = false;
-        var auth = JMAP.auth;
+        var status = event.status;
 
-        switch ( event.status ) {
+        switch ( status ) {
         // 400: Bad Request
         // 413: Payload Too Large
         case 400:
         case 413:
-            O.RunLoop.didError({
+            var response = event.data;
+            RunLoop.didError({
                 name: 'JMAP.Connection#ioDidFail',
                 message: 'Bad request made: ' + status,
                 details: 'Request was:\n' +
-                    JSON.stringify( this._inFlightRemoteCalls, null, 2 )
+                    JSON.stringify(
+                        this.get( 'inFlightRemoteCalls' ), null, 2 ) +
+                    '\n\nResponse was:\n' +
+                    ( response ? JSON.stringify( response, null, 2 ) :
+                        '(no data, the response probably wasn’t valid JSON)' ),
             });
             discardRequest = true;
             break;
@@ -450,7 +471,7 @@ var Connection = O.Class({
             break;
         // 404: Not Found
         case 404:
-            auth.refindEndpoints()
+            auth.fetchSessions()
                 .connectionWillSend( this );
             break;
         // 429: Rate Limited
@@ -462,7 +483,7 @@ var Connection = O.Class({
             break;
         // 500: Internal Server Error
         case 500:
-            alert( O.loc( 'FEEDBACK_SERVER_FAILED' ) );
+            alert( loc( 'FEEDBACK_SERVER_FAILED' ) );
             discardRequest = true;
             break;
         // Presume a connection error. Try again if willRetry is set,
@@ -477,8 +498,13 @@ var Connection = O.Class({
 
         if ( discardRequest ) {
             this.receive(
-                [], this._inFlightCallbacks, this._inFlightRemoteCalls );
-            this._inFlightRemoteCalls = this._inFlightCallbacks = null;
+                [],
+                this.get( 'inFlightCallbacks' ),
+                this.get( 'inFlightRemoteCalls' )
+            );
+
+            this.set( 'inFlightRemoteCalls', null )
+                .set( 'inFlightCallbacks', null );
         }
     }.on( 'io:failure', 'io:abort' ),
 
@@ -520,6 +546,10 @@ var Connection = O.Class({
         return this;
     },
 
+    getPreviousMethodId: function () {
+        return ( this._sendQueue.length - 1 ) + '';
+    },
+
     addCallback: function ( callback ) {
         this._callbackQueue.push([ '', callback ]);
         return this;
@@ -527,7 +557,7 @@ var Connection = O.Class({
 
     hasRequests: function () {
         var id;
-        if ( this._inFlightRemoteCalls || this._sendQueue.length ) {
+        if ( this.get( 'inFlightRemoteCalls' ) || this._sendQueue.length ) {
             return true;
         }
         for ( id in this._queriesToFetch ) {
@@ -546,7 +576,7 @@ var Connection = O.Class({
         return {
             'Content-type': 'application/json',
             'Accept': 'application/json',
-            'Authorization': 'Bearer ' + JMAP.auth.get( 'accessToken' )
+            'Authorization': 'Bearer ' + auth.get( 'accessToken' )
         };
     }.property().nocache(),
 
@@ -557,30 +587,36 @@ var Connection = O.Class({
     */
     send: function () {
         if ( this.get( 'inFlightRequest' ) ||
-                !JMAP.auth.connectionWillSend( this ) ) {
+                !auth.connectionWillSend( this ) ) {
             return;
         }
 
-        var remoteCalls = this._inFlightRemoteCalls,
-            request;
+        var remoteCalls = this.get( 'inFlightRemoteCalls' );
+        var request;
         if ( !remoteCalls ) {
             request = this.makeRequest();
             remoteCalls = request[0];
             if ( !remoteCalls.length ) { return; }
-            this._inFlightRemoteCalls = remoteCalls;
-            this._inFlightCallbacks = request[1];
+            this.set( 'inFlightRemoteCalls', remoteCalls );
+            this.set( 'inFlightCallbacks', request[1] );
         }
 
         this.set( 'inFlightRequest',
-            new O.HttpRequest({
+            new HttpRequest({
                 nextEventTarget: this,
                 timeout: this.get( 'timeout' ),
                 method: 'POST',
-                url: JMAP.auth.get( 'apiUrl' ),
+                url: auth.get( 'apiUrl' ),
                 headers: this.get( 'headers' ),
                 withCredentials: true,
-                data: JSON.stringify( remoteCalls,
-                    null, this.get( 'prettyPrint' ) ? 2 : 0 )
+                responseType: 'json',
+                data: JSON.stringify({
+                    using: [
+                        'ietf:jmap',
+                        'ietf:jmapmail',
+                    ],
+                    methodCalls: remoteCalls,
+                }, null, this.get( 'prettyPrint' ) ? 2 : 0 ),
             }).send()
         );
     }.queue( 'after' ),
@@ -600,10 +636,8 @@ var Connection = O.Class({
                           the server.
     */
     receive: function ( data, callbacks, remoteCalls ) {
-        var handlers = this.response,
-            i, l, response, handler,
-            remoteCallsLength,
-            tuple, id, callback, request;
+        var handlers = this.response;
+        var i, l, response, handler, tuple, id, callback, request;
         for ( i = 0, l = data.length; i < l; i += 1 ) {
             response = data[i];
             handler = handlers[ response[0] ];
@@ -613,13 +647,12 @@ var Connection = O.Class({
                 try {
                     handler.call( this, response[1], request[0], request[1] );
                 } catch ( error ) {
-                    O.RunLoop.didError( error );
+                    RunLoop.didError( error );
                 }
             }
         }
         // Invoke after bindings to ensure all data has propagated through.
-        if ( l = callbacks.length ) {
-            remoteCallsLength = remoteCalls.length;
+        if (( l = callbacks.length )) {
             for ( i = 0; i < l; i += 1 ) {
                 tuple = callbacks[i];
                 id = tuple[0];
@@ -633,7 +666,7 @@ var Connection = O.Class({
                     /* jshint ignore:end */
                     callback = callback.bind( null, response, request );
                 }
-                O.RunLoop.queueFn( 'middle', callback );
+                RunLoop.queueFn( 'middle', callback );
             }
         }
     },
@@ -649,68 +682,98 @@ var Connection = O.Class({
             {Array} Tuple of method calls and callbacks.
     */
     makeRequest: function () {
-        var sendQueue = this._sendQueue,
-            callbacks = this._callbackQueue,
-            recordRefreshers = this.recordRefreshers,
-            recordFetchers = this.recordFetchers,
-            _queriesToFetch = this._queriesToFetch,
-            _typesToRefresh = this._typesToRefresh,
-            _recordsToRefresh = this._recordsToRefresh,
-            _typesToFetch = this._typesToFetch,
-            _recordsToFetch = this._recordsToFetch,
-            typeId, id, req, state, ids, handler;
+        var sendQueue = this._sendQueue;
+        var callbacks = this._callbackQueue;
+        var recordRefreshers = this.recordRefreshers;
+        var recordFetchers = this.recordFetchers;
+        var _queriesToFetch = this._queriesToFetch;
+        var _typesToRefresh = this._typesToRefresh;
+        var _recordsToRefresh = this._recordsToRefresh;
+        var _typesToFetch = this._typesToFetch;
+        var _recordsToFetch = this._recordsToFetch;
+        var typesToRefresh, recordsToRefresh, typesToFetch, recordsToFetch;
+        var accountId, typeId, id, req, state, ids, handler;
 
         // Query Fetches
         for ( id in _queriesToFetch ) {
             req = _queriesToFetch[ id ];
-            handler = this.queryFetchers[ O.guid( req.constructor ) ];
+            handler = this.queryFetchers[ guid( req.constructor ) ];
             if ( handler ) {
                 handler.call( this, req );
             }
         }
 
         // Record Refreshers
-        for ( typeId in _typesToRefresh ) {
-            state = _typesToRefresh[ typeId ];
-            handler = recordRefreshers[ typeId ];
-            if ( typeof handler === 'string' ) {
-                this.callMethod( handler, {
-                    sinceState: state
-                });
-            } else {
-                handler.call( this, null, state );
+        for ( accountId in _typesToRefresh ) {
+            typesToRefresh = _typesToRefresh[ accountId ];
+            if ( !accountId ) {
+                accountId = undefined;
+            }
+            for ( typeId in typesToRefresh ) {
+                state = typesToRefresh[ typeId ];
+                handler = recordRefreshers[ typeId ];
+                if ( typeof handler === 'string' ) {
+                    this.callMethod( handler, {
+                        accountId: accountId,
+                        sinceState: state,
+                    });
+                } else {
+                    handler.call( this, accountId, null, state );
+                }
             }
         }
-        for ( typeId in _recordsToRefresh ) {
-            handler = recordRefreshers[ typeId ];
-            ids = Object.keys( _recordsToRefresh[ typeId ] );
-            if ( typeof handler === 'string' ) {
-                this.callMethod( handler, {
-                    ids: ids
-                });
-            } else {
-                recordRefreshers[ typeId ].call( this, ids );
+        for ( accountId in _recordsToRefresh ) {
+            recordsToRefresh = _recordsToRefresh[ accountId ];
+            if ( !accountId ) {
+                accountId = undefined;
+            }
+            for ( typeId in recordsToRefresh ) {
+                handler = recordRefreshers[ typeId ];
+                ids = Object.keys( recordsToRefresh[ typeId ] );
+                if ( typeof handler === 'string' ) {
+                    this.callMethod( handler, {
+                        accountId: accountId,
+                        ids: ids,
+                    });
+                } else {
+                    recordRefreshers[ typeId ].call( this, accountId, ids );
+                }
             }
         }
 
         // Record fetches
-        for ( typeId in _typesToFetch ) {
-            handler = recordFetchers[ typeId ];
-            if ( typeof handler === 'string' ) {
-                this.callMethod( handler );
-            } else {
-                handler.call( this, null );
+        for ( accountId in _typesToFetch ) {
+            typesToFetch = _typesToFetch[ accountId ];
+            if ( !accountId ) {
+                accountId = undefined;
+            }
+            for ( typeId in typesToFetch ) {
+                handler = recordFetchers[ typeId ];
+                if ( typeof handler === 'string' ) {
+                    this.callMethod( handler, {
+                        accountId: accountId,
+                    });
+                } else {
+                    handler.call( this, accountId, null );
+                }
             }
         }
-        for ( typeId in _recordsToFetch ) {
-            handler = recordFetchers[ typeId ];
-            ids = Object.keys( _recordsToFetch[ typeId ] );
-            if ( typeof handler === 'string' ) {
-                this.callMethod( handler, {
-                    ids: ids
-                });
-            } else {
-                recordFetchers[ typeId ].call( this, ids );
+        for ( accountId in _recordsToFetch ) {
+            recordsToFetch = _recordsToFetch[ accountId ];
+            if ( !accountId ) {
+                accountId = undefined;
+            }
+            for ( typeId in recordsToFetch ) {
+                handler = recordFetchers[ typeId ];
+                ids = Object.keys( recordsToFetch[ typeId ] );
+                if ( typeof handler === 'string' ) {
+                    this.callMethod( handler, {
+                        accountId: accountId,
+                        ids: ids,
+                    });
+                } else {
+                    recordFetchers[ typeId ].call( this, accountId, ids );
+                }
             }
         }
 
@@ -733,7 +796,7 @@ var Connection = O.Class({
         Method: JMAP.Connection#fetchRecord
 
         Fetches a particular record from the source. Just passes the call on to
-        <JMAP.Connection#fetchRecords>.
+        <JMAP.Connection#_fetchRecords>.
 
         Parameters:
             Type     - {O.Class} The record type.
@@ -744,15 +807,16 @@ var Connection = O.Class({
         Returns:
             {Boolean} Returns true if the source handled the fetch.
     */
-    fetchRecord: function ( Type, id, callback ) {
-        return this.fetchRecords( Type, [ id ], callback, '', false );
+    fetchRecord: function ( accountId, Type, id, callback ) {
+        return this._fetchRecords(
+            accountId, Type, [ id ], callback, '', false );
     },
 
     /**
         Method: JMAP.Connection#fetchAllRecords
 
         Fetches all records of a particular type from the source. Just passes
-        the call on to <JMAP.Connection#fetchRecords>.
+        the call on to <JMAP.Connection#_fetchRecords>.
 
         Parameters:
             Type     - {O.Class} The record type.
@@ -763,8 +827,9 @@ var Connection = O.Class({
         Returns:
             {Boolean} Returns true if the source handled the fetch.
     */
-    fetchAllRecords: function ( Type, state, callback ) {
-        return this.fetchRecords( Type, null, callback, state || '', !!state );
+    fetchAllRecords: function ( accountId, Type, state, callback ) {
+        return this._fetchRecords(
+            accountId, Type, null, callback, state || '', !!state );
     },
 
     /**
@@ -783,49 +848,39 @@ var Connection = O.Class({
         Returns:
             {Boolean} Returns true if the source handled the refresh.
     */
-    refreshRecord: function ( Type, id, callback ) {
-        return this.fetchRecords( Type, [ id ], callback, '', true );
+    refreshRecord: function ( accountId, Type, id, callback ) {
+        return this._fetchRecords(
+            accountId, Type, [ id ], callback, '', true );
     },
 
-    /**
-        Method: JMAP.Connection#fetchRecords
-
-        Fetches a set of records of a particular type from the source.
-
-        Parameters:
-            Type     - {O.Class} The record type.
-            ids      - {(String[]|null)} An array of record ids to fetch, or
-                       `null`, indicating that all records of this type should
-                       be fetched.
-            callback - {Function} (optional) A callback to make after the record
-                       fetch completes (successfully or unsuccessfully).
-
-        Returns:
-            {Boolean} Returns true if the source handled the fetch.
-    */
-    fetchRecords: function ( Type, ids, callback, state, _refresh ) {
-        var typeId = O.guid( Type ),
-            handler = _refresh ?
+    _fetchRecords: function ( accountId, Type, ids, callback, state, refresh ) {
+        var typeId = guid( Type );
+        var handler = refresh ?
                 this.recordRefreshers[ typeId ] :
                 this.recordFetchers[ typeId ];
-        if ( _refresh && !handler ) {
-            _refresh = false;
+        if ( refresh && !handler ) {
+            refresh = false;
             handler = this.recordFetchers[ typeId ];
         }
         if ( !handler ) {
             return false;
         }
         if ( ids ) {
-            var reqs = _refresh? this._recordsToRefresh : this._recordsToFetch,
-                set = reqs[ typeId ] || ( reqs[ typeId ] = {} ),
-                l = ids.length;
+            var reqs = refresh ? this._recordsToRefresh : this._recordsToFetch;
+            var account = reqs[ accountId ] || ( reqs[ accountId ] = {} );
+            var set = account[ typeId ] || ( account[ typeId ] = {} );
+            var l = ids.length;
             while ( l-- ) {
                 set[ ids[l] ] = true;
             }
-        } else if ( _refresh ) {
-            this._typesToRefresh[ typeId ] = state;
+        } else if ( refresh ) {
+            var typesToRefresh = this._typesToRefresh[ accountId ] ||
+                ( this._typesToRefresh[ accountId ] = {} );
+            typesToRefresh[ typeId ] = state;
         } else {
-            this._typesToFetch[ typeId ] = null;
+            var typesToFetch = this._typesToFetch[ accountId ] ||
+                ( this._typesToFetch[ accountId ] = {} );
+            typesToFetch[ typeId ] = null;
         }
         if ( callback ) {
             this._callbackQueue.push([ '', callback ]);
@@ -869,26 +924,31 @@ var Connection = O.Class({
         An example call might look like:
 
             source.commitChanges({
-                MyType: {
-                    primaryKey: "id",
+                id: {
+                    Type: Record,
+                    typeId: 'Record',
+                    accountId: '...',
+                    primaryKey: 'id',
                     create: {
-                        storeKeys: [ "sk1", "sk2" ],
-                        records: [{ attr: val, attr2: val2 ...}, {...}]
+                        storeKeys: [ 'sk1', 'sk2' ],
+                        records: [{ attr: val, attr2: val2 ...}, {...}],
                     },
                     update: {
-                        storeKeys: [ "sk3", "sk4", ... ],
-                        records: [{ id: "id3", attr: val ... }, {...}],
-                        changes: [{ attr: true }, ... ]
+                        storeKeys: [ 'sk3', 'sk4', ... ],
+                        records:   [{ id: 'id3', attr: val2 ... }, {...}],
+                        committed:  [{ id: 'id3', attr: val1 ... }, {...}],
+                        changes:   [{ attr: true }, ... ],
                     },
+                    moveFromAccount: { ... previous account id -> update ... },
                     destroy: {
-                        storeKeys: [ "sk5", "sk6" ],
-                        ids: [ "id5", "id6" ]
+                        storeKeys: [ 'sk5', 'sk6' ],
+                        ids: [ 'id5', 'id6' ],
                     },
-                    state: "i425m515233"
+                    state: 'i425m515233',
                 },
-                MyOtherType: {
+                id2: {
                     ...
-                }
+                },
             });
 
         Any types that are handled by the source are removed from the changes
@@ -896,13 +956,10 @@ var Connection = O.Class({
         behind, so the object may be passed to several sources, with each
         handling their own types.
 
-        In a RPC source, this method considers each type in the changes. If that
-        type has a handler defined in <JMAP.Connection#recordCommitters>, then this
-        will be called with the create/update/destroy object as the sole
-        argument, otherwise it will look for separate handlers in
-        <JMAP.Connection#recordCreators>, <JMAP.Connection#recordUpdaters> and
-        <JMAP.Connection#recordDestroyers>. If handled by one of these, the method
-        will remove the type from the changes object.
+        In a JMAP source, this method considers each type in the changes.
+        If that type has a handler defined in
+        <JMAP.Connection#recordCommitters>, then this will be called with the
+        create/update/destroy object as the sole argument.
 
         Parameters:
             changes  - {Object} The creates/updates/destroys to commit.
@@ -915,56 +972,55 @@ var Connection = O.Class({
             of the types being committed.
     */
     commitChanges: function ( changes, callback ) {
-        var types = Object.keys( changes ),
-            l = types.length,
-            precedence = this.commitPrecedence,
-            handledAny = false,
-            type, handler, handledType,
-            change, create, update, destroy;
+        var ids = Object.keys( changes );
+        var l = ids.length;
+        var precedence = this.commitPrecedence;
+        var handledAny = false;
+        var handler, wasHandled, change, id;
+        var setRequest, moveFromAccount, fromAccountId, toAccountId;
 
         if ( precedence ) {
-            types.sort( function ( a, b ) {
-                return ( precedence[b] || -1 ) - ( precedence[a] || -1 );
+            ids.sort( function ( a, b ) {
+                return ( precedence[ changes[b].typeId ] || -1 ) -
+                    ( precedence[ changes[a].typeId ] || -1 );
             });
         }
 
         while ( l-- ) {
-            type = types[l];
-            change = changes[ type ];
-            handler = this.recordCommitters[ type ];
-            handledType = false;
-            create = change.create;
-            update = change.update;
-            destroy = change.destroy;
+            id = ids[l];
+            change = changes[ id ];
+            handler = this.recordCommitters[ change.typeId ];
+            wasHandled = false;
             if ( handler ) {
                 if ( typeof handler === 'string' ) {
-                    this.callMethod( handler, makeSetRequest( change ) );
+                    setRequest = makeSetRequest( change );
+                    if ( setRequest ) {
+                        this.callMethod( handler, setRequest );
+                    }
+                    if (( moveFromAccount = change.moveFromAccount )) {
+                        toAccountId = change.accountId;
+                        for ( fromAccountId in moveFromAccount ) {
+                            this.callMethod( change.typeId + '/copy', {
+                                fromAccountId: fromAccountId,
+                                toAccountId: toAccountId,
+                                create: makeUpdate(
+                                    change.primaryKey,
+                                    moveFromAccount[ fromAccountId ],
+                                    true
+                                ),
+                                onSuccessDestroyOriginal: true,
+                            });
+                        }
+                    }
                 } else {
                     handler.call( this, change );
                 }
-                handledType = true;
-            } else {
-                handler = this.recordCreators[ type ];
-                if ( handler ) {
-                    handler.call( this, create.storeKeys, create.records );
-                    handledType = true;
-                }
-                handler = this.recordUpdaters[ type ];
-                if ( handler ) {
-                    handler.call( this,
-                        update.storeKeys, update.records, update.changes );
-                    handledType = true;
-                }
-                handler = this.recordDestroyers[ type ];
-                if ( handler ) {
-                    handler.call( this, destroy.storeKeys, destroy.ids );
-                    handledType = true;
-                }
+                wasHandled = true;
             }
-            if ( handledType ) {
-                delete changes[ type ];
+            if ( wasHandled ) {
+                delete changes[ id ];
             }
-            handledAny = handledAny || handledType;
+            handledAny = handledAny || wasHandled;
         }
         if ( handledAny && callback ) {
             this._callbackQueue.push([ '', callback ]);
@@ -978,13 +1034,13 @@ var Connection = O.Class({
         Fetches the data for a remote query from the source.
 
         Parameters:
-            query - {O.RemoteQuery} The query to fetch.
+            query - {O.Query} The query to fetch.
 
         Returns:
             {Boolean} Returns true if the source handled the fetch.
     */
     fetchQuery: function ( query, callback ) {
-        if ( !this.queryFetchers[ O.guid( query.constructor ) ] ) {
+        if ( !this.queryFetchers[ guid( query.constructor ) ] ) {
             return false;
         }
         var id = query.get( 'id' );
@@ -1008,9 +1064,6 @@ var Connection = O.Class({
         - fetch: Add function to `recordFetchers` handlers.
         - refresh: Add function to `recordRefreshers` handlers.
         - commit: Add function to `recordCommitters` handlers.
-        - create: Add function to `recordCreators` handlers.
-        - update: Add function to `recordUpdaters` handlers.
-        - destroy: Add function to `recordDestroyers` handlers.
         - query: Add function to `queryFetcher` handlers.
 
         Any other keys are presumed to be a response method name, and added
@@ -1025,8 +1078,8 @@ var Connection = O.Class({
             {JMAP.Connection} Returns self.
     */
     handle: function ( Type, handlers ) {
-        var typeId = O.guid( Type ),
-            action, propName, isResponse, actionHandlers;
+        var typeId = guid( Type );
+        var action, propName, isResponse, actionHandlers;
         for ( action in handlers ) {
             propName = handleProps[ action ];
             isResponse = !propName;
@@ -1039,6 +1092,9 @@ var Connection = O.Class({
                     Object.create( actionHandlers );
             }
             actionHandlers[ isResponse ? action : typeId ] = handlers[ action ];
+        }
+        if ( Type ) {
+            Type.source = this;
         }
         return this;
     },
@@ -1075,69 +1131,6 @@ var Connection = O.Class({
     recordCommitters: {},
 
     /**
-        Property: JMAP.Connection#recordCreators
-        Type: String[Function]
-
-        A map of type guids to functions which will commit creates for a
-        particular record type. The function will be called with the source as
-        'this' and will get the following arguments:
-
-        storeKeys - {String[]} A list of store keys.
-        data      - {Object[]} A list of the corresponding data object for
-                    each store key.
-
-        Once the request has been made, the following callbacks must be made to
-        the <O.Store> instance as appropriate:
-
-        * <O.Store#sourceDidCommitCreate> if there are any commited creates.
-        * <O.Store#sourceDidNotCreate> if there are any rejected creates.
-    */
-    recordCreators: {},
-
-    /**
-        Property: JMAP.Connection#recordUpdaters
-        Type: String[Function]
-
-        A map of type guids to functions which will commit updates for a
-        particular record type. The function will be called with the source as
-        'this' and will get the following arguments:
-
-        storeKeys - {String[]} A list of store keys.
-        data      - {Object[]} A list of the corresponding data object for
-                    each store key.
-        changed   - {String[Boolean][]} A list of objects mapping attribute
-                    names to a boolean value indicating whether that value has
-                    actually changed. Any properties in the data has not in the
-                    changed map may be presumed unchanged.
-
-        Once the request has been made, the following callbacks must be made to
-        the <O.Store> instance as appropriate:
-
-        * <O.Store#sourceDidCommitUpdate> if there are any commited updates.
-        * <O.Store#sourceDidNotUpdate> if there are any rejected updates.
-    */
-    recordUpdaters: {},
-
-    /**
-        Property: JMAP.Connection#recordDestroyers
-        Type: String[Function]
-
-        A map of type guids to functions which will commit destroys for a
-        particular record type. The function will be called with the source as
-        'this' and will get the following arguments:
-
-        storeKeys - {String[]} A list of store keys.
-        ids       - {String[]} A list of the corresponding record ids.
-
-        Once the request has been made, the following callbacks must be made to
-        the <O.Store> instance as appropriate:
-
-        * <O.Store#sourceDidCommitDestroy> if there are any commited destroys.
-        * <O.Store#sourceDidNotDestroy> if there are any rejected updates.
-    */
-    recordDestroyers: {},
-
-    /**
         Property: JMAP.Connection#queryFetchers
         Type: String[Function]
 
@@ -1148,33 +1141,36 @@ var Connection = O.Class({
     queryFetchers: {},
 
     didFetch: function ( Type, args, isAll ) {
-        var store = this.get( 'store' ),
-            list = args.list,
-            state = args.state,
-            notFound = args.notFound;
+        var store = this.get( 'store' );
+        var list = args.list;
+        var state = args.state;
+        var notFound = args.notFound;
+        var accountId = args.accountId;
         if ( list ) {
-            store.sourceDidFetchRecords( Type, list, state, isAll );
+            store.sourceDidFetchRecords( accountId, Type, list, state, isAll );
         }
         if ( notFound ) {
-            store.sourceCouldNotFindRecords( Type, notFound );
+            store.sourceCouldNotFindRecords( accountId, Type, notFound );
         }
     },
 
-    didFetchUpdates: function ( Type, args, reqArgs ) {
-        var hasDataForChanged = reqArgs.fetchRecords;
+    didFetchUpdates: function ( Type, args, hasDataForChanged ) {
         this.get( 'store' )
-            .sourceDidFetchUpdates( Type,
-                hasDataForChanged ? null : args.changed,
-                args.removed,
+            .sourceDidFetchUpdates(
+                args.accountId,
+                Type,
+                hasDataForChanged ? null : args.changed || null,
+                args.destroyed || null,
                 args.oldState,
                 args.newState
             );
     },
 
     didCommit: function ( Type, args ) {
-        var store = this.get( 'store' ),
-            toStoreKey = store.getStoreKey.bind( store, Type ),
-            list, object;
+        var store = this.get( 'store' );
+        var accountId = args.accountId;
+        var toStoreKey = store.getStoreKey.bind( store, accountId, Type );
+        var list, object;
 
         if ( ( object = args.created ) && Object.keys( object ).length ) {
             store.sourceDidCommitCreate( object );
@@ -1185,8 +1181,12 @@ var Connection = O.Class({
                 store.sourceDidNotCreate( list, true, Object.values( object ) );
             }
         }
-        if ( ( list = args.updated ) && list.length ) {
-            store.sourceDidCommitUpdate( list.map( toStoreKey ) );
+        if ( ( object = args.updated ) ) {
+            list = Object.keys( object );
+            if ( list.length ) {
+                store.sourceDidCommitUpdate( list.map( toStoreKey ) )
+                     .sourceDidFetchPartialRecords( accountId, Type, object );
+            }
         }
         if ( ( object = args.notUpdated ) ) {
             list = Object.keys( object );
@@ -1207,8 +1207,16 @@ var Connection = O.Class({
         }
         if ( args.newState ) {
             store.sourceCommitDidChangeState(
-                Type, args.oldState, args.newState );
+                accountId, Type, args.oldState, args.newState );
         }
+    },
+
+    didCopy: function ( Type, args ) {
+        this.didCommit( Type, {
+            accountId: args.accountId,
+            updated: args.created,
+            notUpdated: args.notCreated,
+        });
     },
 
     /**
@@ -1231,31 +1239,32 @@ var Connection = O.Class({
             }
         },
         error_unknownMethod: function ( _, requestName ) {
+            // eslint-disable-next-line no-console
             console.log( 'Unknown API call made: ' + requestName );
         },
         error_invalidArguments: function ( _, requestName, requestArgs ) {
+            // eslint-disable-next-line no-console
             console.log( 'API call to ' + requestName +
                 'made with invalid arguments: ', requestArgs );
+        },
+        error_anchorNotFound: function (/* args */) {
+            // Don't need to do anything; it's only used for doing indexOf,
+            // and it will just check that it doesn't have it.
         },
         error_accountNotFound: function () {
             // TODO: refetch accounts list.
         },
         error_accountReadOnly: function () {
-            // TODO
+            // TODO: refetch accounts list
         },
-        error_accountNoMail: function () {
-            // TODO: refetch accounts list and clear out any mail data
+        error_accountNotSupportedByMethod: function () {
+            // TODO: refetch accounts list
         },
-        error_accountNoContacts: function () {
-            // TODO: refetch accounts list and clear out any contacts data
-        },
-        error_accountNoCalendars: function () {
-            // TODO: refetch accounts list and clear out any calendar data
-        }
     }
-}).extend({
-    makeSetRequest: makeSetRequest
 });
+
+Connection.makeSetRequest = makeSetRequest;
+Connection.makePatches = makePatches;
 
 JMAP.Connection = Connection;
 
@@ -1265,39 +1274,85 @@ JMAP.Connection = Connection;
 // -------------------------------------------------------------------------- \\
 // File: connections.js                                                       \\
 // Module: API                                                                \\
-// Requires: Connection.js                                                    \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// Requires: Auth.js, Connection.js                                           \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-JMAP.upload = new O.IOQueue({
+const IOQueue = O.IOQueue;
+const AggregateSource = O.AggregateSource;
+const Store = O.Store;
+
+const Connection = JMAP.Connection;
+const auth = JMAP.auth;
+
+// ---
+
+const upload = new IOQueue({
     maxConnections: 3
 });
 
-JMAP.source = new O.AggregateSource({
-    sources: [
-        JMAP.mail = new JMAP.Connection({
-            id: 'mail'
-        }),
-        JMAP.contacts = new JMAP.Connection({
-            id: 'contacts'
-        }),
-        JMAP.calendar = new JMAP.Connection({
-            id: 'calendar'
-        }),
-        JMAP.peripheral = new JMAP.Connection({
-            id: 'peripheral'
-        })
-    ]
+const mail = new Connection({
+    id: 'mail',
+});
+const contacts = new Connection({
+    id: 'contacts',
+});
+const calendar = new Connection({
+    id: 'calendar',
+});
+const peripheral = new Connection({
+    id: 'peripheral',
 });
 
-JMAP.store = new O.Store({
-    source: JMAP.source
+const source = new AggregateSource({
+    sources: [ mail, contacts, calendar, peripheral ],
+    hasInFlightChanges: function () {
+        return this.sources.some( function ( source ) {
+            var inFlightRemoteCalls = source.get( 'inFlightRemoteCalls' );
+            return inFlightRemoteCalls && inFlightRemoteCalls.some(
+                function ( req ) {
+                    var method = req[0];
+                    return method.slice( 0, 3 ) !== 'get';
+                });
+        }) || !!upload.get( 'activeConnections' );
+    },
 });
+
+const store = new Store({
+    source: source,
+    updateAccounts: function () {
+        const accounts = auth.get( 'accounts' );
+        var accountId, account, isDefault;
+        for ( accountId in accounts ) {
+            account = accounts[ accountId ];
+            isDefault = account.isPrimary;
+            this.addAccount( accountId, {
+                isDefault: isDefault,
+                hasDataFor: account.hasDataFor.reduce(
+                function ( index, item ) {
+                    index[ item ] = true;
+                    return index;
+                }, {} ),
+            });
+        }
+    }
+});
+auth.addObserverForKey( 'accounts', store, 'updateAccounts' );
+
+// --- Export
+
+JMAP.upload = upload;
+JMAP.mail = mail;
+JMAP.contacts = contacts;
+JMAP.calendar = calendar;
+JMAP.peripheral = peripheral;
+JMAP.source = source;
+JMAP.store = store;
 
 }( JMAP ) );
 
@@ -1306,24 +1361,33 @@ JMAP.store = new O.Store({
 // File: LocalFile.js                                                         \\
 // Module: API                                                                \\
 // Requires: connections.js                                                   \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var LocalFile = O.Class({
+const Class = O.Class;
+const Obj = O.Object;
+const RunLoop = O.RunLoop;
+const HttpRequest = O.HttpRequest;
 
-    Extends: O.Object,
+const upload = JMAP.upload;
+const auth = JMAP.auth;
 
-    nextEventTarget: JMAP.upload,
+// ---
 
-    constrainImageTo: 0,
+const LocalFile = Class({
 
-    init: function ( file ) {
+    Extends: Obj,
+
+    nextEventTarget: upload,
+
+    init: function ( file, accountId ) {
         this.file = file;
+        this.accountId = accountId || auth.get( 'defaultAccountId' );
         this.blobId = '';
 
         this.name = file.name ||
@@ -1333,15 +1397,19 @@ var LocalFile = O.Class({
 
         this.isTooBig = false;
         this.isUploaded = false;
-        this.progress = 0;
 
-        LocalFile.parent.init.call( this );
+        this.progress = 0;
+        this.loaded = 0;
+
+        this._backoff = 500;
+
+        LocalFile.parent.constructor.call( this );
     },
 
     destroy: function () {
         var request = this._request;
         if ( request ) {
-            JMAP.upload.abort( request );
+            upload.abort( request );
         }
         LocalFile.parent.destroy.call( this );
     },
@@ -1351,34 +1419,42 @@ var LocalFile = O.Class({
             obj.removeObserverForKey( key, this, 'upload' );
         }
         if ( !this.isDestroyed ) {
-            JMAP.upload.send(
-                this._request = new O.HttpRequest({
+            upload.send(
+                this._request = new HttpRequest({
                     nextEventTarget: this,
                     method: 'POST',
-                    url: JMAP.auth.get( 'uploadUrl' ),
+                    url: auth.get( 'uploadUrl' ).replace(
+                        '{accountId}', encodeURIComponent( this.accountId ) ),
                     headers: {
-                        'Authorization':
-                            'Bearer ' + JMAP.auth.get( 'accessToken' )
+                        'Authorization': 'Bearer ' + auth.get( 'accessToken' ),
                     },
                     withCredentials: true,
-                    data: this.file
+                    responseType: 'json',
+                    data: this.file,
                 })
             );
         }
         return this;
     },
 
-    _uploadDidProgress: function () {
-        this.set( 'progress', this._request.get( 'uploadProgress' ) );
+    _uploadDidProgress: function ( event ) {
+        const loaded = event.loaded;
+        const total = event.total;
+        const delta = this.get( 'loaded' ) - loaded;
+        const progress = ~~( 100 * loaded / total );
+        this.set( 'progress', progress )
+            .set( 'loaded', loaded )
+            .fire( 'localfile:progress', {
+                loaded: loaded,
+                total: total,
+                delta: delta,
+                progress: progress,
+            });
     }.on( 'io:uploadProgress' ),
 
     _uploadDidSucceed: function ( event ) {
-        var response, property;
-
-        // Parse response.
-        try {
-            response = JSON.parse( event.data );
-        } catch ( error ) {}
+        var response = event.data;
+        var property;
 
         // Was there an error?
         if ( !response ) {
@@ -1387,7 +1463,7 @@ var LocalFile = O.Class({
 
         this.beginPropertyChanges();
         for ( property in response ) {
-            // blobId, type, size, expires[, width, height]
+            // accountId, blobId, type, size
             this.set( property, response[ property ] );
         }
         this.set( 'progress', 100 )
@@ -1404,18 +1480,19 @@ var LocalFile = O.Class({
         case 415: // Unsupported Media Type
             break;
         case 401: // Unauthorized
-            JMAP.auth.didLoseAuthentication()
-                     .addObserverForKey( 'isAuthenticated', this, 'upload' );
-           break;
+            auth.didLoseAuthentication()
+                .addObserverForKey( 'isAuthenticated', this, 'upload' );
+            break;
         case 404: // Not Found
-            JMAP.auth.refindEndpoints()
-                     .addObserverForKey( 'uploadUrl', this, 'upload' );
+            auth.fetchSessions()
+                .addObserverForKey( 'uploadUrl', this, 'upload' );
             break;
         case 413: // Request Entity Too Large
             this.set( 'isTooBig', true );
             break;
         default:  // Connection failed or 503 Service Unavailable
-            O.RunLoop.invokeAfterDelay( this.upload, 30000, this );
+            RunLoop.invokeAfterDelay( this.upload, this._backoff, this );
+            this._backoff = Math.min( this._backoff * 2, 30000 );
             return;
         }
 
@@ -1430,9 +1507,16 @@ var LocalFile = O.Class({
         }
     }.on( 'io:end' ),
 
-    uploadDidSucceed: function () {},
-    uploadDidFail: function () {}
+    uploadDidSucceed: function () {
+        this.fire( 'localfile:success' );
+    },
+
+    uploadDidFail: function () {
+        this.fire( 'localfile:failure' );
+    },
 });
+
+// --- Export
 
 JMAP.LocalFile = LocalFile;
 
@@ -1443,17 +1527,17 @@ JMAP.LocalFile = LocalFile;
 // File: Sequence.js                                                          \\
 // Module: API                                                                \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var noop = function () {};
+const noop = function () {};
 
-var Sequence = O.Class({
+const Sequence = O.Class({
 
     Extends: O.Object,
 
@@ -1463,7 +1547,7 @@ var Sequence = O.Class({
         this.length = 0;
         this.afterwards = noop;
 
-        Sequence.parent.init.call( this );
+        Sequence.parent.constructor.call( this );
     },
 
     then: function ( fn ) {
@@ -1472,24 +1556,26 @@ var Sequence = O.Class({
         return this;
     },
 
+    lastly: function ( fn ) {
+        this.afterwards = fn;
+        return this;
+    },
+
     go: function go ( data ) {
-        var index = this.index,
-            length = this.length,
-            fn = this.queue[ index ];
+        var index = this.index;
+        var length = this.length;
         if ( index < length ) {
-            index += 1;
-            this.set( 'index', index );
-            fn( go.bind( this ), data );
-            if ( index === length ) {
-                this.afterwards( index, length );
-            }
+            this.set( 'index', index + 1 );
+            this.queue[ index ]( go.bind( this ), data );
+        } else if ( index === length ) {
+            this.afterwards( index, length );
         }
         return this;
     },
 
     cancel: function () {
-        var index = this.index,
-            length = this.length;
+        var index = this.index;
+        var length = this.length;
         if ( index < length ) {
             this.set( 'length', 0 );
             this.afterwards( index, length );
@@ -1502,7 +1588,7 @@ var Sequence = O.Class({
         var index = this.index,
             length = this.length;
         return length ? Math.round( ( index / length ) * 100 ) : 100;
-    }.property( 'index', 'length' )
+    }.property( 'index', 'length' ),
 });
 
 JMAP.Sequence = Sequence;
@@ -1511,21 +1597,72 @@ JMAP.Sequence = Sequence;
 
 
 // -------------------------------------------------------------------------- \\
+// File: getQueryId.js                                                        \\
+// Module: API                                                                \\
+// Requires: namespace.js                                                     \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP, JSON */
+
+'use strict';
+
+( function ( JMAP )  {
+
+const guid = O.guid;
+
+// ---
+
+const stringifySorted = function ( item ) {
+    if ( !item || ( typeof item !== 'object' ) ) {
+        return JSON.stringify( item );
+    }
+    if ( item instanceof Array ) {
+        return '[' + item.map( stringifySorted ).join( ',' ) + ']';
+    }
+    var keys = Object.keys( item );
+    keys.sort();
+    return '{' + keys.map( function ( key ) {
+        return '"' + key + '":' + stringifySorted( item[ key ] );
+    }).join( ',' ) + '}';
+};
+
+const getQueryId = function ( Type, args ) {
+    return guid( Type ) + ':' + (
+        ( args.accountId || '' ) +
+        stringifySorted( args.where || args.filter ) +
+        stringifySorted( args.sort )
+    ).hash().toString();
+};
+
+// --- Export
+
+JMAP.getQueryId = getQueryId;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
 // File: Calendar.js                                                          \\
 // Module: CalendarModel                                                      \\
 // Requires: API                                                              \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP, undefined ) {
 
-var Record = O.Record,
-    attr = Record.attr;
+const loc = O.loc;
+const Class = O.Class;
+const Record = O.Record;
+const attr = Record.attr;
+const ValidationError = O.ValidationError;
+const DESTROYED = O.Status.DESTROYED;
 
-var Calendar = O.Class({
+// ---
+
+const Calendar = Class({
 
     Extends: Record,
 
@@ -1533,8 +1670,8 @@ var Calendar = O.Class({
         defaultValue: '',
         validate: function ( propValue/*, propKey, record*/ ) {
             if ( !propValue ) {
-                return new O.ValidationError( O.ValidationError.REQUIRED,
-                    O.loc( 'S_LABEL_REQUIRED' )
+                return new ValidationError( ValidationError.REQUIRED,
+                    loc( 'S_LABEL_REQUIRED' )
                 );
             }
             return null;
@@ -1554,12 +1691,12 @@ var Calendar = O.Class({
     }),
 
     cascadeChange: function ( _, key, oldValue, newValue ) {
-        var store = this.get( 'store' ),
-            calendarId = this.get( 'id' ),
-            property = 'calendar-' + key;
+        var store = this.get( 'store' );
+        var calendarSK = this.get( 'storeKey' );
+        var property = 'calendar-' + key;
         if ( !store.isNested ) {
             store.getAll( JMAP.CalendarEvent, function ( data ) {
-                return data.calendarId === calendarId;
+                return data.calendarId === calendarSK;
             }).forEach( function ( event ) {
                 if ( event.get( 'recurrenceRule' ) ||
                         event.get( 'recurrenceOverrides' ) ) {
@@ -1577,14 +1714,14 @@ var Calendar = O.Class({
     }.observes( 'name', 'color' ),
 
     calendarWasDestroyed: function () {
-        if ( this.get( 'status' ) === O.Status.DESTROYED ) {
+        if ( this.get( 'status' ) === DESTROYED ) {
             var store = this.get( 'store' );
-            var calendarStoreKey = this.get( 'storeKey' );
+            var calendarSK = this.get( 'storeKey' );
             if ( !store.isNested ) {
                 store.findAll( JMAP.CalendarEvent, function ( data ) {
-                    return data.calendarId === calendarStoreKey;
+                    return data.calendarId === calendarSK;
                 }).forEach( function ( storeKey ) {
-                    store.setStatus( storeKey, O.Status.DESTROYED )
+                    store.setStatus( storeKey, DESTROYED )
                          .unloadRecord( storeKey );
                 });
             }
@@ -1627,35 +1764,73 @@ var Calendar = O.Class({
                 this.get( 'mayRemoveItems' );
         }
         return mayWrite;
-    }.property( 'mayAddItems', 'mayModifyItems', 'mayRemoveItems' )
+    }.property( 'mayAddItems', 'mayModifyItems', 'mayRemoveItems' ),
 });
+Calendar.__guid__ = 'Calendar';
+Calendar.dataGroup = 'calendars';
 
 JMAP.calendar.handle( Calendar, {
+
     precedence: 1,
-    fetch: 'getCalendars',
-    refresh: function ( _, state ) {
-        this.callMethod( 'getCalendarUpdates', {
-            sinceState: state,
-            fetchRecords: true
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'Calendar/get', {
+            accountId: accountId,
+            ids: ids || null,
         });
     },
-    commit: 'setCalendars',
-    // Response handlers
-    calendars: function ( args, reqMethod, reqArgs ) {
-        this.didFetch( Calendar, args,
-            reqMethod === 'getCalendars' && !reqArgs.ids );
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'Calendar/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'Calendar/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: 100,
+            });
+            this.callMethod( 'Calendar/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'Calendar/changes',
+                    path: '/changed',
+                },
+            });
+        }
     },
-    calendarUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Calendar, args, reqArgs );
+
+    commit: 'Calendar/set',
+
+    // ---
+
+    'Calendar/get': function ( args, reqMethod, reqArgs ) {
+        const isAll = ( reqArgs.ids === null );
+        this.didFetch( Calendar, args, isAll );
     },
-    error_getCalendarUpdates_cannotCalculateChanges: function () {
+
+    'Calendar/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( Calendar, args, hasDataForChanged );
+        if ( args.hasMoreChanges ) {
+            this.get( 'store' ).fetchAll( Calendar, true );
+        }
+    },
+
+    'error_Calendar/changes_cannotCalculateChanges': function () {
         // All our data may be wrong. Refetch everything.
         this.fetchAllRecords( Calendar );
     },
-    calendarsSet: function ( args ) {
+
+    'Calendar/set': function ( args ) {
         this.didCommit( Calendar, args );
-    }
+    },
 });
+
+// --- Export
 
 JMAP.Calendar = Calendar;
 
@@ -1665,17 +1840,17 @@ JMAP.Calendar = Calendar;
 // -------------------------------------------------------------------------- \\
 // File: Duration.js                                                          \\
 // Module: CalendarModel                                                      \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2016 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var durationFormat = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+const durationFormat = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
 
-var Duration = O.Class({
+const Duration = O.Class({
     init: function ( durationInMS ) {
         this._durationInMS = durationInMS;
     },
@@ -1708,14 +1883,14 @@ var Duration = O.Class({
                 durationInMS -= quantity * 60 * 60 * 1000;
                 /* falls through */
             // Minutes
-            case durationInMS > 60 * 1000:
+            case durationInMS > 60 * 1000: // eslint-disable-line no-fallthrough
                 quantity = Math.floor( durationInMS / ( 60 * 1000 ) );
                 output += quantity;
                 output += 'M';
                 durationInMS -= quantity * 60 * 1000;
                 /* falls through */
             // Seconds
-            default:
+            default: // eslint-disable-line no-fallthrough
                 quantity = Math.floor( durationInMS / 1000 );
                 output += quantity;
                 output += 'S';
@@ -1724,23 +1899,23 @@ var Duration = O.Class({
 
         return output;
     }
-}).extend({
-    isEqual: function ( a, b ) {
-        return a._durationInMS === b._durationInMS;
-    },
-
-    fromJSON: function ( value ) {
-        var results = value ? durationFormat.exec( value ) : null;
-        var durationInMS = 0;
-        if ( results ) {
-            durationInMS += ( +results[1] || 0 ) * 24 * 60 * 60 * 1000;
-            durationInMS += ( +results[2] || 0 ) * 60 * 60 * 1000;
-            durationInMS += ( +results[3] || 0 ) * 60 * 1000;
-            durationInMS += ( +results[4] || 0 ) * 1000;
-        }
-        return new Duration( durationInMS );
-    }
 });
+
+Duration.isEqual = function ( a, b ) {
+    return a._durationInMS === b._durationInMS;
+};
+
+Duration.fromJSON = function ( value ) {
+    var results = value ? durationFormat.exec( value ) : null;
+    var durationInMS = 0;
+    if ( results ) {
+        durationInMS += ( +results[1] || 0 ) * 24 * 60 * 60 * 1000;
+        durationInMS += ( +results[2] || 0 ) * 60 * 60 * 1000;
+        durationInMS += ( +results[3] || 0 ) * 60 * 1000;
+        durationInMS += ( +results[4] || 0 ) * 1000;
+    }
+    return new Duration( durationInMS );
+};
 
 Duration.ZERO = new Duration( 0 );
 Duration.AN_HOUR = new Duration( 60 * 60 * 1000 );
@@ -1754,77 +1929,87 @@ JMAP.Duration = Duration;
 // -------------------------------------------------------------------------- \\
 // File: RecurrenceRule.js                                                    \\
 // Module: CalendarModel                                                      \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-// --- Filtering ---
+const toBoolean = O.Transform.toBoolean;
+const Class = O.Class;
 
-var none = 1 << 15;
+// ---
 
-var getMonth = function ( date, results ) {
+const none = 1 << 15;
+
+const getMonth = function ( date, results ) {
     results[0] = date.getUTCMonth();
     results[1] = none;
     results[2] = none;
 };
-var getDate = function ( date, results, total ) {
+
+const getDate = function ( date, results, total ) {
     var daysInMonth = total || Date.getDaysInMonth(
             date.getUTCMonth(), date.getUTCFullYear() ) + 1;
     results[0] = date.getUTCDate();
     results[1] = results[0] - daysInMonth;
     results[2] = none;
 };
-var getDay = function ( date, results ) {
+
+const getDay = function ( date, results ) {
     results[0] = date.getUTCDay();
     results[1] = none;
     results[2] = none;
 };
-var getDayMonthly = function ( date, results, total ) {
-    var day = date.getUTCDay(),
-        monthDate = date.getUTCDate(),
-        occurrence = Math.floor( ( monthDate - 1 ) / 7 ) + 1,
-        daysInMonth = total || Date.getDaysInMonth(
-            date.getUTCMonth(), date.getUTCFullYear() ),
-        occurrencesInMonth = occurrence +
+
+const getDayMonthly = function ( date, results, total ) {
+    var day = date.getUTCDay();
+    var monthDate = date.getUTCDate();
+    var occurrence = Math.floor( ( monthDate - 1 ) / 7 ) + 1;
+    var daysInMonth = total || Date.getDaysInMonth(
+            date.getUTCMonth(), date.getUTCFullYear() );
+    var occurrencesInMonth = occurrence +
             Math.floor( ( daysInMonth - monthDate ) / 7 );
     results[0] = day;
     results[1] = day + ( 7 * occurrence );
     results[2] = day + ( 7 * ( occurrence - occurrencesInMonth - 1 ) );
 };
-var getDayYearly = function ( date, results, daysInYear ) {
-    var day = date.getUTCDay(),
-        dayOfYear = date.getDayOfYear( true ),
-        occurrence = Math.floor( ( dayOfYear - 1 ) / 7 ) + 1,
-        occurrencesInYear = occurrence +
+
+const getDayYearly = function ( date, results, daysInYear ) {
+    var day = date.getUTCDay();
+    var dayOfYear = date.getDayOfYear( true );
+    var occurrence = Math.floor( ( dayOfYear - 1 ) / 7 ) + 1;
+    var occurrencesInYear = occurrence +
             Math.floor( ( daysInYear - dayOfYear ) / 7 );
     results[0] = day;
     results[1] = day + ( 7 * occurrence );
     results[2] = day + ( 7 * ( occurrence - occurrencesInYear - 1 ) );
 };
-var getYearDay = function ( date, results, total ) {
+
+const getYearDay = function ( date, results, total ) {
     results[0] = date.getDayOfYear( true );
     results[1] = results[0] - total;
     results[2] = none;
 };
-var getWeekNo = function ( firstDayOfWeek, date, results, total ) {
+
+const getWeekNo = function ( firstDayOfWeek, date, results, total ) {
     results[0] = date.getISOWeekNumber( firstDayOfWeek, true );
     results[1] = results[0] - total;
     results[2] = none;
 };
-var getPosition = function ( date, results, total, index ) {
+
+const getPosition = function ( date, results, total, index ) {
     results[0] = index + 1;
     results[1] = index - total;
     results[2] = none;
 };
 
-var filter = function ( array, getValues, allowedValues, total ) {
-    var l = array.length,
-        results = [ none, none, none ],
-        date, i, ll, a, b, c, allowed;
+const filter = function ( array, getValues, allowedValues, total ) {
+    var l = array.length;
+    var results = [ none, none, none ];
+    var date, i, ll, a, b, c, allowed;
     ll = allowedValues.length;
     outer: while ( l-- ) {
         date = array[l];
@@ -1843,11 +2028,12 @@ var filter = function ( array, getValues, allowedValues, total ) {
         }
     }
 };
-var expand = function ( array, property, values ) {
-    var l = array.length, ll = values.length,
-        i, j, k = 0,
-        results = new Array( l * ll ),
-        candidate, newCandidate;
+
+const expand = function ( array, property, values ) {
+    var l = array.length, ll = values.length;
+    var i, j, k = 0;
+    var results = new Array( l * ll );
+    var candidate, newCandidate;
     for ( i = 0; i < l; i += 1 ) {
         candidate = array[i];
         for ( j = 0; j < ll; j += 1 ) {
@@ -1864,51 +2050,49 @@ var expand = function ( array, property, values ) {
     return results;
 };
 
-var toBoolean = O.Transform.toBoolean;
-
 // ---
 
-var YEARLY = 1;
-var MONTHLY = 2;
-var WEEKLY = 3;
-var DAILY = 4;
-var HOURLY = 5;
-var MINUTELY = 6;
-var SECONDLY = 7;
+const YEARLY = 1;
+const MONTHLY = 2;
+const WEEKLY = 3;
+const DAILY = 4;
+const HOURLY = 5;
+const MINUTELY = 6;
+const SECONDLY = 7;
 
-var frequencyNumbers = {
+const frequencyNumbers = {
     yearly: YEARLY,
     monthly: MONTHLY,
     weekly: WEEKLY,
     daily: DAILY,
     hourly: HOURLY,
     minutely: MINUTELY,
-    secondly: SECONDLY
+    secondly: SECONDLY,
 };
 
-var dayToNumber = {
+const dayToNumber = {
     su: 0,
     mo: 1,
     tu: 2,
     we: 3,
     th: 4,
     fr: 5,
-    sa: 6
+    sa: 6,
 };
 
-var numberToDay = [
+const numberToDay = [
     'su',
     'mo',
     'tu',
     'we',
     'th',
     'fr',
-    'sa'
+    'sa',
 ];
 
 // ---
 
-var RecurrenceRule = O.Class({
+const RecurrenceRule = Class({
 
     init: function ( json ) {
         this.frequency = frequencyNumbers[ json.frequency ] || DAILY;
@@ -1921,7 +2105,7 @@ var RecurrenceRule = O.Class({
         this.byDay = json.byDay ? json.byDay.map( function ( nDay ) {
             return dayToNumber[ nDay.day ] + 7 * ( nDay.nthOfPeriod || 0 );
         }) : null;
-        this.byDate = json.byDate || null;
+        this.byMonthDay = json.byMonthDay || null;
         // Convert "1" (Jan), "2" (Feb) etc. to 0 (Jan), 1 (Feb)
         this.byMonth = json.byMonth ? json.byMonth.map( function ( month ) {
             return parseInt( month, 10 ) - 1;
@@ -1996,33 +2180,34 @@ var RecurrenceRule = O.Class({
     // Returns the next set of dates revolving around the interval defined by
     // the fromDate. This may include dates *before* the from date.
     iterate: function ( fromDate, startDate ) {
-        var frequency = this.frequency,
-            interval = this.interval,
+        var frequency = this.frequency;
+        var interval = this.interval;
 
-            firstDayOfWeek = this.firstDayOfWeek,
+        var firstDayOfWeek = this.firstDayOfWeek;
 
-            byDay = this.byDay,
-            byDate = this.byDate,
-            byMonth = this.byMonth,
-            byYearDay = this.byYearDay,
-            byWeekNo = this.byWeekNo,
+        var byDay = this.byDay;
+        var byMonthDay = this.byMonthDay;
+        var byMonth = this.byMonth;
+        var byYearDay = this.byYearDay;
+        var byWeekNo = this.byWeekNo;
 
-            byHour = this.byHour,
-            byMinute = this.byMinute,
-            bySecond = this.bySecond,
+        var byHour = this.byHour;
+        var byMinute = this.byMinute;
+        var bySecond = this.bySecond;
 
-            bySetPosition = this.bySetPosition,
+        var bySetPosition = this.bySetPosition;
 
-            candidates = [],
-            maxAttempts =
-                ( frequency === YEARLY ) ? 10 :
-                ( frequency === MONTHLY ) ? 24 :
-                ( frequency === WEEKLY ) ? 53 :
-                ( frequency === DAILY ) ? 366 :
-                ( frequency === HOURLY ) ? 48 :
-                /* MINUTELY || SECONDLY */ 120,
-            useFastPath, i, daysInMonth, offset, candidate, lastDayInYear,
-            weeksInYear, year, month, date, hour, minute, second;
+        var candidates = [];
+        var maxAttempts =
+            ( frequency === YEARLY ) ? 10 :
+            ( frequency === MONTHLY ) ? 24 :
+            ( frequency === WEEKLY ) ? 53 :
+            ( frequency === DAILY ) ? 366 :
+            ( frequency === HOURLY ) ? 48 :
+            /* MINUTELY || SECONDLY */ 120;
+
+        var useFastPath, i, daysInMonth, offset, candidate, lastDayInYear;
+        var weeksInYear, year, month, date, hour, minute, second;
 
         // Check it's sane.
         if ( interval < 1 ) {
@@ -2035,7 +2220,7 @@ var RecurrenceRule = O.Class({
         }
         switch ( frequency ) {
             case WEEKLY:
-                byDate = null;
+                byMonthDay = null;
                 /* falls through */
             case DAILY:
             case MONTHLY:
@@ -2045,20 +2230,20 @@ var RecurrenceRule = O.Class({
 
         // Only fill-in-the-blanks cases not handled by the fast path.
         if ( frequency === YEARLY ) {
-            if ( byDate && !byMonth && !byDay && !byYearDay && !byWeekNo ) {
-                if ( byDate.length === 1 &&
-                        byDate[0] === fromDate.getUTCDate() ) {
-                    byDate = null;
+            if ( byMonthDay && !byMonth && !byDay && !byYearDay && !byWeekNo ) {
+                if ( byMonthDay.length === 1 &&
+                        byMonthDay[0] === fromDate.getUTCDate() ) {
+                    byMonthDay = null;
                 } else {
                     byMonth = [ fromDate.getUTCMonth() ];
                 }
             }
-            if ( byMonth && !byDate && !byDay && !byYearDay && !byWeekNo ) {
-                byDate = [ fromDate.getUTCDate() ];
+            if ( byMonth && !byMonthDay && !byDay && !byYearDay && !byWeekNo ) {
+                byMonthDay = [ fromDate.getUTCDate() ];
             }
         }
-        if ( frequency === MONTHLY && byMonth && !byDate && !byDay ) {
-            byDate = [ fromDate.getUTCDate() ];
+        if ( frequency === MONTHLY && byMonth && !byMonthDay && !byDay ) {
+            byMonthDay = [ fromDate.getUTCDate() ];
         }
         if ( frequency === WEEKLY && byMonth && !byDay ) {
             byDay = [ fromDate.getUTCDay() ];
@@ -2067,14 +2252,15 @@ var RecurrenceRule = O.Class({
         // Deal with monthly/yearly repetitions where the anchor may not exist
         // in some cycles. Must not use fast path.
         if ( this._isComplexAnchor &&
-                !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo ) {
-            byDate = [ startDate.getUTCDate() ];
+                !byDay && !byMonthDay && !byMonth && !byYearDay && !byWeekNo ) {
+            byMonthDay = [ startDate.getUTCDate() ];
             if ( frequency === YEARLY ) {
                 byMonth = [ startDate.getUTCMonth() ];
             }
         }
 
-        useFastPath = !byDay && !byDate && !byMonth && !byYearDay && !byWeekNo;
+        useFastPath = !byDay && !byMonthDay &&
+            !byMonth && !byYearDay && !byWeekNo;
         switch ( frequency ) {
             case SECONDLY:
                 useFastPath = useFastPath && !bySecond;
@@ -2164,8 +2350,8 @@ var RecurrenceRule = O.Class({
                 if ( byMonth ) {
                     filter( candidates, getMonth, byMonth );
                 }
-                if ( byDate ) {
-                    filter( candidates, getDate, byDate,
+                if ( byMonthDay ) {
+                    filter( candidates, getDate, byMonthDay,
                         daysInMonth ? daysInMonth + 1 : 0
                     );
                 }
@@ -2241,13 +2427,13 @@ var RecurrenceRule = O.Class({
     // begin = Beginning of time period to return occurrences within
     // end = End of time period to return occurrences within
     getOccurrences: function ( start, begin, end ) {
-        var frequency = this.frequency,
-            count = this.count || 0,
-            until = this.until,
-            results = [],
-            interval, year, month, date, isComplexAnchor,
-            beginYear, beginMonth,
-            anchor, temp, occurrences, occurrence, i, l;
+        var frequency = this.frequency;
+        var count = this.count || 0;
+        var until = this.until;
+        var results = [];
+        var interval, year, month, date, isComplexAnchor;
+        var beginYear, beginMonth;
+        var anchor, temp, occurrences, occurrence, i, l;
 
         if ( !start ) {
             start = new Date();
@@ -2391,15 +2577,17 @@ var RecurrenceRule = O.Class({
     matches: function ( start, date ) {
         return !!this.getOccurrences( start, date, new Date( +date + 1000 ) )
                      .length;
-    }
-}).extend({
-    dayToNumber: dayToNumber,
-    numberToDay: numberToDay,
-
-    fromJSON: function ( recurrenceRuleJSON ) {
-        return new RecurrenceRule( recurrenceRuleJSON );
-    }
+    },
 });
+
+RecurrenceRule.dayToNumber = dayToNumber;
+RecurrenceRule.numberToDay = numberToDay;
+
+RecurrenceRule.fromJSON = function ( recurrenceRuleJSON ) {
+    return new RecurrenceRule( recurrenceRuleJSON );
+};
+
+// --- Export
 
 JMAP.RecurrenceRule = RecurrenceRule;
 
@@ -2407,25 +2595,218 @@ JMAP.RecurrenceRule = RecurrenceRule;
 
 
 // -------------------------------------------------------------------------- \\
-// File: CalendarEvent.js                                                     \\
+// File: calendarEventUploads.js                                              \\
 // Module: CalendarModel                                                      \\
-// Requires: API, Calendar.js, Duration.js, RecurrenceRule.js                 \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// Requires: API                                                              \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
+( function ( JMAP ) {
+
+const clone = O.clone;
+const Class = O.Class;
+
+const store = JMAP.store;
+const calendar = JMAP.calendar;
+const LocalFile = JMAP.LocalFile;
+
+// ---
+
+const eventUploads = {
+
+    inProgress: {},
+    awaitingSave: {},
+
+    get: function ( event ) {
+        var id = event.get( 'storeKey' ),
+            isEdit = event.get( 'store' ).isNested,
+            files = this.inProgress[ id ];
+
+        return files ? files.filter( function ( file ) {
+            return isEdit ? file.inEdit : file.inServer;
+        }) : [];
+    },
+
+    add: function ( event, file ) {
+        var id = event.get( 'storeKey' ),
+            files = this.inProgress[ id ] || ( this.inProgress[ id ] = [] );
+        files.push( file );
+        event.computedPropertyDidChange( 'files' );
+    },
+
+    remove: function ( event, file ) {
+        var id = event.get( 'storeKey' ),
+            isEdit = event.get( 'store' ).isNested,
+            files = this.inProgress[ id ];
+
+        if ( isEdit && file.inServer ) {
+            file.inEdit = false;
+        } else {
+            files.erase( file );
+            if ( !files.length ) {
+                delete this.inProgress[ id ];
+            }
+            file.destroy();
+        }
+        event.computedPropertyDidChange( 'files' );
+    },
+
+    finishEdit: function ( event, source, destination ) {
+        var id = event.get( 'storeKey' ),
+            files = this.inProgress[ id ],
+            l, file;
+        if ( files ) {
+            l = files.length;
+            while ( l-- ) {
+                file = files[l];
+                if ( !file[ source ] ) {
+                    files.splice( l, 1 );
+                    file.destroy();
+                } else {
+                    file[ destination ] = true;
+                }
+            }
+            if ( !files.length ) {
+                delete this.inProgress[ id ];
+            }
+        }
+        delete this.awaitingSave[ id ];
+    },
+
+    save: function ( event ) {
+        var awaitingSave = this.awaitingSave[ event.get( 'storeKey' ) ],
+            i, l;
+        if ( awaitingSave ) {
+            for ( i = 0, l = awaitingSave.length; i < l; i += 1 ) {
+                this.keepFile( awaitingSave[i][0], awaitingSave[i][1] );
+            }
+        }
+        this.finishEdit( event, 'inEdit', 'inServer' );
+        event.getDoppelganger( store )
+                 .computedPropertyDidChange( 'files' );
+    },
+
+    discard: function ( event ) {
+        this.finishEdit( event, 'inServer', 'inEdit' );
+        event.getDoppelganger( calendar.editStore )
+                .computedPropertyDidChange( 'files' );
+    },
+
+    didUpload: function ( file ) {
+        var inEdit = file.inEdit,
+            inServer = file.inServer,
+            link = {
+                href: file.get( 'url' ),
+                rel: 'enclosure',
+                title: file.get( 'name' ),
+                type: file.get( 'type' ),
+                size: file.get( 'size' )
+            },
+            editEvent = file.editEvent,
+            editLinks = clone( editEvent.get( 'links' ) ) || {},
+            id, awaitingSave,
+            serverEvent, serverLinks;
+
+        if ( !inServer ) {
+            id = editEvent.get( 'storeKey' );
+            awaitingSave = this.awaitingSave;
+            ( awaitingSave[ id ] ||
+                ( awaitingSave[ id ] = [] ) ).push([
+                    file.get( 'path' ), file.get( 'name' ) ]);
+            editLinks[ link.href ] = link;
+            editEvent.set( 'links', editLinks );
+            this.remove( editEvent, file );
+        } else {
+            this.keepFile( file.get( 'path' ), file.get( 'name' ) );
+            // Save new attachment to server
+            serverEvent = editEvent.getDoppelganger( store );
+            serverLinks = clone( serverEvent.get( 'links' ) ) || {};
+            serverLinks[ link.href ] = link;
+            serverEvent.set( 'links', serverLinks );
+            // If in edit, push to edit record as well.
+            if ( inEdit ) {
+                editLinks[ link.href ] = link;
+            }
+            editEvent.set( 'links', editLinks );
+            this.remove( serverEvent, file );
+        }
+    },
+
+    didFail: function ( file ) {
+        var event = file.editEvent;
+        file.inServer = false;
+        this.remove( event, file );
+        event.getDoppelganger( store )
+             .computedPropertyDidChange( 'files' );
+    },
+
+    keepFile: function ( path, name ) {
+        // TODO: Create Storage Node in Calendar Event Attachments folder.
+    },
+};
+
+const CalendarAttachment = Class({
+
+    Extends: LocalFile,
+
+    init: function ( file, event ) {
+        this.editEvent = event;
+        this.inServer = false;
+        this.inEdit = true;
+        CalendarAttachment.parent.constructor.call( this, file );
+    },
+
+    uploadDidSucceed: function () {
+        eventUploads.didUpload( this );
+    },
+    uploadDidFail: function () {
+        eventUploads.didFail( this );
+    }
+});
+
+// --- Export
+
+JMAP.CalendarAttachment = CalendarAttachment;
+JMAP.calendar.eventUploads = eventUploads;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: CalendarEvent.js                                                     \\
+// Module: CalendarModel                                                      \\
+// Requires: API, Calendar.js, Duration.js, RecurrenceRule.js, calendarEventUploads.js \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+'use strict';
+
 ( function ( JMAP, undefined ) {
 
-var Record = O.Record;
-var attr = Record.attr;
+const clone = O.clone;
+const Class = O.Class;
+const Obj = O.Object;
+const Record = O.Record;
+const attr = Record.attr;
+const TimeZone = O.TimeZone;
 
-var numerically = function ( a, b ) {
+const calendar = JMAP.calendar;
+const Calendar = JMAP.Calendar;
+const CalendarAttachment = JMAP.CalendarAttachment;
+const Duration = JMAP.Duration;
+const RecurrenceRule = JMAP.RecurrenceRule;
+
+// ---
+
+const numerically = function ( a, b ) {
     return a - b;
 };
 
-var CalendarEvent = O.Class({
+const CalendarEvent = Class({
 
     Extends: Record,
 
@@ -2451,102 +2832,64 @@ var CalendarEvent = O.Class({
         CalendarEvent.parent.storeWillUnload.call( this );
     },
 
-    // --- Metadata ---
+    // --- JMAP
 
     calendar: Record.toOne({
-        Type: JMAP.Calendar,
-        key: 'calendarId'
+        Type: Calendar,
+        key: 'calendarId',
+        willSet: function ( propValue, propKey, record ) {
+            record.set( 'accountId', propValue.get( 'accountId' ) );
+            return true;
+        },
+    }),
+
+    // --- Metadata
+
+    '@type': attr( String, {
+        defaultValue: 'jsevent',
     }),
 
     uid: attr( String, {
-        noSync: true
+        noSync: true,
     }),
 
-    relatedTo: attr( Array ),
+    relatedTo: attr( Object ),
 
     prodId: attr( String ),
 
     created: attr( Date, {
-        noSync: true
+        toJSON: Date.toUTCJSON,
+        noSync: true,
     }),
 
     updated: attr( Date, {
-        noSync: true
+        toJSON: Date.toUTCJSON,
+        noSync: true,
     }),
 
     sequence: attr( Number, {
         defaultValue: 0,
-        noSync: true
+        noSync: true,
     }),
 
-    method: attr( String, {
-        noSync: true
-    }),
+    // method: attr( String, {
+    //     noSync: true,
+    // }),
 
-    // --- What ---
+    // --- What
 
     title: attr( String, {
-        defaultValue: ''
+        defaultValue: '',
     }),
 
     description: attr( String, {
-        defaultValue: ''
+        defaultValue: '',
     }),
 
-    links: attr( Object, {
-        defaultValue: null
-    }),
-
-    isUploading: function () {
-        return !!JMAP.calendar.eventUploads.get( this ).length;
-    }.property( 'files' ),
-
-    files: function () {
-        var links = this.get( 'links' ) || {};
-        var files = [];
-        var id, link;
-        for ( id in links ) {
-            link = links[ id ];
-            if ( link.rel === 'enclosure' ) {
-                links.push( new O.Object({
-                    id: id,
-                    name: link.title,
-                    url: link.href,
-                    type: link.type,
-                    size: link.size
-                }));
-            }
-        }
-        return files.concat( JMAP.calendar.eventUploads.get( this ) );
-    }.property( 'links' ),
-
-    addFile: function ( file ) {
-        var attachment = new JMAP.CalendarAttachment( file, this );
-        JMAP.calendar.eventUploads.add( this, attachment );
-        attachment.upload();
-        return this;
-    },
-
-    removeFile: function ( file ) {
-        if ( file instanceof JMAP.CalendarAttachment ) {
-            JMAP.calendar.eventUploads.remove( this, file );
-        } else {
-            var links = O.clone( this.get( 'links' ) );
-            delete links[ file.id ];
-            this.set( 'links', Object.keys( links ).length ? links : null );
-        }
-        return this;
-    },
-
-    // ---
-
-    // locale: attr( String ),
-    // localizations: attr( Object ),
-
-    // --- Where ---
+    // --- Where
 
     locations: attr( Object, {
-        defaultValue: null
+        defaultValue: null,
     }),
 
     location: function ( value ) {
@@ -2576,7 +2919,7 @@ var CalendarEvent = O.Class({
                 location = locations[ id ];
                 if ( location.rel === 'start' ) {
                     if ( location.timeZone ) {
-                        timeZone = O.TimeZone.fromJSON( location.timeZone );
+                        timeZone = TimeZone.fromJSON( location.timeZone );
                     }
                     break;
                 }
@@ -2594,7 +2937,7 @@ var CalendarEvent = O.Class({
                 location = locations[ id ];
                 if ( location.rel === 'end' ) {
                     if ( location.timeZone ) {
-                        timeZone = O.TimeZone.fromJSON( location.timeZone );
+                        timeZone = TimeZone.fromJSON( location.timeZone );
                     }
                     break;
                 }
@@ -2603,42 +2946,98 @@ var CalendarEvent = O.Class({
         return timeZone;
     }.property( 'locations', 'timeZone' ),
 
-    // --- When ---
+    // --- Attachments
+
+    links: attr( Object, {
+        defaultValue: null,
+    }),
+
+    isUploading: function () {
+        return !!calendar.eventUploads.get( this ).length;
+    }.property( 'files' ),
+
+    files: function () {
+        var links = this.get( 'links' ) || {};
+        var files = [];
+        var id, link;
+        for ( id in links ) {
+            link = links[ id ];
+            if ( link.rel === 'enclosure' ) {
+                files.push( new Obj({
+                    id: id,
+                    name: link.title,
+                    url: link.href,
+                    type: link.type,
+                    size: link.size
+                }));
+            }
+        }
+        return files.concat( calendar.eventUploads.get( this ) );
+    }.property( 'links' ),
+
+    addFile: function ( file ) {
+        var attachment = new CalendarAttachment( file, this );
+        calendar.eventUploads.add( this, attachment );
+        attachment.upload();
+        return this;
+    },
+
+    removeFile: function ( file ) {
+        if ( file instanceof CalendarAttachment ) {
+            calendar.eventUploads.remove( this, file );
+        } else {
+            var links = clone( this.get( 'links' ) );
+            delete links[ file.id ];
+            this.set( 'links', Object.keys( links ).length ? links : null );
+        }
+        return this;
+    },
+
+    // ---
+
+    // locale: attr( String ),
+    // localizations: attr( Object ),
+
+    // keywords: attr( Array ),
+    // categories: attr( Array ),
+    // color: attr( String ),
+
+    // --- When
 
     isAllDay: attr( Boolean, {
-        defaultValue: false
+        defaultValue: false,
     }),
 
     start: attr( Date, {
         willSet: function ( propValue, propKey, record ) {
             var oldStart = record.get( 'start' );
-            if ( typeof oldStart !== undefined ) {
+            if ( typeof oldStart !== 'undefined' ) {
                 record._updateRecurrenceOverrides( oldStart, propValue );
             }
             return true;
         }
     }),
 
-    duration: attr( JMAP.Duration, {
-        defaultValue: JMAP.Duration.ZERO
+    duration: attr( Duration, {
+        defaultValue: Duration.ZERO,
     }),
 
-    timeZone: attr( O.TimeZone, {
-        defaultValue: null
+    timeZone: attr( TimeZone, {
+        defaultValue: null,
     }),
 
-    recurrenceRule: attr( JMAP.RecurrenceRule, {
+    recurrenceRule: attr( RecurrenceRule, {
         defaultValue: null,
         willSet: function ( propValue, propKey, record ) {
             if ( !propValue ) {
                 record.set( 'recurrenceOverrides', null );
             }
             return true;
-        }
+        },
     }),
 
     recurrenceOverrides: attr( Object, {
-        defaultValue: null
+        defaultValue: null,
     }),
 
     getStartInTimeZone: function ( timeZone ) {
@@ -2693,7 +3092,7 @@ var CalendarEvent = O.Class({
     utcEnd: function ( date ) {
         var utcStart = this.get( 'utcStart' );
         if ( date ) {
-            this.set( 'duration', new JMAP.Duration(
+            this.set( 'duration', new Duration(
                 Math.max( 0, date - utcStart )
             ));
         } else {
@@ -2947,27 +3346,34 @@ var CalendarEvent = O.Class({
     }.observes( 'calendar', 'uid', 'relatedTo', 'prodId', 'isAllDay',
         'allStartDates', 'totalOccurrences', 'replyTo', 'participantId' ),
 
-    // --- Scheduling ---
+    // --- Scheduling
 
-    status: attr( String, {
-        defaultValue: 'confirmed'
+    // priority: attr( Number, {
+    //     defaultValue: 0,
+    // }),
+
+    scheduleStatus: attr( String, {
+        key: 'status',
+        defaultValue: 'confirmed',
     }),
 
-    showAsFree: attr( Boolean, {
-        defaultValue: false
+    freeBusyStatus: attr( String, {
+        defaultValue: 'busy',
     }),
 
     replyTo: attr( Object, {
-        defaultValue: null
+        defaultValue: null,
     }),
 
     participants: attr( Object, {
-        defaultValue: null
+        defaultValue: null,
     }),
+
+    // --- JMAP Scheduling
 
     // The id for the calendar owner's participant
     participantId: attr( String, {
-        defaultValue: null
+        defaultValue: null,
     }),
 
     rsvp: function ( rsvp ) {
@@ -2976,50 +3382,58 @@ var CalendarEvent = O.Class({
         var you = ( participants && participantId &&
             participants[ participantId ] ) || null;
         if ( you && rsvp !== undefined ) {
-            participants = O.clone( participants );
+            participants = clone( participants );
             // Don't alert me if I'm not going!
             if ( rsvp === 'declined' ) {
                 this.set( 'useDefaultAlerts', false )
                     .set( 'alerts', null );
             }
             // Do alert me if I change my mind!
-            else if ( you.rsvp === 'declined' &&
+            else if ( you.rsvpResponse === 'declined' &&
                     this.get( 'alerts' ) === null ) {
                 this.set( 'useDefaultAlerts', true );
             }
-            participants[ participantId ].scheduleStatus = rsvp;
+            participants[ participantId ].rsvpResponse = rsvp;
             this.set( 'participants', participants );
         } else {
-            rsvp = you && you.scheduleStatus || '';
+            rsvp = you && you.rsvpResponse || '';
         }
         return rsvp;
     }.property( 'participants', 'participantId' ),
 
-    // --- Alerts ---
+    // --- Sharing
+
+    // privacy: attr( String, {
+    //     defaultValue: 'public',
+    // }),
+
+    // --- Alerts
 
     useDefaultAlerts: attr( Boolean, {
-        defaultValue: false
+        defaultValue: false,
     }),
 
     alerts: attr( Object, {
-        defaultValue: null
-    })
+        defaultValue: null,
+    }),
 });
+CalendarEvent.__guid__ = 'CalendarEvent';
+CalendarEvent.dataGroup = 'calendars';
 
 // ---
 
-var dayToNumber = JMAP.RecurrenceRule.dayToNumber;
+const dayToNumber = RecurrenceRule.dayToNumber;
 
-var byNthThenDay = function ( a, b ) {
+const byNthThenDay = function ( a, b ) {
     var aNthOfPeriod = a.nthOfPeriod || 0;
     var bNthOfPeriod = b.nthOfPeriod || 0;
     return ( aNthOfPeriod - bNthOfPeriod ) ||
         ( dayToNumber[ a.day ] - dayToNumber[ b.day ] );
 };
 
-var numericArrayProps = [ 'byDate', 'byYearDay', 'byWeekNo', 'byHour', 'byMinute', 'bySecond', 'bySetPosition' ];
+const numericArrayProps = [ 'byMonthDay', 'byYearDay', 'byWeekNo', 'byHour', 'byMinute', 'bySecond', 'bySetPosition' ];
 
-var normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
+const normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
     var byDay, byMonth, i, l, key, value;
     if ( !recurrenceRuleJSON ) {
         return;
@@ -3030,14 +3444,14 @@ var normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
     if ( recurrenceRuleJSON.firstDayOfWeek === 'monday' ) {
         delete recurrenceRuleJSON.firstDayOfWeek;
     }
-    if ( byDay = recurrenceRuleJSON.byDay ) {
+    if (( byDay = recurrenceRuleJSON.byDay )) {
         if ( byDay.length ) {
             byDay.sort( byNthThenDay );
         } else {
             delete recurrenceRuleJSON.byDay;
         }
     }
-    if ( byMonth = recurrenceRuleJSON.byMonth ) {
+    if (( byMonth = recurrenceRuleJSON.byMonth )) {
         if ( byMonth.length ) {
             byMonth.sort();
         } else {
@@ -3060,60 +3474,94 @@ var normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
     }
 };
 
-var alertOffsetFromJSON = function ( alerts ) {
+const alertOffsetFromJSON = function ( alerts ) {
     if ( !alerts ) {
         return null;
     }
     var id, alert;
     for ( id in alerts ) {
         alert = alerts[ id ];
-        alert.offset = new JMAP.Duration( alert.offset );
+        alert.offset = new Duration( alert.offset );
     }
 };
 
-JMAP.calendar.replaceEvents = false;
-JMAP.calendar.handle( CalendarEvent, {
+calendar.replaceEvents = {};
+calendar.handle( CalendarEvent, {
+
     precedence: 2,
-    fetch: 'getCalendarEvents',
-    refresh: function ( _, state ) {
-        this.callMethod( 'getCalendarEventUpdates', {
-            sinceState: state,
-            maxChanges: 100,
-            fetchRecords: true
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'CalendarEvent/get', {
+            accountId: accountId,
+            ids: ids || null,
         });
     },
-    commit: 'setCalendarEvents',
-    // Response handlers
-    calendarEvents: function ( args ) {
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'CalendarEvent/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'CalendarEvent/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: 100,
+            });
+            this.callMethod( 'CalendarEvent/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'CalendarEvent/changes',
+                    path: '/changed',
+                },
+            });
+        }
+    },
+
+    commit: 'CalendarEvent/set',
+
+    // ---
+
+    'CalendarEvent/get': function ( args ) {
         var events = args.list;
         var l = events.length;
         var event, timeZoneId;
+        var accountId = args.accountId;
         while ( l-- ) {
             event = events[l];
             timeZoneId = event.timeZone;
             if ( timeZoneId ) {
-                JMAP.calendar.seenTimeZone( O.TimeZone[ timeZoneId ] );
+                calendar.seenTimeZone( TimeZone[ timeZoneId ] );
             }
             normaliseRecurrenceRule( event.recurrenceRule );
             alertOffsetFromJSON( event.alerts );
         }
-        JMAP.calendar.propertyDidChange( 'usedTimeZones' );
-        this.didFetch( CalendarEvent, args, this.replaceEvents );
-        this.replaceEvents = false;
+        calendar.propertyDidChange( 'usedTimeZones' );
+        this.didFetch( CalendarEvent, args, !!this.replaceEvents[ accountId ] );
+        this.replaceEvents[ accountId ] = false;
     },
-    calendarEventUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( CalendarEvent, args, reqArgs );
-        if ( args.hasMoreUpdates ) {
-            this.get( 'store' ).fetchAll( CalendarEvent, true );
+
+    'CalendarEvent/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( CalendarEvent, args, hasDataForChanged );
+        if ( args.hasMoreChanges ) {
+            this.get( 'store' ).fetchAll( args.accountId, CalendarEvent, true );
         }
     },
-    error_getCalendarEventUpdates_cannotCalculateChanges: function () {
-        JMAP.calendar.flushCache();
+
+    'error_CalendarEvent/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
+        var accountId = reqArgs.accountId;
+        calendar.flushCache( accountId );
     },
-    calendarEventsSet: function ( args ) {
+
+    'CalendarEvent/set': function ( args ) {
         this.didCommit( CalendarEvent, args );
-    }
+    },
 });
+
+// --- Export
 
 JMAP.CalendarEvent = CalendarEvent;
 
@@ -3124,56 +3572,36 @@ JMAP.CalendarEvent = CalendarEvent;
 // File: CalendarEventOccurrence.js                                           \\
 // Module: CalendarModel                                                      \\
 // Requires: CalendarEvent.js                                                 \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP, undefined ) {
 
-var CalendarEvent = JMAP.CalendarEvent;
+const bind = O.bind;
+const meta = O.meta;
+const clone = O.clone;
+const isEqual = O.isEqual;
+const TimeZone = O.TimeZone;
+const Class = O.Class;
+const Obj = O.Object;
+
+const makePatches = JMAP.Connection.makePatches;
+const CalendarEvent = JMAP.CalendarEvent;
 
 // ---
 
-var mayPatch = {
+const mayPatch = {
     links: true,
     translations: true,
     locations: true,
     participants: true,
-    alerts: true
+    alerts: true,
 };
 
-var makePatches = function ( path, patches, original, current ) {
-    var key;
-    if ( original && current && typeof current === 'object' &&
-            !( current instanceof Array ) ) {
-        for ( key in current ) {
-            makePatches(
-                path + '/' + key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
-                patches,
-                original[ key ],
-                current[ key ]
-            );
-        }
-        for ( key in original ) {
-            if ( !( key in current ) ) {
-                makePatches(
-                    path + '/' +
-                        key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
-                    patches,
-                    original[ key ],
-                    null
-                );
-            }
-        }
-    } else if ( !O.isEqual( original, current ) ) {
-        patches.push([ path, current || null ]);
-    }
-    return patches;
-};
-
-var applyPatch = function ( object, path, patch ) {
+const applyPatch = function ( object, path, patch ) {
     var slash, key;
     while ( true ) {
         // Invalid patch; path does not exist
@@ -3201,42 +3629,42 @@ var applyPatch = function ( object, path, patch ) {
     }
 };
 
-var proxyOverrideAttibute = function ( Type, key ) {
+const proxyOverrideAttibute = function ( Type, key, attrKey ) {
     return function ( value ) {
         var original = this.get( 'original' );
         var originalValue = this.getOriginalForKey( key );
         var id = this.id;
         var recurrenceOverrides, recurrenceRule;
-        var overrides, keepOverride, path, patches;
+        var overrides, keepOverride, path;
+
+        if ( !attrKey ) {
+            attrKey = key;
+        }
 
         if ( value !== undefined ) {
             // Get current overrides for occurrence
             recurrenceOverrides =
-                O.clone( original.get( 'recurrenceOverrides' ) ) || {};
+                clone( original.get( 'recurrenceOverrides' ) ) || {};
             overrides = recurrenceOverrides[ id ] ||
                 ( recurrenceOverrides[ id ] = {} );
 
             // Clear any previous overrides for this key
             keepOverride = false;
             for ( path in overrides ) {
-                if ( path.indexOf( key ) === 0 ) {
+                if ( path.indexOf( attrKey ) === 0 ) {
                     delete overrides[ path ];
                 } else {
                     keepOverride = true;
                 }
             }
             // Set if different to parent
-            if ( mayPatch[ key ] ) {
-                patches = makePatches( key, [], originalValue, value );
-                if ( patches.length ) {
-                    keepOverride = true;
-                    patches.forEach( function ( patch ) {
-                        overrides[ patch[0] ] = patch[1];
-                    });
-                }
-            } else if ( !O.isEqual( originalValue, value ) ) {
+            if ( mayPatch[ attrKey ] ) {
+                keepOverride =
+                    makePatches( attrKey, overrides, originalValue, value ) ||
+                    keepOverride;
+            } else if ( !isEqual( originalValue, value ) ) {
                 keepOverride = true;
-                overrides[ key ] = value && value.toJSON ?
+                overrides[ attrKey ] = value && value.toJSON ?
                     value.toJSON() : value;
             }
 
@@ -3259,17 +3687,17 @@ var proxyOverrideAttibute = function ( Type, key ) {
             original.set( 'recurrenceOverrides', recurrenceOverrides );
         } else {
             overrides = this.get( 'overrides' );
-            if ( key in overrides ) {
+            if ( attrKey in overrides ) {
                 return Type.fromJSON ?
-                    Type.fromJSON( overrides[ key ] ) :
-                    overrides[ key ];
+                    Type.fromJSON( overrides[ attrKey ] ) :
+                    overrides[ attrKey ];
             }
             value = originalValue;
-            if ( value && mayPatch[ key ] ) {
+            if ( value && mayPatch[ attrKey ] ) {
                 for ( path in overrides ) {
-                    if ( path.indexOf( key ) === 0 ) {
+                    if ( path.indexOf( attrKey ) === 0 ) {
                         if ( value === originalValue ) {
-                            value = O.clone( originalValue );
+                            value = clone( originalValue );
                         }
                         applyPatch( value, path, overrides[ path ] );
                     }
@@ -3280,13 +3708,13 @@ var proxyOverrideAttibute = function ( Type, key ) {
     }.property( 'overrides', 'original.' + key );
 };
 
-var proxyAttribute = function ( _, key ) {
+const proxyAttribute = function ( _, key ) {
     return this.get( 'original' ).get( key );
 }.property().nocache();
 
-var CalendarEventOccurrence = O.Class({
+const CalendarEventOccurrence = Class({
 
-    Extends: O.Object,
+    Extends: Obj,
 
     constructor: CalendarEvent,
 
@@ -3296,7 +3724,7 @@ var CalendarEventOccurrence = O.Class({
     isEditable: CalendarEvent.prototype.isEditable,
     isInvitation: CalendarEvent.prototype.isInvitation,
 
-    overrides: O.bind( null, 'original*recurrenceOverrides',
+    overrides: bind( null, 'original*recurrenceOverrides',
     function ( recurrenceOverrides ) {
         var id = this.toObject.id;
         return recurrenceOverrides && recurrenceOverrides[ id ] || {};
@@ -3311,7 +3739,7 @@ var CalendarEventOccurrence = O.Class({
         this.store = original.get( 'store' );
         this.storeKey = original.get( 'storeKey' ) + id;
 
-        CalendarEventOccurrence.parent.init.call( this );
+        CalendarEventOccurrence.parent.constructor.call( this );
         original.on( 'highlightView', this, 'echoEvent' );
     },
 
@@ -3339,7 +3767,7 @@ var CalendarEventOccurrence = O.Class({
         var recurrenceOverrides = original.get( 'recurrenceOverrides' );
 
         recurrenceOverrides = recurrenceOverrides ?
-            O.clone( recurrenceOverrides ) : {};
+            clone( recurrenceOverrides ) : {};
         recurrenceOverrides[ this.id ] = null;
         original.set( 'recurrenceOverrides', recurrenceOverrides );
 
@@ -3363,6 +3791,8 @@ var CalendarEventOccurrence = O.Class({
 
     // May not edit calendar prop.
     calendar: proxyAttribute,
+
+    '@type': 'jsevent',
     uid: proxyAttribute,
     relatedTo: proxyAttribute,
     prodId: proxyAttribute,
@@ -3376,18 +3806,6 @@ var CalendarEventOccurrence = O.Class({
     title: proxyOverrideAttibute( String, 'title' ),
     description: proxyOverrideAttibute( String, 'description' ),
 
-    links: proxyOverrideAttibute( Object, 'links' ),
-
-    isUploading: CalendarEvent.prototype.isUploading,
-    files: CalendarEvent.prototype.files,
-    addFile: CalendarEvent.prototype.addFile,
-    removeFile: CalendarEvent.prototype.removeFile,
-
-    // ---
-
-    // locale: proxyOverrideAttibute( String, 'locale' ),
-    // localizations: proxyOverrideAttibute( Object, 'localizations' ),
-
     // ---
 
     locations: proxyOverrideAttibute( Object, 'locations' ),
@@ -3397,12 +3815,30 @@ var CalendarEventOccurrence = O.Class({
 
     // ---
 
+    links: proxyOverrideAttibute( Object, 'links' ),
+
+    isUploading: CalendarEvent.prototype.isUploading,
+    files: CalendarEvent.prototype.files,
+    addFile: CalendarEvent.prototype.addFile,
+    removeFile: CalendarEvent.prototype.removeFile,
+
+    // ---
+
+    // locale: attr( String ),
+    // localizations: attr( Object ),
+
+    // keywords: attr( Array ),
+    // categories: attr( Array ),
+    // color: attr( String ),
+
+    // ---
+
     isAllDay: proxyAttribute,
 
     start: proxyOverrideAttibute( Date, 'start' ),
     duration: proxyOverrideAttibute( JMAP.Duration, 'duration' ),
-    timeZone: proxyOverrideAttibute( O.TimeZone, 'timeZone' ),
-    recurrence: proxyAttribute,
+    timeZone: proxyOverrideAttibute( TimeZone, 'timeZone' ),
+    recurrenceRule: proxyAttribute,
     recurrenceOverrides: null,
 
     getStartInTimeZone: CalendarEvent.prototype.getStartInTimeZone,
@@ -3421,14 +3857,14 @@ var CalendarEventOccurrence = O.Class({
     index: function () {
         var start = this.get( 'start' );
         var original = this.get( 'original' );
-        return O.isEqual( start, original.get( 'start' ) ) ? 0 :
+        return isEqual( start, original.get( 'start' ) ) ? 0 :
             original.get( 'allStartDates' ).binarySearch( this._start );
     }.property().nocache(),
 
     // ---
 
-    status: proxyOverrideAttibute( String, 'status' ),
-    showAsFree: proxyOverrideAttibute( Boolean, 'showAsFree' ),
+    scheduleStatus: proxyOverrideAttibute( String, 'scheduleStatus', 'status' ),
+    freeBusyStatus: proxyOverrideAttibute( String, 'freeBusyStatus' ),
     replyTo: proxyAttribute,
     participants: proxyOverrideAttibute( Object, 'participants' ),
     participantId: proxyAttribute,
@@ -3455,10 +3891,13 @@ var CalendarEventOccurrence = O.Class({
     // ---
 
     useDefaultAlerts: proxyOverrideAttibute( Boolean, 'useDefaultAlerts' ),
-    alerts: proxyOverrideAttibute( Object, 'alerts' )
+    alerts: proxyOverrideAttibute( Object, 'alerts' ),
 });
-O.meta( CalendarEventOccurrence.prototype ).attrs =
-    O.meta( CalendarEvent.prototype ).attrs;
+
+meta( CalendarEventOccurrence.prototype ).attrs =
+    meta( CalendarEvent.prototype ).attrs;
+
+// --- Export
 
 JMAP.CalendarEventOccurrence = CalendarEventOccurrence;
 
@@ -3468,20 +3907,20 @@ JMAP.CalendarEventOccurrence = CalendarEventOccurrence;
 // -------------------------------------------------------------------------- \\
 // File: InfiniteDateSource.js                                                \\
 // Module: CalendarModel                                                      \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var InfiniteDateSource = O.Class({
+const InfiniteDateSource = O.Class({
 
     Extends: O.ObservableArray,
 
     init: function ( mixin ) {
-        InfiniteDateSource.parent.init.call( this, null, mixin );
+        InfiniteDateSource.parent.constructor.call( this, null, mixin );
         this.windowLengthDidChange();
     },
 
@@ -3545,21 +3984,29 @@ JMAP.InfiniteDateSource = InfiniteDateSource;
 // File: calendar-model.js                                                    \\
 // Module: CalendarModel                                                      \\
 // Requires: API, Calendar.js, CalendarEvent.js                               \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var store = JMAP.store;
-var Calendar = JMAP.Calendar;
-var CalendarEvent = JMAP.CalendarEvent;
+const mixin = O.mixin;
+const Class = O.Class;
+const Obj = O.Object;
+const ObservableArray = O.ObservableArray;
+const NestedStore = O.NestedStore;
+const StoreUndoManager = O.StoreUndoManager;
+
+const auth = JMAP.auth;
+const store = JMAP.store;
+const Calendar = JMAP.Calendar;
+const CalendarEvent = JMAP.CalendarEvent;
 
 // ---
 
-var nonRepeatingEvents = new O.Object({
+const nonRepeatingEvents = new Obj({
 
     index: null,
 
@@ -3581,11 +4028,11 @@ var nonRepeatingEvents = new O.Object({
             timestamp = +event.getStartInTimeZone( timeZone );
             timestamp = timestamp - timestamp.mod( 24 * 60 * 60 * 1000 );
             end = +event.getEndInTimeZone( timeZone );
-            while ( timestamp < end ) {
+            do {
                 events = index[ timestamp ] || ( index[ timestamp ] = [] );
                 events.push( event );
                 timestamp += ( 24 * 60 * 60 * 1000 );
-            }
+            } while ( timestamp < end );
         }
         return this;
     },
@@ -3597,10 +4044,10 @@ var nonRepeatingEvents = new O.Object({
             this.buildIndex();
         }
         return this.index[ timestamp ] || null;
-    }
+    },
 });
 
-var repeatingEvents = new O.Object({
+const repeatingEvents = new Obj({
 
     start: null,
     end: null,
@@ -3649,11 +4096,11 @@ var repeatingEvents = new O.Object({
                 timestamp = Math.max( startIndexStamp, timestamp );
                 endStamp = +occurrence.getEndInTimeZone( timeZone );
                 endStamp = Math.min( endIndexStamp, endStamp );
-                while ( timestamp < endStamp ) {
+                do {
                     events = index[ timestamp ] || ( index[ timestamp ] = [] );
                     events.push( occurrence );
                     timestamp += ( 24 * 60 * 60 * 1000 );
-                }
+                } while ( timestamp < endStamp );
             }
             i += 1;
         }
@@ -3667,7 +4114,7 @@ var repeatingEvents = new O.Object({
             this.buildIndex( date );
         }
         return this.index[ timestamp ] || null;
-    }
+    },
 });
 
 // ---
@@ -3678,9 +4125,9 @@ var repeatingEvents = new O.Object({
 
     date     - {Date} The date.
 */
-var NO_EVENTS = [];
-var eventSources = [ nonRepeatingEvents, repeatingEvents ];
-var sortByStartInTimeZone = function ( timeZone ) {
+const NO_EVENTS = [];
+const eventSources = [ nonRepeatingEvents, repeatingEvents ];
+const sortByStartInTimeZone = function ( timeZone ) {
     return function ( a, b ) {
         var aStart = a.getStartInTimeZone( timeZone ),
             bStart = b.getStartInTimeZone( timeZone );
@@ -3688,7 +4135,7 @@ var sortByStartInTimeZone = function ( timeZone ) {
     };
 };
 
-var getEventsForDate = function ( date, timeZone, allDay ) {
+const getEventsForDate = function ( date, timeZone, allDay ) {
     var l = eventSources.length;
     var i, results, events, showDeclined;
     for ( i = 0; i < l; i += 1 ) {
@@ -3717,11 +4164,11 @@ var getEventsForDate = function ( date, timeZone, allDay ) {
 
 // ---
 
-var eventsLists = [];
+const eventsLists = [];
 
-var EventsList = O.Class({
+const EventsList = Class({
 
-    Extends: O.ObservableArray,
+    Extends: ObservableArray,
 
     init: function ( date, allDay ) {
         this.date = date;
@@ -3729,7 +4176,7 @@ var EventsList = O.Class({
 
         eventsLists.push( this );
 
-        EventsList.parent.init.call( this,
+        EventsList.parent.constructor.call( this,
             getEventsForDate( date, JMAP.calendar.get( 'timeZone' ), allDay ));
     },
 
@@ -3741,25 +4188,25 @@ var EventsList = O.Class({
     recalculate: function () {
         return this.set( '[]', getEventsForDate(
             this.date, JMAP.calendar.get( 'timeZone' ), this.allDay ));
-    }
+    },
 });
 
 // ---
 
-var toUTCDay = function ( date ) {
+const toUTCDay = function ( date ) {
     return new Date( date - ( date % ( 24 * 60 * 60 * 1000 ) ) );
 };
 
-var twelveWeeks = 12 * 7 * 24 * 60 * 60 * 1000;
-var now = new Date();
-var usedTimeZones = {};
+const twelveWeeks = 12 * 7 * 24 * 60 * 60 * 1000;
+const now = new Date();
+const usedTimeZones = {};
 var editStore;
 
-O.extend( JMAP.calendar, {
+mixin( JMAP.calendar, {
 
-    editStore: editStore = new O.NestedStore( store ),
+    editStore: editStore = new NestedStore( store ),
 
-    undoManager: new O.StoreUndoManager({
+    undoManager: new StoreUndoManager({
         store: editStore,
         maxUndoCount: 10
     }),
@@ -3783,6 +4230,39 @@ O.extend( JMAP.calendar, {
         return new EventsList( date, allDay );
     },
 
+    fetchEventsInRangeForAccount: function ( accountId, after, before ) {
+        this.callMethod( 'CalendarEvent/query', {
+            accountId: accountId,
+            filter: {
+                after: after.toJSON() + 'Z',
+                before: before.toJSON() + 'Z',
+            },
+        });
+        this.callMethod( 'CalendarEvent/get', {
+            accountId: accountId,
+            '#ids': {
+                resultOf: this.getPreviousMethodId(),
+                name: 'CalendarEvent/query',
+                path: '/ids',
+            },
+        });
+    },
+
+    fetchEventsInRange: function ( after, before, callback ) {
+        var accounts = auth.get( 'accounts' );
+        var accountId, hasDataFor;
+        for ( accountId in accounts ) {
+            hasDataFor = accounts[ accountId ].hasDataFor;
+            if ( !hasDataFor || hasDataFor.contains( 'calendars' ) ) {
+                this.fetchEventsInRangeForAccount( accountId, after, before );
+            }
+        }
+        if ( callback ) {
+            this.addCallback( callback );
+        }
+        return this;
+    },
+
     loadEvents: function ( date ) {
         var loadingEventsStart = this.loadingEventsStart;
         var loadingEventsEnd = this.loadingEventsEnd;
@@ -3790,13 +4270,7 @@ O.extend( JMAP.calendar, {
         if ( loadingEventsStart === loadingEventsEnd ) {
             start = toUTCDay( date ).subtract( 16, 'week' );
             end = toUTCDay( date ).add( 48, 'week' );
-            this.callMethod( 'getCalendarEventList', {
-                filter: {
-                    after: start.toJSON() + 'Z',
-                    before: end.toJSON() + 'Z'
-                },
-                fetchCalendarEvents: true
-            }, function () {
+            this.fetchEventsInRange( start, end, function () {
                 JMAP.calendar
                     .set( 'loadedEventsStart', start )
                     .set( 'loadedEventsEnd', end );
@@ -3809,13 +4283,7 @@ O.extend( JMAP.calendar, {
             start = toUTCDay( date < loadingEventsStart ?
                 date : loadingEventsStart
             ).subtract( 24, 'week' );
-            this.callMethod( 'getCalendarEventList', {
-                filter: {
-                    after: start.toJSON() + 'Z',
-                    before: loadingEventsStart.toJSON() + 'Z'
-                },
-                fetchCalendarEvents: true
-            }, function () {
+            this.fetchEventsInRange( start, loadingEventsStart, function () {
                 JMAP.calendar.set( 'loadedEventsStart', start );
             });
             this.set( 'loadingEventsStart', start );
@@ -3824,13 +4292,7 @@ O.extend( JMAP.calendar, {
             end = toUTCDay( date > loadingEventsEnd ?
                 date : loadingEventsEnd
             ).add( 24, 'week' );
-            this.callMethod( 'getCalendarEventList', {
-                filter: {
-                    after: loadingEventsEnd.toJSON() + 'Z',
-                    before: end.toJSON() + 'Z'
-                },
-                fetchCalendarEvents: true
-            }, function () {
+            this.fetchEventsInRange( loadingEventsEnd, end, function () {
                 JMAP.calendar.set( 'loadedEventsEnd', end );
             });
             this.set( 'loadingEventsEnd', end );
@@ -3849,15 +4311,10 @@ O.extend( JMAP.calendar, {
         });
     }.queue( 'before' ).observes( 'showDeclined' ),
 
-    flushCache: function () {
-        this.replaceEvents = true;
-        this.callMethod( 'getCalendarEventList', {
-            filter: {
-                after: this.loadedEventsStart.toJSON() + 'Z',
-                before: this.loadedEventsEnd.toJSON() + 'Z'
-            },
-            fetchCalendarEvents: true
-        });
+    flushCache: function ( accountId ) {
+        this.replaceEvents[ accountId ] = true;
+        this.fetchEventsInRangeForAccount( accountId,
+            this.loadedEventsStart, this.loadedEventsEnd );
     },
 
     seenTimeZone: function ( timeZone ) {
@@ -3867,192 +4324,17 @@ O.extend( JMAP.calendar, {
                 ( usedTimeZones[ timeZoneId ] || 0 ) + 1;
         }
         return this;
-    }
+    },
 });
 store.on( Calendar, JMAP.calendar, 'recalculate' )
      .on( CalendarEvent, JMAP.calendar, 'clearIndexes' );
 
 JMAP.calendar.handle( null, {
-    calendarEventList: function () {
+    'CalendarEvent/query': function () {
         // We don't care about the list, we only use it to fetch the
         // events we want. This may change with search in the future!
-    }
+    },
 });
-
-}( JMAP ) );
-
-
-// -------------------------------------------------------------------------- \\
-// File: calendarEventUploads.js                                              \\
-// Module: CalendarModel                                                      \\
-// Requires: API                                                              \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
-// -------------------------------------------------------------------------- \\
-
-/*global O, JMAP */
-
-( function ( JMAP, undefined ) {
-
-JMAP.calendar.eventUploads = {
-
-    inProgress: {},
-    awaitingSave: {},
-
-    get: function ( event ) {
-        var id = event.get( 'storeKey' ),
-            isEdit = event.get( 'store' ).isNested,
-            files = this.inProgress[ id ];
-
-        return files ? files.filter( function ( file ) {
-            return isEdit ? file.inEdit : file.inServer;
-        }) : [];
-    },
-
-    add: function ( event, file ) {
-        var id = event.get( 'storeKey' ),
-            files = this.inProgress[ id ] || ( this.inProgress[ id ] = [] );
-        files.push( file );
-        event.computedPropertyDidChange( 'files' );
-    },
-
-    remove: function ( event, file ) {
-        var id = event.get( 'storeKey' ),
-            isEdit = event.get( 'store' ).isNested,
-            files = this.inProgress[ id ];
-
-        if ( isEdit && file.inServer ) {
-            file.inEdit = false;
-        } else {
-            files.erase( file );
-            if ( !files.length ) {
-                delete this.inProgress[ id ];
-            }
-            file.destroy();
-        }
-        event.computedPropertyDidChange( 'files' );
-    },
-
-    finishEdit: function ( event, source, destination ) {
-        var id = event.get( 'storeKey' ),
-            files = this.inProgress[ id ],
-            l, file;
-        if ( files ) {
-            l = files.length;
-            while ( l-- ) {
-                file = files[l];
-                if ( !file[ source ] ) {
-                    files.splice( l, 1 );
-                    file.destroy();
-                } else {
-                    file[ destination ] = true;
-                }
-            }
-            if ( !files.length ) {
-                delete this.inProgress[ id ];
-            }
-        }
-        delete this.awaitingSave[ id ];
-    },
-
-    save: function ( event ) {
-        var awaitingSave = this.awaitingSave[ event.get( 'storeKey' ) ],
-            i, l;
-        if ( awaitingSave ) {
-            for ( i = 0, l = awaitingSave.length; i < l; i += 1 ) {
-                this.keepFile( awaitingSave[i][0], awaitingSave[i][1] );
-            }
-        }
-        this.finishEdit( event, 'inEdit', 'inServer' );
-        event.getDoppelganger( JMAP.store )
-                 .computedPropertyDidChange( 'files' );
-    },
-
-    discard: function ( event ) {
-        this.finishEdit( event, 'inServer', 'inEdit' );
-        event.getDoppelganger( JMAP.calendar.editStore )
-                .computedPropertyDidChange( 'files' );
-    },
-
-    didUpload: function ( file ) {
-        var inEdit = file.inEdit,
-            inServer = file.inServer,
-            link = {
-                href: file.get( 'url' ),
-                rel: 'enclosure',
-                title: file.get( 'name' ),
-                type: file.get( 'type' ),
-                size: file.get( 'size' )
-            },
-            editEvent = file.editEvent,
-            editLinks = O.clone( editEvent.get( 'links' ) ) || {},
-            id, awaitingSave,
-            serverEvent, serverLinks;
-
-        if ( !inServer ) {
-            id = editEvent.get( 'storeKey' );
-            awaitingSave = this.awaitingSave;
-            ( awaitingSave[ id ] ||
-                ( awaitingSave[ id ] = [] ) ).push([
-                    file.get( 'path' ), file.get( 'name' ) ]);
-            editLinks[ link.href ] = link;
-            editEvent.set( 'links', editLinks );
-            this.remove( editEvent, file );
-        } else {
-            this.keepFile( file.get( 'path' ), file.get( 'name' ) );
-            // Save new attachment to server
-            serverEvent = editEvent.getDoppelganger( JMAP.store );
-            serverLinks = O.clone( serverEvent.get( 'links' ) ) || {};
-            serverLinks[ link.href ] = link;
-            serverEvent.set( 'links', serverLinks );
-            // If in edit, push to edit record as well.
-            if ( inEdit ) {
-                editLinks[ link.href ] = link;
-            }
-            editEvent.set( 'links', editLinks );
-            this.remove( serverEvent, file );
-        }
-    },
-
-    didFail: function ( file ) {
-        var event = file.editEvent;
-        file.inServer = false;
-        this.remove( event, file );
-        event.getDoppelganger( JMAP.store )
-             .computedPropertyDidChange( 'files' );
-    },
-
-    keepFile: function ( path, name ) {
-        // Move attachment from temp
-        JMAP.mail.callMethod( 'moveFile', {
-            path: path,
-            newPath: 'att:/cal/' + name,
-            createFolders: true,
-            mayRename: true
-        });
-    }
-};
-
-var CalendarAttachment = O.Class({
-
-    Extends: JMAP.LocalFile,
-
-    init: function ( file, event ) {
-        this.editEvent = event;
-        this.inServer = false;
-        this.inEdit = true;
-        CalendarAttachment.parent.init.call( this, file );
-    },
-
-    uploadDidSucceed: function () {
-        JMAP.calendar.eventUploads.didUpload( this );
-    },
-    uploadDidFail: function () {
-        JMAP.calendar.eventUploads.didFail( this );
-    }
-});
-
-JMAP.CalendarAttachment = CalendarAttachment;
 
 }( JMAP ) );
 
@@ -4060,15 +4342,15 @@ JMAP.CalendarAttachment = CalendarAttachment;
 // -------------------------------------------------------------------------- \\
 // File: AmbiguousDate.js                                                     \\
 // Module: ContactsModel                                                      \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var AmbiguousDate = O.Class({
+const AmbiguousDate = O.Class({
 
     init: function ( day, month, year ) {
         this.day = day || 0;
@@ -4117,13 +4399,13 @@ var AmbiguousDate = O.Class({
                 ( dayString + monthString + yearString )
         ).trim();
     }
-}).extend({
-    fromJSON: function ( json ) {
-        var parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec( json || '' );
-        return parts ?
-            new AmbiguousDate( +parts[3], +parts[2], +parts[1] ) : null;
-    }
 });
+
+AmbiguousDate.fromJSON = function ( json ) {
+    var parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec( json || '' );
+    return parts ?
+        new AmbiguousDate( +parts[3], +parts[2], +parts[1] ) : null;
+};
 
 JMAP.AmbiguousDate = AmbiguousDate;
 
@@ -4134,18 +4416,26 @@ JMAP.AmbiguousDate = AmbiguousDate;
 // File: Contact.js                                                           \\
 // Module: ContactsModel                                                      \\
 // Requires: API, AmbiguousDate.js                                            \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var Record = O.Record;
-var attr = Record.attr;
+const Class = O.Class;
+const Record = O.Record;
+const attr = Record.attr;
+const sortByProperties = O.sortByProperties;
 
-var Contact = O.Class({
+const auth = JMAP.auth;
+const contacts = JMAP.contacts;
+const AmbiguousDate = JMAP.AmbiguousDate;
+
+// ---
+
+const Contact = Class({
 
     Extends: Record,
 
@@ -4178,11 +4468,11 @@ var Contact = O.Class({
         defaultValue: ''
     }),
 
-    birthday: attr( JMAP.AmbiguousDate, {
-        defaultValue: new JMAP.AmbiguousDate( 0, 0, 0 )
+    birthday: attr( AmbiguousDate, {
+        defaultValue: new AmbiguousDate( 0, 0, 0 )
     }),
-    anniversary: attr( JMAP.AmbiguousDate, {
-        defaultValue: new JMAP.AmbiguousDate( 0, 0, 0 )
+    anniversary: attr( AmbiguousDate, {
+        defaultValue: new AmbiguousDate( 0, 0, 0 )
     }),
 
     company: attr( String, {
@@ -4213,19 +4503,39 @@ var Contact = O.Class({
         defaultValue: ''
     }),
 
+    isEditable: function () {
+        var accountId = this.get( 'accountId' );
+        return !accountId ||
+            !auth.get( 'accounts' )[ accountId ].isReadOnly;
+    }.property( 'accountId' ),
+
     // ---
 
     groups: function () {
         var contact = this;
         return contact
             .get( 'store' )
-            .getAll( JMAP.ContactGroup, null, O.sortByProperties([ 'name' ]) )
+            .getAll( JMAP.ContactGroup, null, sortByProperties([ 'name' ]) )
             .filter( function ( group ) {
                 return group.contains( contact );
            });
-    }.property().nocache(),
+    }.property(),
+
+    groupsDidChange: function () {
+        this.computedPropertyDidChange( 'groups' );
+    },
 
     // ---
+
+    init: function () {
+        Contact.parent.init.apply( this, arguments );
+        this.get( 'store' ).on( JMAP.ContactGroup, this, 'groupsDidChange' );
+    },
+
+    storeWillUnload: function () {
+        this.get( 'store' ).off( JMAP.ContactGroup, this, 'groupsDidChange' );
+        Contact.parent.storeWillUnload.call( this );
+    },
 
     // Destroy dependent records.
     destroy: function () {
@@ -4238,8 +4548,9 @@ var Contact = O.Class({
     // ---
 
     name: function () {
-        var name = ( this.get( 'firstName' ) + ' ' +
-            this.get( 'lastName' ) ).trim();
+        var name = (
+                this.get( 'firstName' ) + ' ' + this.get( 'lastName' )
+            ).trim();
         if ( !name ) {
             name = this.get( 'company' );
         }
@@ -4255,8 +4566,8 @@ var Contact = O.Class({
     }.property( 'name' ),
 
     defaultEmailIndex: function () {
-        var emails = this.get( 'emails' ),
-            i, l;
+        var emails = this.get( 'emails' );
+        var i, l;
         for ( i = 0, l = emails.length; i < l; i += 1 ) {
             if ( emails[i].isDefault ) {
                 return i;
@@ -4271,42 +4582,83 @@ var Contact = O.Class({
     }.property( 'emails' ),
 
     defaultNameAndEmail: function () {
-        var name = this.get( 'emailName' ),
-            email = this.get( 'defaultEmail' );
+        var name = this.get( 'emailName' );
+        var email = this.get( 'defaultEmail' );
         return email ? name ? name + ' <' + email + '>' : email : '';
     }.property( 'emailName', 'defaultEmail' )
 });
+Contact.__guid__ = 'Contact';
+Contact.dataGroup = 'contacts';
 
-JMAP.contacts.handle( Contact, {
+// ---
+
+contacts.handle( Contact, {
+
     precedence: 0, // Before ContactGroup
-    fetch: 'getContacts',
-    refresh: function ( _, state ) {
-        this.callMethod( 'getContactUpdates', {
-            sinceState: state,
-            maxChanges: 100,
-            fetchRecords: true
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'Contact/get', {
+            accountId: accountId,
+            ids: ids || null,
         });
     },
-    commit: 'setContacts',
-    // Response handlers
-    contacts: function ( args, reqMethod, reqArgs ) {
-        this.didFetch( Contact, args,
-            reqMethod === 'getContacts' && !reqArgs.ids );
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'Contact/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'Contact/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: 100,
+            });
+            this.callMethod( 'Contact/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'Contact/changes',
+                    path: '/changed',
+                },
+            });
+        }
     },
-    contactUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Contact, args, reqArgs );
-        if ( args.hasMoreUpdates ) {
+
+    commit: 'Contact/set',
+
+    // ---
+
+    'Contact/get': function ( args, reqMethod, reqArgs ) {
+        const isAll = ( reqArgs.ids === null );
+        this.didFetch( Contact, args, isAll );
+    },
+
+    'Contact/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( Contact, args, hasDataForChanged );
+        if ( args.hasMoreChanges ) {
             this.get( 'store' ).fetchAll( Contact, true );
         }
     },
-    error_getContactUpdates_cannotCalculateChanges: function () {
-        // All our data may be wrong. Refetch everything.
-        this.fetchAllRecords( Contact );
+
+    'Contact/copy': function ( args ) {
+        this.didCopy( Contact, args );
     },
-    contactsSet: function ( args ) {
+
+    'error_Contact/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
+        var accountId = reqArgs.accountId;
+        // All our data may be wrong. Refetch everything.
+        this.fetchAllRecords( accountId, Contact );
+    },
+
+    'Contact/set': function ( args ) {
         this.didCommit( Contact, args );
-    }
+    },
 });
+
+// --- Export
 
 JMAP.Contact = Contact;
 
@@ -4317,38 +4669,51 @@ JMAP.Contact = Contact;
 // File: ContactGroup.js                                                      \\
 // Module: ContactsModel                                                      \\
 // Requires: API, Contact.js                                                  \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var Record = O.Record,
-    attr = Record.attr;
+const loc = O.loc;
+const Class = O.Class;
+const Record = O.Record;
+const attr = Record.attr;
+const ValidationError = O.ValidationError;
+const REQUIRED = ValidationError.REQUIRED;
 
-var ValidationError = O.ValidationError;
-var REQUIRED = ValidationError.REQUIRED;
+const auth = JMAP.auth;
+const contacts = JMAP.contacts;
+const Contact = JMAP.Contact;
 
-var ContactGroup = O.Class({
+// ---
+
+const ContactGroup = Class({
 
     Extends: Record,
+
+    isEditable: function () {
+        var accountId = this.get( 'accountId' );
+        return !accountId ||
+            !auth.get( 'accounts' )[ accountId ].isReadOnly;
+    }.property( 'accountId' ),
 
     name: attr( String, {
         defaultValue: '',
         validate: function ( propValue/*, propKey, record*/ ) {
             if ( !propValue ) {
                 return new ValidationError( REQUIRED,
-                    O.loc( 'S_LABEL_REQUIRED' )
+                    loc( 'S_LABEL_REQUIRED' )
                 );
             }
             return null;
-        }
+        },
     }),
 
     contacts: Record.toMany({
-        recordType: JMAP.Contact,
+        recordType: Contact,
         key: 'contactIds',
         defaultValue: [],
         // Should really check that either:
@@ -4363,7 +4728,7 @@ var ContactGroup = O.Class({
         // we don't bother checking it.
         willSet: function () {
             return true;
-        }
+        },
     }),
 
     contactIndex: function () {
@@ -4378,35 +4743,73 @@ var ContactGroup = O.Class({
 
     contains: function ( contact ) {
         return !!this.get( 'contactIndex' )[ contact.get( 'storeKey' ) ];
-    }
+    },
 });
+ContactGroup.__guid__ = 'ContactGroup';
+ContactGroup.dataGroup = 'contacts';
 
-JMAP.contacts.handle( ContactGroup, {
+// ---
+
+contacts.handle( ContactGroup, {
+
     precedence: 1, // After Contact
-    fetch: 'getContactGroups',
-    refresh: function ( _, state ) {
-        this.callMethod( 'getContactGroupUpdates', {
-            sinceState: state,
-            fetchRecords: true
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'ContactGroup/get', {
+            accountId: accountId,
+            ids: ids || null,
         });
     },
-    commit: 'setContactGroups',
-    // Response handlers
-    contactGroups: function ( args, reqMethod, reqArgs ) {
-        this.didFetch( ContactGroup, args,
-            reqMethod === 'getContactGroups' && !reqArgs.ids );
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'ContactGroup/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'ContactGroup/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: 100,
+            });
+            this.callMethod( 'ContactGroup/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'ContactGroup/changes',
+                    path: '/changed',
+                },
+            });
+        }
     },
-    contactGroupUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( ContactGroup, args, reqArgs );
+
+    commit: 'ContactGroup/set',
+
+    // ---
+
+    'ContactGroup/get': function ( args, _, reqArgs ) {
+        const isAll = ( reqArgs.ids === null );
+        this.didFetch( ContactGroup, args, isAll );
     },
-    error_getContactGroupUpdates_cannotCalculateChanges: function () {
+
+    'ContactGroup/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( ContactGroup, args, hasDataForChanged );
+    },
+
+    'error_ContactGroup/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
+        var accountId = reqArgs.accountId;
         // All our data may be wrong. Refetch everything.
-        this.fetchAllRecords( ContactGroup );
+        this.fetchAllRecords( accountId, ContactGroup );
     },
-    contactGroupsSet: function ( args ) {
+
+    'ContactGroup/set': function ( args ) {
         this.didCommit( ContactGroup, args );
-    }
+    },
 });
+
+// --- Export
 
 JMAP.ContactGroup = ContactGroup;
 
@@ -4417,25 +4820,33 @@ JMAP.ContactGroup = ContactGroup;
 // File: contacts-model.js                                                    \\
 // Module: ContactsModel                                                      \\
 // Requires: API, Contact.js                                                  \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var contactsIndex = new O.Object({
+const Obj = O.Object;
+const NestedStore = O.NestedStore;
+const StoreUndoManager = O.StoreUndoManager;
+
+const Contact = JMAP.Contact;
+const store = JMAP.store;
+const contacts = JMAP.contacts;
+
+// ---
+
+const contactsIndex = new Obj({
     index: null,
     clearIndex: function () {
         this.index = null;
     },
     buildIndex: function () {
-        var index = this.index = {},
-            Contact = JMAP.Contact,
-            store = JMAP.store,
-            storeKeys = store.findAll( Contact ),
-            i, l, contact, emails, ll;
+        var index = this.index = {};
+        var storeKeys = store.findAll( Contact );
+        var i, l, contact, emails, ll;
         for ( i = 0, l = storeKeys.length; i < l; i += 1 ) {
             contact = store.materialiseRecord( storeKeys[i], Contact );
             emails = contact.get( 'emails' );
@@ -4448,25 +4859,161 @@ var contactsIndex = new O.Object({
     },
     getIndex: function () {
         return this.index || this.buildIndex();
-    }
+    },
 });
-JMAP.store.on( JMAP.Contact, contactsIndex, 'clearIndex' );
+store.on( Contact, contactsIndex, 'clearIndex' );
 
-var editStore = new O.NestedStore( JMAP.store );
+// ---
 
-O.extend( JMAP.contacts, {
+const editStore = new NestedStore( store );
+
+Object.assign( contacts, {
     editStore: editStore,
 
-    undoManager: new O.StoreUndoManager({
+    undoManager: new StoreUndoManager({
         store: editStore,
-        maxUndoCount: 10
+        maxUndoCount: 10,
     }),
 
     getContactFromEmail: function ( email ) {
         var index = contactsIndex.getIndex();
         return index[ email.toLowerCase() ] || null;
-    }
+    },
 });
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: Identity.js                                                          \\
+// Module: MailModel                                                          \\
+// Requires: API                                                              \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+'use strict';
+
+( function ( JMAP ) {
+
+const Class = O.Class;
+const Record = O.Record;
+const attr = Record.attr;
+
+// ---
+
+const Identity = Class({
+
+    Extends: Record,
+
+    name: attr( String, {
+        defaultValue: '',
+    }),
+
+    email: attr( String ),
+
+    replyTo: attr( String, {
+        defaultValue: '',
+    }),
+
+    bcc: attr( String, {
+        defaultValue: '',
+    }),
+
+    textSignature: attr( String, {
+        key: 'textSignature',
+        defaultValue: ''
+    }),
+
+    htmlSignature: attr( String, {
+        key: 'htmlSignature',
+        defaultValue: ''
+    }),
+
+    mayDelete: attr( Boolean, {
+        defaultValue: true
+    }),
+
+    // ---
+
+    nameAndEmail: function () {
+        var name = this.get( 'name' ).replace( /["\\]/g, '' );
+        var email = this.get( 'email' );
+        if ( name ) {
+            if ( /[,;<>@()]/.test( name ) ) {
+                name = '"' + name + '"';
+            }
+            return name + ' <' + email + '>';
+        }
+        return email;
+    }.property( 'name', 'email' ),
+});
+Identity.dataGroup = 'mail';
+
+JMAP.mail.handle( Identity, {
+
+    precedence: 2,
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'Identity/get', {
+            accountId: accountId,
+            ids: ids || null,
+        });
+    },
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'Identity/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'Identity/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: 100,
+            });
+            this.callMethod( 'Identity/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'Identity/changes',
+                    path: '/changed',
+                },
+            });
+        }
+    },
+
+    commit: 'Identity/set',
+
+    // ---
+
+    'Identity/get': function ( args, reqMethod, reqArgs ) {
+        const isAll = ( reqArgs.ids === null );
+        this.didFetch( Identity, args, isAll );
+    },
+
+    'Identity/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( Identity, args, hasDataForChanged );
+        if ( args.hasMoreChanges ) {
+            this.get( 'store' ).fetchAll( Identity, true );
+        }
+    },
+
+    'error_Identity/changes_cannotCalculateChanges': function () {
+        // All our data may be wrong. Refetch everything.
+        this.fetchAllRecords( Identity );
+    },
+
+    'Identity/set': function ( args ) {
+        this.didCommit( Identity, args );
+    },
+});
+
+// --- Export
+
+JMAP.Identity = Identity;
 
 }( JMAP ) );
 
@@ -4475,22 +5022,28 @@ O.extend( JMAP.contacts, {
 // File: Mailbox.js                                                           \\
 // Module: MailModel                                                          \\
 // Requires: API                                                              \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var Record = O.Record;
-var attr = Record.attr;
+const loc = O.loc;
+const sortByProperties = O.sortByProperties;
+const Class = O.Class;
+const RecordArray = O.RecordArray;
+const LocalQuery = O.LocalQuery;
+const Record = O.Record;
+const attr = Record.attr;
+const ValidationError = O.ValidationError;
+const REQUIRED = ValidationError.REQUIRED;
+const TOO_LONG = ValidationError.TOO_LONG;
 
-var ValidationError = O.ValidationError;
-var REQUIRED        = ValidationError.REQUIRED;
-var TOO_LONG        = ValidationError.TOO_LONG;
+// ---
 
-var Mailbox = O.Class({
+const Mailbox = Class({
 
     Extends: Record,
 
@@ -4499,12 +5052,12 @@ var Mailbox = O.Class({
         validate: function ( propValue/*, propKey, record*/ ) {
             if ( !propValue ) {
                 return new ValidationError( REQUIRED,
-                    O.loc( 'S_LABEL_REQUIRED' )
+                    loc( 'S_LABEL_REQUIRED' )
                 );
             }
             if ( propValue.length > 256 ) {
                 return new ValidationError( TOO_LONG,
-                    O.loc( 'S_MAIL_ERROR_MAX_CHARS', 256 )
+                    loc( 'S_MAIL_ERROR_MAX_CHARS', 256 )
                 );
             }
             return null;
@@ -4512,9 +5065,15 @@ var Mailbox = O.Class({
     }),
 
     parent: Record.toOne({
-        Type: Mailbox,
+        // Type: Mailbox,
         key: 'parentId',
-        defaultValue: null
+        defaultValue: null,
+        willSet: function ( propValue, propKey, record ) {
+            if ( propValue ) {
+                record.set( 'accountId', propValue.get( 'accountId' ) );
+            }
+            return true;
+        },
     }),
 
     role: attr( String, {
@@ -4527,42 +5086,28 @@ var Mailbox = O.Class({
 
     // ---
 
-    mustBeOnlyMailbox: attr( Boolean, {
-        defaultValue: true,
-        noSync: true
-    }),
-    mayReadItems: attr( Boolean, {
-        defaultValue: true,
-        noSync: true
-    }),
-    mayAddItems: attr( Boolean, {
-        defaultValue: true,
-        noSync: true
-    }),
-    mayRemoveItems: attr( Boolean, {
-        defaultValue: true,
-        noSync: true
-    }),
-    mayCreateChild: attr( Boolean, {
-        defaultValue: true,
-        noSync: true
-    }),
-    mayRename: attr( Boolean, {
-        defaultValue: true,
-        noSync: true
-    }),
-    mayDelete: attr( Boolean, {
-        defaultValue: true,
+    myRights: attr( Boolean, {
+        defaultValue: {
+            mayReadItems: true,
+            mayAddItems: true,
+            mayRemoveItems: true,
+            maySetSeen: true,
+            maySetKeywords: true,
+            mayCreateChild: true,
+            mayRename: true,
+            mayDelete: true,
+            maySubmit: true,
+        },
         noSync: true
     }),
 
     // ---
 
-    totalMessages: attr( Number, {
+    totalEmails: attr( Number, {
         defaultValue: 0,
         noSync: true
     }),
-    unreadMessages: attr( Number, {
+    unreadEmails: attr( Number, {
         defaultValue: 0,
         noSync: true
     }),
@@ -4582,16 +5127,18 @@ var Mailbox = O.Class({
     }.property( 'name' ),
 
     subfolders: function () {
-        var storeKey = this.get( 'storeKey' ),
-            store = this.get( 'store' );
+        var storeKey = this.get( 'storeKey' );
+        var store = this.get( 'store' );
+        var accountId = this.get( 'accountId' );
         return storeKey ?
             store.getAll( Mailbox,
                 function ( data ) {
-                    return data.parentId === storeKey;
+                    return data.accountId === accountId &&
+                        data.parentId === storeKey;
                 },
-                O.sortByProperties([ 'sortOrder', 'name' ])
+                sortByProperties([ 'sortOrder', 'name' ])
             ) :
-            new O.RecordArray( store, Mailbox, [] );
+            new RecordArray( store, Mailbox, [] );
     }.property().nocache(),
 
     depth: function () {
@@ -4610,24 +5157,26 @@ var Mailbox = O.Class({
     // ---
 
     moveTo: function ( dest, where ) {
-        var sub = ( where === 'sub' ),
-            parent = sub ? dest : dest.get( 'parent' ),
-            siblings = parent ?
+        var sub = ( where === 'sub' );
+        var parent = sub ? dest : dest.get( 'parent' );
+        var accountId = dest.get( 'accountId' );
+        var siblings = parent ?
                 parent.get( 'subfolders' ) :
-                this.get( 'store' ).getQuery( 'rootMailboxes', O.LiveQuery, {
+                this.get( 'store' ).getQuery( 'rootMailboxes-' + accountId,
+                LocalQuery, {
                     Type: Mailbox,
-                    filter: function ( data ) {
-                        return !data.parentId;
+                    where: function ( data ) {
+                        return data.accountId === accountId && !data.parentId;
                     },
-                    sort: [ 'sortOrder', 'name' ]
-                }),
-            index = sub ? 0 :
-                siblings.indexOf( dest ) + ( where === 'next' ? 1 : 0 ),
-            prev = index ? siblings.getObjectAt( index - 1 ) : null,
-            next = siblings.getObjectAt( index ),
-            prevSortOrder = prev ? prev.get( 'sortOrder' ) : 0,
-            nextSortOrder = next ? next.get( 'sortOrder' ) : ( index + 2 ) * 32,
-            i, p, l, folder;
+                    sort: [ 'sortOrder', 'name' ],
+                });
+        var index = sub ? 0 :
+                siblings.indexOf( dest ) + ( where === 'next' ? 1 : 0 );
+        var prev = index ? siblings.getObjectAt( index - 1 ) : null;
+        var next = siblings.getObjectAt( index );
+        var prevSortOrder = prev ? prev.get( 'sortOrder' ) : 0;
+        var nextSortOrder = next ? next.get( 'sortOrder' ) : ( index + 2 ) * 32;
+        var i, p, l, folder;
 
         if ( nextSortOrder - prevSortOrder < 2 ) {
             for ( i = 0, p = 32, l = siblings.get( 'length' );
@@ -4651,64 +5200,91 @@ var Mailbox = O.Class({
 
     destroy: function () {
         // Check ACL
-        if ( this.get( 'mayDelete' ) ) {
+        if ( this.get( 'myRights' ).mayDelete ) {
             // Destroy dependent records
             this.get( 'subfolders' ).forEach( function ( folder ) {
                 folder.destroy();
             });
             Mailbox.parent.destroy.call( this );
         }
-    }
+    },
 });
+Mailbox.__guid__ = 'Mailbox';
+Mailbox.dataGroup = 'mail';
 
 Mailbox.prototype.parent.Type = Mailbox;
 
 JMAP.mail.handle( Mailbox, {
+
     precedence: 0,
-    fetch: function ( ids ) {
-        this.callMethod( 'getMailboxes', {
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'Mailbox/get', {
+            accountId: accountId,
             ids: ids || null,
-            properties: null
         });
     },
-    refresh: function ( ids, state ) {
+
+    refresh: function ( accountId, ids, state ) {
         if ( ids ) {
-            this.callMethod( 'getMailboxes', {
+            this.callMethod( 'Mailbox/get', {
+                accountId: accountId,
                 ids: ids,
                 properties: [
-                    'totalMessages', 'unreadMessages',
-                    'totalThreads', 'unreadThreads'
-                ]
+                    'totalEmails', 'unreadEmails',
+                    'totalThreads', 'unreadThreads',
+                ],
             });
         } else {
-            this.callMethod( 'getMailboxUpdates', {
+            this.callMethod( 'Mailbox/changes', {
+                accountId: accountId,
                 sinceState: state,
-                fetchRecords: true,
-                fetchRecordProperties: null
+            });
+            this.callMethod( 'Mailbox/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'Mailbox/changes',
+                    path: '/changed',
+                },
+                '#properties': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'Mailbox/changes',
+                    path: '/changedProperties',
+                },
             });
         }
     },
-    commit: 'setMailboxes',
+
+    commit: 'Mailbox/set',
 
     // ---
 
-    mailboxes: function ( args, reqMethod, reqArgs ) {
-        this.didFetch( Mailbox, args,
-            reqMethod === 'getMailboxes' && !reqArgs.ids );
+    'Mailbox/get': function ( args, _, reqArgs ) {
+        const isAll = ( reqArgs.ids === null );
+        this.didFetch( Mailbox, args, isAll );
     },
 
-    mailboxUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Mailbox, args, reqArgs );
+    'Mailbox/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( Mailbox, args, hasDataForChanged );
+        if ( args.hasMoreChanges ) {
+            this.get( 'store' ).fetchAll( args.accountId, Mailbox, true );
+        }
     },
-    error_getMailboxUpdates_cannotCalculateChanges: function () {
+
+    'error_Mailbox/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
+        var accountId = reqArgs.accountId;
         // All our data may be wrong. Refetch everything.
-        this.fetchAllRecords( Mailbox );
+        this.fetchAllRecords( accountId, Mailbox );
     },
 
-    mailboxesSet: function ( args ) {
+    'Mailbox/set': function ( args ) {
         this.didCommit( Mailbox, args );
-    }
+    },
 });
+
+// --- Export
 
 JMAP.Mailbox = Mailbox;
 
@@ -4719,53 +5295,82 @@ JMAP.Mailbox = Mailbox;
 // File: Message.js                                                           \\
 // Module: MailModel                                                          \\
 // Requires: API, Mailbox.js                                                  \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP, undefined ) {
 
-var Status = O.Status,
-    EMPTY = Status.EMPTY,
-    READY = Status.READY,
-    LOADING = Status.LOADING,
-    NEW = Status.NEW;
+const clone = O.clone;
+const guid = O.guid;
+const i18n = O.i18n;
+const Class = O.Class;
+const Status = O.Status;
+const EMPTY = Status.EMPTY;
+const READY = Status.READY;
+const LOADING = Status.LOADING;
+const NEW = Status.NEW;
+const Record = O.Record;
+const attr = Record.attr;
 
-var Record = O.Record,
-    attr = Record.attr;
+const Mailbox = JMAP.Mailbox;
+const mail = JMAP.mail;
 
-var MessageDetails = O.Class({ Extends: Record });
+// ---
 
-var Message = O.Class({
+const myRightsProperty = function ( permission ) {
+    return function () {
+        return this.get( 'mailboxes' ).every( function ( mailbox ) {
+            return mailbox.get( 'myRights' )[ permission ];
+        });
+    }.property().nocache();
+};
+
+const keywordProperty = function ( keyword ) {
+    return function ( value ) {
+        if ( value !== undefined ) {
+            this.setKeyword( keyword, value );
+        } else {
+            value = this.get( 'keywords' )[ keyword ];
+        }
+        return !!value;
+    }.property( 'keywords' );
+};
+
+const MessageDetails = Class({ Extends: Record });
+const MessageThread = Class({ Extends: Record });
+
+const Message = Class({
 
     Extends: Record,
 
-    threadId: attr( String ),
-
-    thread: function () {
-        var threadId = this.get( 'threadId' );
-        return threadId ?
-            this.get( 'store' ).getRecord( JMAP.Thread, threadId ) : null;
-    }.property( 'threadId' ).nocache(),
-
-    mailboxes: Record.toMany({
-        recordType: JMAP.Mailbox,
-        key: 'mailboxIds'
+    thread: Record.toOne({
+        // Type: JMAP.Thread,
+        key: 'threadId',
+        noSync: true,
     }),
 
-    isUnread: attr( Boolean ),
-    isFlagged: attr( Boolean ),
-    isAnswered: attr( Boolean ),
-    isDraft: attr( Boolean ),
+    mailboxes: Record.toMany({
+        recordType: Mailbox,
+        key: 'mailboxIds',
+        Type: Object,
+    }),
+
+    keywords: attr( Object, {
+        defaultValue: {}
+    }),
+
     hasAttachment: attr( Boolean ),
 
-    sender: attr( Object ),
     from: attr( Array ),
     to: attr( Array ),
     subject: attr( String ),
-    date: attr( Date ),
+
+    receivedAt: attr( Date, {
+        toJSON: Date.toUTCJSON,
+    }),
 
     size: attr( Number ),
 
@@ -4773,24 +5378,61 @@ var Message = O.Class({
 
     // ---
 
+    hasPermission: function ( permission ) {
+        return this.get( 'mailboxes' ).every( function ( mailbox ) {
+            return mailbox.get( 'myRights' )[ permission ];
+        });
+    },
+
     isIn: function ( role ) {
         return this.get( 'mailboxes' ).some( function ( mailbox ) {
             return mailbox.get( 'role' ) === role;
         });
     },
+
     isInTrash: function () {
         return this.isIn( 'trash' );
     }.property( 'mailboxes' ),
 
+    isInNotTrash: function () {
+        return !this.get( 'isInTrash' ) ||
+            ( this.get( 'mailboxes' ).get( 'length' ) > 1 );
+    }.property( 'mailboxes' ),
+
     notifyThread: function () {
-        var threadId = this.get( 'threadId' ),
-            store = this.get( 'store' );
-        if ( threadId &&
-                ( store.getRecordStatus( JMAP.Thread, threadId ) & READY ) ) {
+        var store = this.get( 'store' );
+        var threadSK = this.getData().threadId;
+        if ( store.getStatus( threadSK ) & READY ) {
             this.get( 'thread' ).propertyDidChange( 'messages' );
         }
-    }.queue( 'before' ).observes( 'mailboxes',
-        'isUnread', 'isFlagged', 'isDraft', 'hasAttachment' ),
+    }.queue( 'before' ).observes( 'mailboxes', 'keywords', 'hasAttachment' ),
+
+    // ---
+
+    isUnread: function ( value ) {
+        if ( value !== undefined ) {
+            this.setKeyword( '$seen', !value );
+        } else {
+            value = !this.get( 'keywords' ).$seen;
+        }
+        return value;
+    }.property( 'keywords' ),
+
+    isDraft: keywordProperty( '$draft' ),
+    isFlagged: keywordProperty( '$flagged' ),
+    isAnswered: keywordProperty( '$answered' ),
+    isForwarded: keywordProperty( '$forwarded' ),
+    isPhishing: keywordProperty( '$phishing' ),
+
+    setKeyword: function ( keyword, value ) {
+        var keywords = clone( this.get( 'keywords' ) );
+        if ( value ) {
+            keywords[ keyword ] = true;
+        } else {
+            delete keywords[ keyword ];
+        }
+        return this.set( 'keywords', keywords );
+    },
 
     // ---
 
@@ -4809,24 +5451,17 @@ var Message = O.Class({
     // ---
 
     fullDate: function () {
-        var date = this.get( 'date' );
-        return O.i18n.date( date, 'fullDateAndTime' );
-    }.property( 'date' ),
+        var date = this.get( 'receivedAt' );
+        return i18n.date( date, 'fullDateAndTime' );
+    }.property( 'receivedAt' ),
 
     relativeDate: function () {
-        var date = this.get( 'date' ),
-            now = new Date();
-        // As the server clock may not be exactly in sync with the client's
-        // clock, it's possible to get a message which appears to be dated a
-        // few seconds into the future! Make sure we always display this as
-        // a few minutes ago instead.
-        return date < now ?
-            date.relativeTo( now, true ) :
-            now.relativeTo( date, true );
+        var date = this.get( 'receivedAt' );
+        return date.relativeTo( null, true, true );
     }.property().nocache(),
 
     formattedSize: function () {
-        return O.i18n.fileSize( this.get( 'size' ), 1 );
+        return i18n.fileSize( this.get( 'size' ), 1 );
     }.property( 'size' ),
 
     // ---
@@ -4843,168 +5478,254 @@ var Message = O.Class({
 
     fetchDetails: function () {
         if ( this.get( 'detailsStatus' ) === EMPTY ) {
-            JMAP.mail.fetchRecord( MessageDetails, this.get( 'id' ) );
+            mail.fetchRecord(
+                this.get( 'accountId' ), MessageDetails, this.get( 'id' ) );
             this.set( 'detailsStatus', EMPTY|LOADING );
         }
     },
 
-    blobId: attr( String ),
-
-    inReplyToMessageId: attr( String ),
+    blobId: attr( String, {
+        noSync: true,
+    }),
 
     headers: attr( Object, {
         defaultValue: {}
     }),
 
+    sender: attr( Object ),
     cc: attr( Array ),
     bcc: attr( Array ),
     replyTo: attr( Array ),
+    sentAt: attr( Date ),
 
     textBody: attr( String ),
     htmlBody: attr( String ),
 
     attachments: attr( Array ),
-    attachedMessages: attr( Object ),
-    attachedInvites: attr( Object )
-}).extend({
-    headerProperties: [
-        'threadId',
-        'mailboxIds',
-        'isUnread',
-        'isFlagged',
-        'isAnswered',
-        'isDraft',
-        'hasAttachment',
-        'from',
-        'to',
-        'subject',
-        'date',
-        'size',
-        'preview'
-    ],
-    detailsProperties: [
-        'blobId',
-        'inReplyToMessageId',
-        'headers.list-id',
-        'headers.list-post',
-        'sender',
-        'cc',
-        'bcc',
-        'replyTo',
-        'body',
-        'attachments',
-        'attachedMessages',
-        'attachedInvites'
-    ],
-    Details: MessageDetails
+    attachedEmails: attr( Object ),
 });
+Message.__guid__ = 'Email';
+Message.dataGroup = 'mail';
 
-JMAP.mail.handle( MessageDetails, {
-    fetch: function ( ids ) {
-        this.callMethod( 'getMessages', {
+Message.headerProperties = [
+    'threadId',
+    'mailboxIds',
+    'keywords',
+    'hasAttachment',
+    'from',
+    'to',
+    'subject',
+    'receivedAt',
+    'size',
+    'preview',
+];
+Message.detailsProperties = [
+    'blobId',
+    'headers.message-id',
+    'headers.in-reply-to',
+    'headers.references',
+    'headers.list-id',
+    'headers.list-post',
+    'sender',
+    'cc',
+    'bcc',
+    'replyTo',
+    'sentAt',
+    'body',
+    'attachments',
+    'attachedEmails',
+];
+Message.Details = MessageDetails;
+Message.Thread = MessageThread;
+
+// ---
+
+mail.handle( MessageDetails, {
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'Email/get', {
+            accountId: accountId,
             ids: ids,
-            properties: Message.detailsProperties
+            properties: Message.detailsProperties,
         });
-    }
+    },
 });
 
-JMAP.mail.messageUpdateFetchRecords = true;
-JMAP.mail.messageUpdateMaxChanges = 50;
-JMAP.mail.handle( Message, {
-    fetch: function ( ids ) {
-        this.callMethod( 'getMessages', {
+// ---
+
+mail.handle( MessageThread, {
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'Email/get', {
+            accountId: accountId,
             ids: ids,
+            properties: [ 'threadId' ],
+        });
+        this.callMethod( 'Thread/get', {
+            accountId: accountId,
+            '#ids': {
+                resultOf: this.getPreviousMethodId(),
+                name: 'Email/get',
+                path: '/list/*/threadId',
+            },
+        });
+        this.callMethod( 'Email/get', {
+            accountId: accountId,
+            '#ids': {
+                resultOf: this.getPreviousMethodId(),
+                name: 'Thread/get',
+                path: '/list/*/emailIds',
+            },
             properties: Message.headerProperties
         });
     },
-    refresh: function ( ids, state ) {
+});
+
+// ---
+
+mail.messageChangesFetchRecords = true;
+mail.messageChangesMaxChanges = 50;
+mail.handle( Message, {
+
+    precedence: 1,
+
+    fetch: function ( accountId, ids ) {
+        // Called with ids == null if you try to refresh before we have any
+        // data loaded. Just ignore.
         if ( ids ) {
-            this.callMethod( 'getMessages', {
+            this.callMethod( 'Email/get', {
+                accountId: accountId,
                 ids: ids,
-                properties: [
-                    'mailboxIds',
-                    'isUnread',
-                    'isFlagged',
-                    'isAnswered',
-                    'isDraft',
-                    'hasAttachment'
-                ]
-            });
-        } else {
-            var messageUpdateFetchRecords = this.messageUpdateFetchRecords;
-            this.callMethod( 'getMessageUpdates', {
-                sinceState: state,
-                maxChanges: this.messageUpdateMaxChanges,
-                fetchRecords: messageUpdateFetchRecords,
-                fetchRecordProperties: messageUpdateFetchRecords ?
-                    Message.headerProperties : null
+                properties: Message.headerProperties
             });
         }
     },
-    commit: 'setMessages',
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'Email/get', {
+                accountId: accountId,
+                ids: ids,
+                properties: [
+                    'mailboxIds',
+                    'keywords',
+                ]
+            });
+        } else {
+            this.callMethod( 'Email/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: this.messageChangesMaxChanges,
+            });
+            if ( this.messageChangesFetchRecords ) {
+                this.callMethod( 'Email/get', {
+                    accountId: accountId,
+                    '#ids': {
+                        resultOf: this.getPreviousMethodId(),
+                        name: 'Email/changes',
+                        path: '/changed',
+                    },
+                    properties: Message.headerProperties,
+                });
+            }
+        }
+    },
+
+    commit: 'Email/set',
 
     // ---
 
-    messages: function ( args ) {
-        var first = args.list[0],
-            updates;
-        if ( first && first.date ) {
+    'Email/get': function ( args, _, reqArgs ) {
+        var store = this.get( 'store' );
+        var list = args.list;
+        var accountId = args.accountId;
+        var updates, l, message, data, headers;
+
+        // Merge with any previous fetched headers. This is safe, because
+        // the headers are immutable.
+        l = list.length;
+        while ( l-- ) {
+            message = list[l];
+            if ( message.headers ) {
+                data = store.getData(
+                    store.getStoreKey( accountId, Message, message.id )
+                );
+                headers = data && data.headers;
+                if ( headers ) {
+                    Object.assign( message.headers, headers );
+                }
+            }
+        }
+
+        if ( !message || message.receivedAt ) {
             this.didFetch( Message, args );
-        } else {
+        } else if ( !reqArgs.properties || reqArgs.properties.length > 1 ) {
             updates = args.list.reduce( function ( updates, message ) {
                 updates[ message.id ] = message;
                 return updates;
             }, {} );
-            this.get( 'store' )
-                .sourceDidFetchPartialRecords( Message, updates );
+            store.sourceDidFetchPartialRecords( accountId, Message, updates );
         }
     },
-    messageUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Message, args, reqArgs );
-        if ( !reqArgs.fetchRecords ) {
+
+    'Email/changes': function ( args ) {
+        const hasDataForChanged = this.messageChangesFetchRecords;
+        this.didFetchUpdates( Message, args, hasDataForChanged );
+        if ( !hasDataForChanged ) {
             this.recalculateAllFetchedWindows();
         }
-        if ( args.hasMoreUpdates ) {
-            var messageUpdateMaxChanges = this.messageUpdateMaxChanges;
-            if ( messageUpdateMaxChanges < 150 ) {
-                if ( messageUpdateMaxChanges === 50 ) {
+        if ( args.hasMoreChanges ) {
+            var messageChangesMaxChanges = this.messageChangesMaxChanges;
+            if ( messageChangesMaxChanges < 150 ) {
+                if ( messageChangesMaxChanges === 50 ) {
                     // Keep fetching updates, just without records
-                    this.messageUpdateFetchRecords = false;
-                    this.messageUpdateMaxChanges = 100;
+                    this.messageChangesFetchRecords = false;
+                    this.messageChangesMaxChanges = 100;
                 } else {
-                    this.messageUpdateMaxChanges = 150;
+                    this.messageChangesMaxChanges = 150;
                 }
-                this.get( 'store' ).fetchAll( Message, true );
+                this.get( 'store' ).fetchAll( args.accountId, Message, true );
                 return;
             } else {
                 // We've fetched 300 updates and there's still more. Let's give
                 // up and reset.
-                this.response
-                    .error_getMessageUpdates_cannotCalculateChanges
+                this.response[ 'error_Email/changes_cannotCalculateChanges' ]
                     .call( this, args );
             }
         }
-        this.messageUpdateFetchRecords = true;
-        this.messageUpdateMaxChanges = 50;
+        this.messageChangesFetchRecords = true;
+        this.messageChangesMaxChanges = 50;
     },
-    error_getMessageUpdates_cannotCalculateChanges: function ( args ) {
+
+    'error_Email/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
         var store = this.get( 'store' );
+        var accountId = reqArgs.accountId;
         // All our data may be wrong. Mark all messages as obsolete.
         // The garbage collector will eventually clean up any messages that
         // no longer exist
         store.getAll( Message ).forEach( function ( message ) {
-            message.setObsolete();
+            if ( message.get( 'accountId' ) === accountId ) {
+                message.setObsolete();
+            }
         });
         this.recalculateAllFetchedWindows();
         // Tell the store we're now in the new state.
-        store.sourceDidFetchUpdates(
-            Message, null, null, store.getTypeState( Message ), '' );
-
+        store.sourceDidFetchUpdates( accountId,
+            Message, null, null, store.getTypeState( accountId, Message ), '' );
     },
-    messagesSet: function ( args ) {
+
+    'Email/set': function ( args, reqName ) {
+        // If we did a set implicitly on successful send, the change is not in
+        // the store, so don't call didCommit; we've fetched the changes
+        // as well, so we'll be up to date. We do need to invalidate all the
+        // MessageList queries though.
+        if ( reqName === 'EmailSubmission/set' ) {
+            this.get( 'store' ).fire( guid( Message ) + ':server' );
+            return;
+        }
         this.didCommit( Message, args );
-    }
+    },
 });
+
+// --- Export
 
 JMAP.Message = Message;
 
@@ -5015,76 +5736,112 @@ JMAP.Message = Message;
 // File: Thread.js                                                            \\
 // Module: MailModel                                                          \\
 // Requires: API, Message.js                                                  \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
+'use strict';
+
 ( function ( JMAP ) {
 
-var Record = O.Record;
+const meta = O.meta;
+const Class = O.Class;
+const ObservableArray = O.ObservableArray;
+const Record = O.Record;
+const READY = O.Status.READY;
 
-var aggregateBoolean = function ( _, key ) {
-    return this.get( 'messagesNotInTrash' ).reduce(
+const Message = JMAP.Message;
+
+// ---
+
+const isInTrash = function ( message ) {
+    return message.is( READY ) && message.get( 'isInTrash' );
+};
+const isInNotTrash = function ( message ) {
+    return message.is( READY ) && message.get( 'isInNotTrash' );
+};
+
+const aggregateBoolean = function ( _, key ) {
+    return this.get( 'messages' ).reduce(
     function ( isProperty, message ) {
         return isProperty || message.get( key );
     }, false );
 }.property( 'messages' ).nocache();
 
-var aggregateBooleanInTrash = function ( _, key ) {
+const aggregateBooleanInNotTrash = function ( _, key ) {
+    key = key.slice( 0, -10 );
+    return this.get( 'messagesInNotTrash' ).reduce(
+    function ( isProperty, message ) {
+        return isProperty || message.get( key );
+    }, false );
+}.property( 'messages' ).nocache();
+
+const aggregateBooleanInTrash = function ( _, key ) {
+    key = key.slice( 0, -7 );
     return this.get( 'messagesInTrash' ).reduce(
     function ( isProperty, message ) {
         return isProperty || message.get( key );
     }, false );
 }.property( 'messages' ).nocache();
 
-var toFrom = function ( message ) {
+const total = function( property ) {
+    return function () {
+        return this.get( property ).get( 'length' );
+    }.property( 'messages' ).nocache();
+};
+
+// senders is [{name: String, email: String}]
+const toFrom = function ( message ) {
     var from = message.get( 'from' );
     return from && from[0] || null;
 };
-
-var sumSize = function ( size, message ) {
-    return size + message.get( 'size' );
+const senders = function( property ) {
+    return function () {
+        return this.get( property )
+                   .map( toFrom )
+                   .filter( O.Transform.toBoolean );
+    }.property( 'messages' ).nocache();
 };
 
-var isInTrash = function ( message ) {
-    return message.isIn( 'trash' );
+const sumSize = function ( size, message ) {
+    return size + ( message.get( 'size' ) || 0 );
 };
-var notInTrash = function ( message ) {
-    return !message.isIn( 'trash' );
+const size = function( property ) {
+    return function () {
+        return this.get( property ).reduce( sumSize, 0 );
+    }.property( 'messages' ).nocache();
 };
 
-var Thread = O.Class({
+const Thread = Class({
 
     Extends: Record,
 
     isEditable: false,
 
     messages: Record.toMany({
-        recordType: JMAP.Message,
-        key: 'messageIds'
+        recordType: Message,
+        key: 'emailIds',
     }),
 
-    messagesNotInTrash: function () {
-        return new O.ObservableArray(
-            this.get( 'messages' ).filter( notInTrash )
+    messagesInNotTrash: function () {
+        return new ObservableArray(
+            this.get( 'messages' ).filter( isInNotTrash )
         );
     }.property(),
 
     messagesInTrash: function () {
-        return new O.ObservableArray(
+        return new ObservableArray(
             this.get( 'messages' ).filter( isInTrash )
          );
     }.property(),
 
     _setMessagesArrayContent: function () {
-        var cache = O.meta( this ).cache;
-        var messagesNotInTrash = cache.messagesNotInTrash;
+        var cache = meta( this ).cache;
+        var messagesInNotTrash = cache.messagesInNotTrash;
         var messagesInTrash = cache.messagesInTrash;
-        if ( messagesNotInTrash ) {
-            messagesNotInTrash.set( '[]',
-                this.get( 'messages' ).filter( notInTrash )
+        if ( messagesInNotTrash ) {
+            messagesInNotTrash.set( '[]',
+                this.get( 'messages' ).filter( isInNotTrash )
             );
         }
         if ( messagesInTrash ) {
@@ -5096,9 +5853,11 @@ var Thread = O.Class({
 
     isAll: function ( status ) {
         return this.is( status ) &&
-            this.get( 'messages' ).every( function ( message ) {
-                return message.is( status );
-            });
+            // .reduce instead of .every so we deliberately fetch every record
+            // object from the store, triggering a fetch if not loaded
+            this.get( 'messages' ).reduce( function ( isStatus, message ) {
+                return isStatus && message.is( status );
+            }, true );
     },
 
     // Note: API Mail mutates this value; do not cache.
@@ -5106,12 +5865,8 @@ var Thread = O.Class({
         var counts = {};
         this.get( 'messages' ).forEach( function ( message ) {
             message.get( 'mailboxes' ).forEach( function ( mailbox ) {
-                var id = mailbox.get( 'id' );
-                if ( message.get( 'isInTrash' ) &&
-                        mailbox.get( 'role' ) !== 'trash' ) {
-                    return;
-                }
-                counts[ id ] = ( counts[ id ] ||  0 ) + 1;
+                var storeKey = mailbox.get( 'storeKey' );
+                counts[ storeKey ] = ( counts[ storeKey ] ||  0 ) + 1;
             });
         });
         return counts;
@@ -5124,20 +5879,20 @@ var Thread = O.Class({
     isDraft: aggregateBoolean,
     hasAttachment: aggregateBoolean,
 
-    total: function () {
-        return this.get( 'messagesNotInTrash' ).get( 'length' );
-    }.property( 'messages' ).nocache(),
+    total: total( 'messages' ),
+    senders: senders( 'messages' ),
+    size: size( 'messages' ),
 
-    // senders is [{name: String, email: String}]
-    senders: function () {
-        return this.get( 'messagesNotInTrash' )
-                   .map( toFrom )
-                   .filter( O.Transform.toBoolean );
-    }.property( 'messages' ).nocache(),
+    // ---
 
-    size: function () {
-        return this.get( 'messagesNotInTrash' ).reduce( sumSize, 0 );
-    }.property( 'messages' ).nocache(),
+    isUnreadInNotTrash: aggregateBooleanInNotTrash,
+    isFlaggedInNotTrash: aggregateBooleanInNotTrash,
+    isDraftInNotTrash: aggregateBooleanInNotTrash,
+    hasAttachmentInNotTrash: aggregateBooleanInNotTrash,
+
+    totalInNotTrash: total( 'messagesInNotTrash' ),
+    sendersInNotTrash: senders( 'messagesInNotTrash' ),
+    sizeInNotTrash: size( 'messagesInNotTrash' ),
 
     // ---
 
@@ -5146,62 +5901,85 @@ var Thread = O.Class({
     isDraftInTrash: aggregateBooleanInTrash,
     hasAttachmentInTrash: aggregateBooleanInTrash,
 
-    totalInTrash: function () {
-        return this.get( 'messagesInTrash' ).get( 'length' );
-    }.property( 'messages' ).nocache(),
-
-    sendersInTrash: function () {
-        return this.get( 'messagesInTrash' )
-                   .map( toFrom )
-                   .filter( O.Transform.toBoolean );
-    }.property( 'messages' ).nocache(),
-
-    sizeInTrash: function () {
-        return this.get( 'messagesInTrash' ).reduce( sumSize, 0 );
-    }.property( 'messages' ).nocache()
+    totalInTrash: total( 'messagesInTrash' ),
+    sendersInTrash: senders( 'messagesInTrash' ),
+    sizeInTrash: size( 'messagesInTrash' )
 });
+Thread.__guid__ = 'Thread';
+Thread.dataGroup = 'mail';
 
-JMAP.mail.threadUpdateFetchRecords = true;
-JMAP.mail.threadUpdateMaxChanges = 30;
+JMAP.mail.threadChangesFetchRecords = true;
+JMAP.mail.threadChangesMaxChanges = 30;
 JMAP.mail.handle( Thread, {
-    fetch: function ( ids ) {
-        this.callMethod( 'getThreads', {
-            ids: ids,
-            fetchMessages: true,
-            fetchMessageProperties: JMAP.Message.headerProperties
-        });
-    },
-    refresh: function ( ids, state ) {
+
+    fetch: function ( accountId, ids ) {
+        // Called with ids == null if you try to refresh before we have any
+        // data loaded. Just ignore.
         if ( ids ) {
-            this.fetchRecords( Thread, ids );
-        } else {
-            this.callMethod( 'getThreadUpdates', {
-                sinceState: state,
-                maxChanges: this.threadUpdateMaxChanges,
-                fetchRecords: this.threadUpdateFetchRecords
+            this.callMethod( 'Thread/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+            this.callMethod( 'Email/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'Thread/get',
+                    path: '/list/*/emailIds',
+                },
+                properties: Message.headerProperties,
             });
         }
     },
-    // Response handler
-    threads: function ( args ) {
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'Thread/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'Thread/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: this.threadChangesMaxChanges,
+            });
+            if ( this.threadChangesFetchRecords ) {
+                this.callMethod( 'Thread/get', {
+                    accountId: accountId,
+                    '#ids': {
+                        resultOf: this.getPreviousMethodId(),
+                        name: 'Thread/changes',
+                        path: '/changed',
+                    },
+                });
+            }
+        }
+    },
+
+    //  ---
+
+    'Thread/get': function ( args ) {
         this.didFetch( Thread, args );
     },
-    threadUpdates: function ( args, _, reqArgs ) {
-        this.didFetchUpdates( Thread, args, reqArgs );
-        if ( !reqArgs.fetchRecords ) {
+
+    'Thread/changes': function ( args ) {
+        const hasDataForChanged = this.threadChangesFetchRecords;
+        this.didFetchUpdates( Thread, args, hasDataForChanged );
+        if ( !hasDataForChanged ) {
             this.recalculateAllFetchedWindows();
         }
-        if ( args.hasMoreUpdates ) {
-            var threadUpdateMaxChanges = this.threadUpdateMaxChanges;
-            if ( threadUpdateMaxChanges < 120 ) {
-                if ( threadUpdateMaxChanges === 30 ) {
+        if ( args.hasMoreChanges ) {
+            const threadChangesMaxChanges = this.threadChangesMaxChanges;
+            if ( threadChangesMaxChanges < 120 ) {
+                if ( threadChangesMaxChanges === 30 ) {
                     // Keep fetching updates, just without records
-                    this.threadUpdateFetchRecords = false;
-                    this.threadUpdateMaxChanges = 100;
+                    this.threadChangesFetchRecords = false;
+                    this.threadChangesMaxChanges = 100;
                 } else {
-                    this.threadUpdateMaxChanges = 120;
+                    this.threadChangesMaxChanges = 120;
                 }
-                this.get( 'store' ).fetchAll( Thread, true );
+                this.get( 'store' ).fetchAll( args.accountId, Thread, true );
                 return;
             } else {
                 // We've fetched 250 updates and there's still more. Let's give
@@ -5211,24 +5989,37 @@ JMAP.mail.handle( Thread, {
                     .call( this, args );
             }
         }
-        this.threadUpdateFetchRecords = true;
-        this.threadUpdateMaxChanges = 30;
+        this.threadChangesFetchRecords = true;
+        this.threadChangesMaxChanges = 30;
     },
-    error_getThreadUpdates_cannotCalculateChanges: function ( args ) {
+
+    'error_Thread/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
         var store = this.get( 'store' );
+        var accountId = reqArgs.accountId;
         // All our data may be wrong. Unload if possible, otherwise mark
         // obsolete.
         store.getAll( Thread ).forEach( function ( thread ) {
-            if ( !store.unloadRecord( thread.get( 'storeKey' ) ) ) {
-                thread.setObsolete();
+            if ( thread.get( 'accountId' ) === accountId ) {
+                if ( !store.unloadRecord( thread.get( 'storeKey' ) ) ) {
+                    thread.setObsolete();
+                }
             }
         });
         this.recalculateAllFetchedWindows();
         // Tell the store we're now in the new state.
         store.sourceDidFetchUpdates(
-            Thread, null, null, store.getTypeState( Thread ), '' );
-    }
+            accountId, Thread, null, null,
+            store.getTypeState( accountId, Thread ), ''
+        );
+    },
 });
+
+// ---
+
+// Circular dependency
+Message.prototype.thread.Type = Thread;
+
+// --- Export
 
 JMAP.Thread = Thread;
 
@@ -5239,60 +6030,51 @@ JMAP.Thread = Thread;
 // File: MessageList.js                                                       \\
 // Module: MailModel                                                          \\
 // Requires: API, Message.js, Thread.js                                       \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP, JSON */
+/*global O, JMAP */
+
+'use strict';
 
 ( function ( JMAP, undefined ) {
 
-var Status = O.Status;
-var EMPTY = Status.EMPTY;
-var OBSOLETE = Status.OBSOLETE;
+const Class = O.Class;
+const WindowedQuery = O.WindowedQuery;
+const isEqual = O.isEqual;
+const Status = O.Status;
+const EMPTY = Status.EMPTY;
+const READY = Status.READY;
+const OBSOLETE = Status.OBSOLETE;
 
-var Message = JMAP.Message;
-var Thread = JMAP.Thread;
+const getQueryId = JMAP.getQueryId;
+const Message = JMAP.Message;
 
-var isFetched = function ( message ) {
+// ---
+
+const isFetched = function ( message ) {
     return !message.is( EMPTY|OBSOLETE );
 };
-var refresh = function ( record ) {
+const refresh = function ( record ) {
     if ( record.is( OBSOLETE ) ) {
-        record.refresh();
+        record.fetch();
     }
 };
 
-var EMPTY_SNIPPET = {
-    body: ' '
+const EMPTY_SNIPPET = {
+    body: ' ',
 };
 
-var stringifySorted = function ( item ) {
-    if ( !item || ( typeof item !== 'object' ) ) {
-        return JSON.stringify( item );
-    }
-    if ( item instanceof Array ) {
-        return '[' + item.map( stringifySorted ).join( ',' ) + ']';
-    }
-    var keys = Object.keys( item );
-    keys.sort();
-    return '{' + keys.map( function ( key ) {
-        return '"' + key + '":' + stringifySorted( item[ key ] );
-    }).join( ',' ) + '}';
+const getId = function ( args ) {
+    return getQueryId( Message, args ) + ( args.collapseThreads ? '+' : '-' );
 };
 
-var getId = function ( args ) {
-    return 'ml:' + stringifySorted( args.filter ) +
-        ( args.collapseThreads ? '+' : '-' );
-};
+const MessageList = Class({
 
-var MessageList = O.Class({
-
-    Extends: O.WindowedRemoteQuery,
+    Extends: WindowedQuery,
 
     optimiseFetching: true,
 
-    sort: [ 'date desc' ],
+    sort: [{ property: 'receivedAt', isAscending: false }],
     collapseThreads: true,
 
     Type: Message,
@@ -5301,34 +6083,33 @@ var MessageList = O.Class({
         this._snippets = {};
         this._snippetsNeeded = [];
 
-        this.messageToThreadSK = {};
-
-        MessageList.parent.init.call( this, options );
+        MessageList.parent.constructor.call( this, options );
     },
 
     // Precondition: All ids are fetched for the window to be checked.
     checkIfWindowIsFetched: function ( index ) {
         var store = this.get( 'store' );
         var windowSize = this.get( 'windowSize' );
-        var list = this._list;
+        var storeKeys = this.getStoreKeys();
         var i = index * windowSize;
         var l = Math.min( i + windowSize, this.get( 'length' ) );
         var collapseThreads = this.get( 'collapseThreads' );
-        var messageToThreadSK = this.messageToThreadSK;
         var messageSK, threadSK, thread;
         for ( ; i < l; i += 1 ) {
-            messageSK = list[i];
+            messageSK = storeKeys[i];
             // No message, or out-of-date
             if ( store.getStatus( messageSK ) & (EMPTY|OBSOLETE) ) {
                 return false;
             }
             if ( collapseThreads ) {
-                threadSK = messageToThreadSK[ messageSK ];
+                threadSK = store.getRecordFromStoreKey( messageSK )
+                                .getData()
+                                .threadId;
                 // No thread, or out-of-date
-                if ( store.getStatus( Thread, threadSK ) & (EMPTY|OBSOLETE) ) {
+                if ( store.getStatus( threadSK ) & (EMPTY|OBSOLETE) ) {
                     return false;
                 }
-                thread = store.getRecord( Thread, '#' + threadSK );
+                thread = store.getRecordFromStoreKey( threadSK );
                 return thread.get( 'messages' ).every( isFetched );
             }
         }
@@ -5340,39 +6121,46 @@ var MessageList = O.Class({
 
         // If we have all the ids already, optimise the loading of the records.
         var store = this.get( 'store' );
-        var list = this._list;
+        var storeKeys = this.getStoreKeys();
         var length = this.get( 'length' );
         var collapseThreads = this.get( 'collapseThreads' );
-        var messageToThreadSK = this.messageToThreadSK;
 
         req.records = req.records.filter( function ( req ) {
             var i = req.start;
             var l = i + req.count;
-            var message, thread, messageSK, threadSK;
+            var message, thread, messageSK;
 
             if ( length ) {
                 l = Math.min( l, length );
             }
 
             while ( i < l ) {
-                messageSK = list[i];
+                messageSK = storeKeys[i];
                 if ( messageSK ) {
                     i += 1;
                 } else {
-                    messageSK = list[ l - 1 ];
+                    messageSK = storeKeys[ l - 1 ];
                     if ( !messageSK ) { break; }
                     l -= 1;
                 }
                 // Fetch the Message objects (if not already fetched).
                 // If already fetched, fetch the updates
                 if ( collapseThreads ) {
-                    threadSK = messageToThreadSK[ messageSK ];
-                    thread = store.getRecord( Thread, '#' + threadSK );
-                    // If already fetched, fetch the updates
-                    refresh( thread );
-                    thread.get( 'messages' ).forEach( refresh );
+                    if ( store.getStatus( messageSK ) & READY ) {
+                        thread = store.getRecordFromStoreKey( messageSK )
+                                      .get( 'thread' );
+                        // If already fetched, fetch the updates
+                        refresh( thread );
+                        thread.get( 'messages' ).forEach( refresh );
+                    } else {
+                        JMAP.mail.fetchRecord(
+                            store.getAccountIdFromStoreKey( messageSK ),
+                            Message.Thread,
+                            store.getIdFromStoreKey( messageSK )
+                        );
+                    }
                 } else {
-                    message = store.getRecord( Message, '#' + messageSK );
+                    message = store.getRecordFromStoreKey( messageSK );
                     refresh( message );
                 }
             }
@@ -5386,50 +6174,49 @@ var MessageList = O.Class({
 
     // --- Snippets ---
 
-    sourceDidFetchSnippets: function ( snippets ) {
-        var store = JMAP.store,
-            Message = JMAP.Message,
-            READY = O.Status.READY,
-            l = snippets.length,
-            snippet, messageId;
+    sourceDidFetchSnippets: function ( accountId, snippets ) {
+        var store = this.get( 'store' );
+        var l = snippets.length;
+        var snippet, emailId;
         while ( l-- ) {
             snippet = snippets[l];
-            messageId = snippet.messageId;
-            this._snippets[ messageId ] = snippet;
-            if ( store.getRecordStatus( Message, messageId ) & READY ) {
+            emailId = snippet.emailId;
+            this._snippets[ emailId ] = snippet;
+            if ( store.getRecordStatus(
+                    accountId, Message, emailId ) & READY ) {
                 // There is no "snippet" property, but this triggers the
                 // observers of * property changes on the object.
-                store.getRecord( Message, messageId )
+                store.getRecord( accountId, Message, emailId )
                      .propertyDidChange( 'snippet' );
             }
         }
     },
 
-    getSnippet: function ( messageId ) {
-        var snippet = this._snippets[ messageId ];
+    getSnippet: function ( emailId ) {
+        var snippet = this._snippets[ emailId ];
         if ( !snippet ) {
-            this._snippetsNeeded.push( messageId );
-            this._snippets[ messageId ] = snippet = EMPTY_SNIPPET;
+            this._snippetsNeeded.push( emailId );
+            this._snippets[ emailId ] = snippet = EMPTY_SNIPPET;
             this.fetchSnippets();
         }
         return snippet;
     },
 
     fetchSnippets: function () {
-        JMAP.mail.callMethod( 'getSearchSnippets', {
-            messageIds: this._snippetsNeeded,
-            filter: this.get( 'filter' ),
-            // Not part of the getSearchSnippets call, but needed to identify
-            // this list again to give the response to.
-            collapseThreads: this.get( 'collapseThreads' )
+        JMAP.mail.callMethod( 'SearchSnippet/get', {
+            accountId: this.get( 'accountId' ),
+            emailIds: this._snippetsNeeded,
+            filter: this.get( 'where' ),
         });
         this._snippetsNeeded = [];
     }.queue( 'after' )
 });
+MessageList.getId = getId;
 
 JMAP.mail.handle( MessageList, {
     query: function ( query ) {
-        var filter = query.get( 'filter' );
+        var accountId = query.get( 'accountId' );
+        var where = query.get( 'where' );
         var sort = query.get( 'sort' );
         var collapseThreads = query.get( 'collapseThreads' );
         var canGetDeltaUpdates = query.get( 'canGetDeltaUpdates' );
@@ -5438,18 +6225,19 @@ JMAP.mail.handle( MessageList, {
         var hasMadeRequest = false;
 
         if ( canGetDeltaUpdates && state && request.refresh ) {
-            var list = query._list;
-            var length = list.length;
+            var storeKeys = query.getStoreKeys();
+            var length = storeKeys.length;
             var upto = ( length === query.get( 'length' ) ) ?
-                    undefined : list[ length - 1 ];
-            this.callMethod( 'getMessageListUpdates', {
-                filter: filter,
+                    undefined : storeKeys[ length - 1 ];
+            this.callMethod( 'Email/queryChanges', {
+                accountId: accountId,
+                filter: where,
                 sort: sort,
                 collapseThreads: collapseThreads,
                 sinceState: state,
-                uptoMessageId: upto ?
-                    JMAP.store.getIdFromStoreKey( upto ) : null,
-                maxChanges: 250
+                upToId: upto ?
+                    this.get( 'store' ).getIdFromStoreKey( upto ) : null,
+                maxChanges: 250,
             });
         }
 
@@ -5459,20 +6247,47 @@ JMAP.mail.handle( MessageList, {
 
         var get = function ( start, count, anchor, offset, fetchData ) {
             hasMadeRequest = true;
-            this.callMethod( 'getMessageList', {
-                filter: filter,
+            this.callMethod( 'Email/query', {
+                accountId: accountId,
+                filter: where,
                 sort: sort,
                 collapseThreads: collapseThreads,
                 position: start,
                 anchor: anchor,
                 anchorOffset: offset,
                 limit: count,
-                fetchThreads: collapseThreads && fetchData,
-                fetchMessages: fetchData,
-                fetchMessageProperties: fetchData ?
-                    JMAP.Message.headerProperties : null,
-                fetchSearchSnippets: false
             });
+            if ( fetchData ) {
+                this.callMethod( 'Email/get', {
+                    accountId: accountId,
+                    '#ids': {
+                        resultOf: this.getPreviousMethodId(),
+                        name: 'Email/query',
+                        path: '/ids',
+                    },
+                    properties: collapseThreads ?
+                        [ 'threadId' ] : Message.headerProperties,
+                });
+                if ( collapseThreads ) {
+                    this.callMethod( 'Thread/get', {
+                        accountId: accountId,
+                        '#ids': {
+                            resultOf: this.getPreviousMethodId(),
+                            name: 'Email/get',
+                            path: '/list/*/threadId',
+                        },
+                    });
+                    this.callMethod( 'Email/get', {
+                        accountId: accountId,
+                        '#ids': {
+                            resultOf: this.getPreviousMethodId(),
+                            name: 'Thread/get',
+                            path: '/list/*/emailIds',
+                        },
+                        properties: Message.headerProperties
+                    });
+                }
+            }
         }.bind( this );
 
         request.ids.forEach( function ( req ) {
@@ -5486,75 +6301,53 @@ JMAP.mail.handle( MessageList, {
             this.addCallback( req[1] );
         }, this );
 
-        if ( ( ( query.get( 'status' ) & O.Status.EMPTY ) &&
+        if ( ( ( query.get( 'status' ) & EMPTY ) &&
                 !request.records.length ) ||
              ( !canGetDeltaUpdates && !hasMadeRequest && request.refresh ) ) {
-            get( 0, 30, undefined, undefined, true );
+            get( 0, query.get( 'windowSize' ), undefined, undefined, true );
         }
     },
 
     // ---
 
-    messageList: function ( args ) {
+    'Email/query': function ( args ) {
+        args.filter = args.filter || null;
+        args.sort = args.sort || null;
+        args.idList = args.ids;
+
         var store = this.get( 'store' );
         var query = store.getQuery( getId( args ) );
-        var messageToThreadSK, messageIds, threadIds, l;
 
-        if ( query &&
-                args.collapseThreads === query.get( 'collapseThreads' ) ) {
-            messageToThreadSK = query.messageToThreadSK;
-            threadIds = args.threadIds;
-            messageIds = args.idList = args.messageIds;
-            l = messageIds.length;
-            while ( l-- ) {
-                messageToThreadSK[
-                    store.getStoreKey( Message, messageIds[l] )
-                ] = store.getStoreKey( Thread, threadIds[l] );
-            }
-            query.set( 'canGetDeltaUpdates', args.canCalculateUpdates );
+        if ( query ) {
+            query.set( 'canGetDeltaUpdates', args.canCalculateChanges );
             query.sourceDidFetchIdList( args );
         }
     },
 
-    error_getMessageList_anchorNotFound: function (/* args */) {
-        // Don't need to do anything; it's only used for doing indexOf,
-        // and it will just check that it doesn't have it.
-    },
+    'Email/queryChanges': function ( args ) {
+        args.filter = args.filter || null;
+        args.sort = args.sort || null;
+        args.removed = args.removed || [];
+        args.added = args.added ? args.added.map( function ( item ) {
+            return [ item.index, item.id ];
+        }) : [];
+        args.upto = args.upToId;
 
-    messageListUpdates: function ( args ) {
         var store = this.get( 'store' );
         var query = store.getQuery( getId( args ) );
-        var messageToThreadSK;
 
-        if ( query &&
-                args.collapseThreads === query.get( 'collapseThreads' ) ) {
-            messageToThreadSK = query.messageToThreadSK;
-            args.upto = args.uptoMessageId;
-            args.removed = args.removed.map( function ( obj ) {
-                var messageId = obj.messageId;
-                delete messageToThreadSK[
-                    store.getStoreKey( Message, messageId )
-                ];
-                return messageId;
-            });
-            args.added = args.added.map( function ( obj ) {
-                var messageId = obj.messageId;
-                messageToThreadSK[
-                    store.getStoreKey( Message, messageId )
-                ] = store.getStoreKey( Thread, obj.threadId );
-                return [ obj.index, messageId ];
-            });
+        if ( query ) {
             query.sourceDidFetchUpdate( args );
         }
     },
 
-    error_getMessageListUpdates_cannotCalculateChanges: function ( _, __, requestArgs ) {
-        this.response.error_getMessageListUpdates_tooManyChanges
-            .call( this,  _, __, requestArgs );
+    'error_Email/queryChanges_cannotCalculateChanges': function ( _, __, reqArgs ) {
+        this.response[ 'error_Email/queryChanges_tooManyChanges' ]
+            .call( this,  _, __, reqArgs );
     },
 
-    error_getMessageListUpdates_tooManyChanges: function ( _, __, requestArgs ) {
-        var query = this.get( 'store' ).getQuery( getId( requestArgs ) );
+    'error_Email/queryChanges_tooManyChanges': function ( _, __, reqArgs ) {
+        var query = this.get( 'store' ).getQuery( getId( reqArgs ) );
         if ( query ) {
             query.reset();
         }
@@ -5562,25 +6355,29 @@ JMAP.mail.handle( MessageList, {
 
     // ---
 
-    searchSnippets: function ( args ) {
-        var store = this.get( 'store' ),
-            query = store.getQuery( getId( args ) );
-        if ( query ) {
-            query.sourceDidFetchSnippets( args.list );
-        }
-    }
+    'SearchSnippet/get': function ( args ) {
+        var store = this.get( 'store' );
+        var where = args.filter;
+        var list = args.list;
+        var accountId = args.accountId;
+        store.getAllQueries().forEach( function ( query ) {
+            if ( isEqual( query.get( 'where' ), where ) ) {
+                query.sourceDidFetchSnippets( accountId, list );
+            }
+        });
+    },
 });
 
 JMAP.mail.recalculateAllFetchedWindows = function () {
     // Mark all message lists as needing to recheck if window is fetched.
-    this.get( 'store' ).getAllRemoteQueries().forEach( function ( query ) {
+    this.get( 'store' ).getAllQueries().forEach( function ( query ) {
         if ( query instanceof MessageList ) {
             query.recalculateFetchedWindows();
         }
     });
 };
 
-MessageList.getId = getId;
+// --- Export
 
 JMAP.MessageList = MessageList;
 
@@ -5588,29 +6385,366 @@ JMAP.MessageList = MessageList;
 
 
 // -------------------------------------------------------------------------- \\
-// File: mail-model.js                                                        \\
+// File: MessageSubmission.js                                                 \\
 // Module: MailModel                                                          \\
-// Requires: API, Mailbox.js, Thread.js, Message.js, MessageList.js           \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010-2015 FastMail Pty Ltd. MIT Licensed.                       \\
+// Requires: API, Mailbox.js, Message.js, Thread.js, Identity.js              \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+'use strict';
+
+( function ( JMAP ) {
+
+const Class = O.Class;
+const Record = O.Record;
+const attr = Record.attr;
+
+const mail = JMAP.mail;
+const Identity = JMAP.Identity;
+const Message = JMAP.Message;
+const Thread = JMAP.Thread;
+const Mailbox = JMAP.Mailbox;
+const makeSetRequest = JMAP.Connection.makeSetRequest;
+
+// ---
+
+const MessageSubmission = Class({
+
+    Extends: Record,
+
+    identity: Record.toOne({
+        Type: Identity,
+        key: 'identityId',
+    }),
+
+    message: Record.toOne({
+        Type: Message,
+        key: 'emailId',
+    }),
+
+    thread: Record.toOne({
+        Type: Thread,
+        key: 'threadId',
+        noSync: true,
+    }),
+
+    envelope: attr( Object, {
+        defaultValue: null,
+    }),
+
+    sendAt: attr( Date, {
+        noSync: true,
+    }),
+
+    undoStatus: attr( String, {
+        noSync: true,
+        defaultValue: 'pending',
+    }),
+
+    deliveryStatus: attr( Object, {
+        noSync: true,
+        defaultValue: null,
+    }),
+
+    dsnBlobIds: attr( Array ),
+    mdnBlobIds: attr( Array ),
+
+    // ---
+
+    // Not a real JMAP property; stripped before sending to server.
+    onSuccess: attr( Object ),
+});
+MessageSubmission.__guid__ = 'EmailSubmission';
+MessageSubmission.dataGroup = 'mail';
+
+MessageSubmission.makeEnvelope = function ( message ) {
+    var sender = message.get( 'sender' );
+    var mailFrom = {
+        email: sender ?
+            sender.email :
+            message.get( 'fromEmail' ),
+        parameters: null,
+    };
+    var seen = {};
+    var rcptTo = [ 'to', 'cc', 'bcc' ].reduce( function ( rcptTo, header ) {
+        var addresses = message.get( header );
+        if ( addresses ) {
+            addresses.forEach( function ( address ) {
+                var email = address.email;
+                if ( email && !seen[ email ] ) {
+                    seen[ email ] = true;
+                    rcptTo.push({ email: email, parameters: null });
+                }
+            });
+        }
+        return rcptTo;
+    }, [] );
+    return {
+        mailFrom: mailFrom,
+        rcptTo: rcptTo,
+    };
+};
+
+
+mail.handle( MessageSubmission, {
+
+    precedence: 3,
+
+    fetch: function ( accountId, ids ) {
+        this.callMethod( 'EmailSubmission/get', {
+            accountId: accountId,
+            ids: ids || [],
+        });
+    },
+
+    refresh: function ( accountId, ids, state ) {
+        if ( ids ) {
+            this.callMethod( 'EmailSubmission/get', {
+                accountId: accountId,
+                ids: ids,
+            });
+        } else {
+            this.callMethod( 'EmailSubmission/changes', {
+                accountId: accountId,
+                sinceState: state,
+                maxChanges: 50,
+            });
+            this.callMethod( 'EmailSubmission/get', {
+                accountId: accountId,
+                '#ids': {
+                    resultOf: this.getPreviousMethodId(),
+                    name: 'EmailSubmission/changes',
+                    path: '/changed',
+                },
+            });
+        }
+    },
+
+    commit: function ( change ) {
+        var store = this.get( 'store' );
+        var args = makeSetRequest( change );
+
+        // TODO: Prevent double sending if dodgy connection
+        // if ( Object.keys( args.create ).length ) {
+        //     args.ifInState = change.state;
+        // }
+
+        var onSuccessUpdateEmail = {};
+        var onSuccessDestroyEmail = [];
+        var create = args.create;
+        var update = args.update;
+        var id, submission;
+
+        var accountId = change.accountId;
+        var drafts = mail.getMailboxForRole( accountId, 'drafts' );
+        var sent = mail.getMailboxForRole( accountId, 'sent' );
+        var updateMessage = {};
+        if ( drafts && sent ) {
+            updateMessage[ 'mailboxIds/' + sent.get( 'id' ) ] = null;
+            updateMessage[ 'mailboxIds/' + drafts.get( 'id' ) ] = true;
+        }
+        updateMessage[ 'keywords/$draft' ] = true;
+
+        // On create move from drafts, remove $draft keyword
+        for ( id in create ) {
+            submission = create[ id ];
+            if ( submission.onSuccess === null ) {
+                args.onSuccessDestroyEmail = onSuccessDestroyEmail;
+                onSuccessDestroyEmail.push( '#' + id );
+            } else if ( submission.onSuccess ) {
+                args.onSuccessUpdateEmail = onSuccessUpdateEmail;
+                onSuccessUpdateEmail[ '#' + id ] = submission.onSuccess;
+            }
+            delete submission.onSuccess;
+        }
+
+        // On unsend, move back to drafts, set $draft keyword.
+        for ( id in update ) {
+            submission = update[ id ];
+            if ( submission.undoStatus === 'canceled' ) {
+                args.onSuccessUpdateEmail = onSuccessUpdateEmail;
+                onSuccessUpdateEmail[ submission.id ] = updateMessage;
+            }
+        }
+
+        this.callMethod( 'EmailSubmission/set', args );
+        if ( args.onSuccessUpdateEmail || args.onSuccessDestroyEmail ) {
+            this.fetchAllRecords(
+                accountId, Message, store.getTypeState( accountId, Message ) );
+            this.fetchAllRecords(
+                accountId, Mailbox, store.getTypeState( accountId, Mailbox ) );
+        }
+    },
+
+    // ---
+
+    'EmailSubmission/get': function ( args ) {
+        this.didFetch( MessageSubmission, args );
+    },
+
+    'EmailSubmission/changes': function ( args ) {
+        const hasDataForChanged = true;
+        this.didFetchUpdates( MessageSubmission, args, hasDataForChanged );
+        if ( args.hasMoreChanges ) {
+            this.get( 'store' )
+                .fetchAll( args.accountId, MessageSubmission, true );
+        }
+    },
+
+    'error_EmailSubmission/changes_cannotCalculateChanges': function ( _, __, reqArgs ) {
+        var store = this.get( 'store' );
+        var accountId = reqArgs.accountId;
+        // All our data may be wrong. Unload if possible, otherwise mark
+        // obsolete.
+        store.getAll( MessageSubmission ).forEach( function ( submission ) {
+            if ( submission.get( 'accountId' ) === accountId ) {
+                if ( !store.unloadRecord( submission.get( 'storeKey' ) ) ) {
+                    submission.setObsolete();
+                }
+            }
+        });
+        // Tell the store we're now in the new state.
+        store.sourceDidFetchUpdates(
+            accountId,
+            MessageSubmission,
+            null,
+            null,
+            store.getTypeState( accountId, MessageSubmission ),
+            ''
+        );
+
+    },
+
+    'EmailSubmission/set': function ( args ) {
+        this.didCommit( MessageSubmission, args );
+    },
+
+    'error_EmailSubmission/set_stateMismatch': function () {
+        // TODO: Fire error on all creates, to check and try again.
+    },
+});
+
+// --- Export
+
+JMAP.MessageSubmission = MessageSubmission;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: VacationResponse.js                                                  \\
+// Module: MailModel                                                          \\
+// Requires: API                                                              \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
 
 ( function ( JMAP ) {
 
-var store = JMAP.store;
-var Mailbox = JMAP.Mailbox;
-var Thread = JMAP.Thread;
-var Message = JMAP.Message;
-var MessageList = JMAP.MessageList;
+const Class = O.Class;
+const Record = O.Record;
+const attr = Record.attr;
+
+const mail = JMAP.mail;
+
+// ---
+
+const VacationResponse = Class({
+
+    Extends: Record,
+
+    isEnabled: attr( Boolean, {
+        defaultValue: false,
+    }),
+
+    fromDate: attr( Date, {
+        toJSON: Date.toUTCJSON,
+        defaultValue: null,
+    }),
+
+    toDate: attr( Date, {
+        toJSON: Date.toUTCJSON,
+        defaultValue: null,
+    }),
+
+    subject: attr( String ),
+
+    textBody: attr( String ),
+
+    htmlBody: attr( String ),
+
+    // ---
+
+    hasDates: function ( hasDates ) {
+        if ( hasDates === false ) {
+            this.set( 'fromDate', null )
+                .set( 'toDate', null );
+        } else if ( hasDates === undefined ) {
+            hasDates = !!(
+                this.get( 'fromDate' ) ||
+                this.get( 'toDate' )
+            );
+        }
+        return hasDates;
+    }.property( 'fromDate', 'toDate' ),
+});
+VacationResponse.__guid__ = 'VacationResponse';
+VacationResponse.dataGroup = 'mail';
+
+mail.handle( VacationResponse, {
+
+    precedence: 3,
+
+    fetch: 'VacationResponse/get',
+    commit: 'VacationResponse/set',
+
+    // ---
+
+    'VacationResponse/get': function ( args ) {
+        this.didFetch( VacationResponse, args );
+    },
+
+    'VacationResponse/set': function ( args ) {
+        this.didCommit( VacationResponse, args );
+    },
+});
+
+// --- Export
+
+JMAP.VacationResponse = VacationResponse;
+
+}( JMAP ) );
+
+
+// -------------------------------------------------------------------------- \\
+// File: mail-model.js                                                        \\
+// Module: MailModel                                                          \\
+// Requires: API, Mailbox.js, Thread.js, Message.js, MessageList.js, MessageSubmission.js \\
+// -------------------------------------------------------------------------- \\
+
+/*global O, JMAP */
+
+'use strict';
+
+( function ( JMAP ) {
+
+const READY = O.Status.READY;
+
+const auth = JMAP.auth;
+const store = JMAP.store;
+const Mailbox = JMAP.Mailbox;
+const Thread = JMAP.Thread;
+const Message = JMAP.Message;
+const MessageList = JMAP.MessageList;
+const MessageSubmission = JMAP.MessageSubmission;
 
 // --- Preemptive mailbox count updates ---
 
-var getMailboxDelta = function ( deltas, mailboxId ) {
-    return deltas[ mailboxId ] || ( deltas[ mailboxId ] = {
-        totalMessages: 0,
-        unreadMessages: 0,
+const getMailboxDelta = function ( deltas, mailboxSK ) {
+    return deltas[ mailboxSK ] || ( deltas[ mailboxSK ] = {
+        totalEmails: 0,
+        unreadEmails: 0,
         totalThreads: 0,
         unreadThreads: 0,
         removed: [],
@@ -5618,16 +6752,16 @@ var getMailboxDelta = function ( deltas, mailboxId ) {
     });
 };
 
-var updateMailboxCounts = function ( mailboxDeltas ) {
-    var mailboxId, delta, mailbox;
-    for ( mailboxId in mailboxDeltas ) {
-        delta = mailboxDeltas[ mailboxId ];
-        mailbox = store.getRecord( Mailbox, mailboxId );
-        if ( delta.totalMessages ) {
-            mailbox.increment( 'totalMessages', delta.total );
+const updateMailboxCounts = function ( mailboxDeltas ) {
+    var mailboxSK, delta, mailbox;
+    for ( mailboxSK in mailboxDeltas ) {
+        delta = mailboxDeltas[ mailboxSK ];
+        mailbox = store.getRecordFromStoreKey( mailboxSK );
+        if ( delta.totalEmails ) {
+            mailbox.increment( 'totalEmails', delta.totalEmails );
         }
-        if ( delta.unreadMessages ) {
-            mailbox.increment( 'unreadMessages', delta.unread );
+        if ( delta.unreadEmails ) {
+            mailbox.increment( 'unreadEmails', delta.unreadEmails );
         }
         if ( delta.totalThreads ) {
             mailbox.increment( 'totalThreads', delta.totalThreads );
@@ -5639,51 +6773,61 @@ var updateMailboxCounts = function ( mailboxDeltas ) {
         // first, so if another fetch is already in progress, the
         // results of that are discarded and it is fetched again.
         mailbox.setObsolete()
-               .refresh();
+               .fetch();
     }
 };
 
 // --- Preemptive query updates ---
 
-var isSortedOnUnread = function ( sort ) {
+const filterHasKeyword = function ( filter, keyword ) {
+    return (
+        keyword === filter.allInThreadHaveKeyword ||
+        keyword === filter.someInThreadHaveKeyword ||
+        keyword === filter.noneInThreadHaveKeyword ||
+        keyword === filter.hasKeyword ||
+        keyword === filter.notKeyword
+    );
+};
+
+const isSortedOnUnread = function ( sort ) {
     for ( var i = 0, l = sort.length; i < l; i += 1 ) {
-        if ( /isUnread/.test( sort[i] ) ) {
+        if ( /:\$seen$/.test( sort[i].property ) ) {
             return true;
         }
     }
     return false;
 };
-var isFilteredOnUnread = function ( filter ) {
+const isFilteredOnUnread = function ( filter ) {
     if ( filter.operator ) {
         return filter.conditions.some( isFilteredOnUnread );
     }
-    return 'isUnread' in filter;
+    return filterHasKeyword( filter, '$seen' );
 };
-var isSortedOnFlagged = function ( sort ) {
+const isSortedOnFlagged = function ( sort ) {
     for ( var i = 0, l = sort.length; i < l; i += 1 ) {
-        if ( /isFlagged/.test( sort[i] ) ) {
+        if ( /:\$flagged$/.test( sort[i].property ) ) {
             return true;
         }
     }
     return false;
 };
-var isFilteredOnFlagged = function ( filter ) {
+const isFilteredOnFlagged = function ( filter ) {
     if ( filter.operator ) {
         return filter.conditions.some( isFilteredOnFlagged );
     }
-    return 'isFlagged' in filter;
+    return filterHasKeyword( filter, '$flagged' );
 };
-var isFilteredOnMailboxes = function ( filter ) {
+const isFilteredOnMailboxes = function ( filter ) {
     if ( filter.operator ) {
         return filter.conditions.some( isFilteredOnMailboxes );
     }
-    return 'inMailboxes' in filter;
+    return ( 'inMailbox' in filter ) || ( 'inMailboxOtherThan' in filter );
 };
-var isFilteredJustOnMailbox = function ( filter ) {
-    var isJustMailboxes = false,
-        term;
+const isFilteredJustOnMailbox = function ( filter ) {
+    var isJustMailboxes = false;
+    var term;
     for ( term in filter ) {
-        if ( term === 'inMailboxes' && filter[ term ].length === 1 ) {
+        if ( term === 'inMailbox' ) {
             isJustMailboxes = true;
         } else {
             isJustMailboxes = false;
@@ -5692,27 +6836,25 @@ var isFilteredJustOnMailbox = function ( filter ) {
     }
     return isJustMailboxes;
 };
-var isTrue = function () {
+const isTrue = function () {
     return true;
 };
-var isFalse = function () {
+const isFalse = function () {
     return false;
 };
 
 // ---
 
-var READY = O.Status.READY;
-
-var reOrFwd = /^(?:(?:re|fwd):\s*)+/;
-var comparators = {
+const reOrFwd = /^(?:(?:re|fwd):\s*)+/;
+const comparators = {
     id: function ( a, b ) {
         var aId = a.get( 'id' );
         var bId = b.get( 'id' );
 
         return aId < bId ? -1 : aId > bId ? 1 : 0;
     },
-    date: function ( a, b ) {
-        return a.get( 'date' ) - b.get( 'date' );
+    receivedAt: function ( a, b ) {
+        return a.get( 'receivedAt' ) - b.get( 'receivedAt' );
     },
     size: function ( a, b ) {
         return a.get( 'size' ) - b.get( 'size' );
@@ -5737,119 +6879,137 @@ var comparators = {
 
         return aSubject < bSubject ? -1 : aSubject > bSubject ? 1 : 0;
     },
-    isFlagged: function ( a, b ) {
+    'hasKeyword:$flagged': function ( a, b ) {
         var aFlagged = a.get( 'isFlagged' );
         var bFlagged = b.get( 'isFlagged' );
 
         return aFlagged === bFlagged ? 0 :
             aFlagged ? -1 : 1;
     },
-    isFlaggedThread: function ( a, b ) {
-        return comparators.isFlagged( a.get( 'thread' ), b.get( 'thread' ) );
-    }
+    'someInThreadHaveKeyword:$flagged': function ( a, b ) {
+        return comparators[ 'hasKeyword:$flagged' ]
+            ( a.get( 'thread' ), b.get( 'thread' ) );
+    },
 };
 
-var compareToStoreKey = function ( fields, storeKey, message ) {
+const compareToStoreKey = function ( fields, storeKey, message ) {
     var otherMessage = storeKey && ( store.getStatus( storeKey ) & READY ) ?
-            store.getRecord( Message, '#' + storeKey ) : null;
-    var i, l, comparator, result;
+            store.getRecordFromStoreKey( storeKey ) : null;
+    var i, l, field, comparator, result;
     if ( !otherMessage ) {
         return 1;
     }
     for ( i = 0, l = fields.length; i < l; i += 1 ) {
-        comparator = comparators[ fields[i][0] ];
+        field = fields[i];
+        comparator = comparators[ field.property ];
         if ( comparator && ( result = comparator( otherMessage, message ) ) ) {
-            return result * fields[i][1];
-        }
-    }
-    return 0;
-};
-
-var compareToMessage = function ( fields, aData, bData ) {
-    var a = aData.message;
-    var b = bData.message;
-    var i, l, comparator, result;
-    for ( i = 0, l = fields.length; i < l; i += 1 ) {
-        comparator = comparators[ fields[i] ];
-        if ( comparator && ( result = comparator( a, b ) ) ) {
+            if ( !field.isAscending ) {
+                result = -result;
+            }
             return result;
         }
     }
     return 0;
 };
 
-var splitDirection = function ( fields, collapseThreads ) {
-    return fields.map( function ( field ) {
-        var space = field.indexOf( ' ' );
-        var prop = space ? field.slice( 0, space ) : field;
-        var dir = space && field.slice( space + 1 ) === 'asc' ? 1 : -1;
-
-        if ( collapseThreads && /^is/.test( prop ) ) {
-            prop += 'Thread';
+const compareToMessage = function ( fields, aData, bData ) {
+    var a = aData.message;
+    var b = bData.message;
+    var i, l, field, comparator, result;
+    for ( i = 0, l = fields.length; i < l; i += 1 ) {
+        field = fields[i];
+        comparator = comparators[ field.property ];
+        if ( comparator && ( result = comparator( a, b ) ) ) {
+            if ( !field.isAscending ) {
+                result = -result;
+            }
+            return result;
         }
-        return [ prop, dir ];
-    });
+    }
+    return 0;
 };
 
-var calculatePreemptiveAdd = function ( query, addedMessages ) {
-    var storeKeyList = query._list;
-    var sort = splitDirection(
-            query.get( 'sort' ), query.get( 'collapseThreads' ) );
+const calculatePreemptiveAdd = function ( query, addedMessages, replaced ) {
+    var storeKeys = query.getStoreKeys();
+    var sort = query.get( 'sort' );
     var comparator = compareToStoreKey.bind( null, sort );
-    var added = addedMessages.reduce( function ( added, message ) {
-            added.push({
-                message: message,
-                messageSK: message.get( 'storeKey' ),
-                threadSK: message.get( 'thread' ).get( 'storeKey' ),
-                index: storeKeyList.binarySearch( message, comparator )
-            });
-            return added;
-        }, [] );
+    var threadSKToIndex = {};
+    var indexDelta = 0;
+    var added, i, l, messageSK, threadSK;
 
-    var collapseThreads = query.get( 'collapseThreads' );
-    var messageToThreadSK = query.get( 'messageToThreadSK' );
-    var threadToMessageSK = collapseThreads && added.length ?
-            storeKeyList.reduce( function ( map, messageSK ) {
-                if ( messageSK ) {
-                    map[ messageToThreadSK[ messageSK ] ] = messageSK;
-                }
-                return map;
-            }, {} ) :
-            {};
-
+    added = addedMessages.reduce( function ( added, message ) {
+        added.push({
+            message: message,
+            messageSK: message.get( 'storeKey' ),
+            threadSK: message.getFromPath( 'thread.storeKey' ),
+            index: storeKeys.binarySearch( message, comparator )
+        });
+        return added;
+    }, [] );
     added.sort( compareToMessage.bind( null, sort ) );
 
-    return added.length ? added.reduce( function ( result, item ) {
-        var messageSK = item.messageSK;
-        var threadSK = item.threadSK;
-        if ( !collapseThreads || !threadToMessageSK[ threadSK ] ) {
-            threadToMessageSK[ threadSK ] = messageSK;
-            messageToThreadSK[ messageSK ] = threadSK;
-            result.push([ item.index + result.length, messageSK ]);
+    if ( !added.length ) {
+        return null;
+    }
+
+    if ( query.get( 'collapseThreads' ) ) {
+        l = Math.min( added.last().index, storeKeys.length );
+        for ( i = 0; i < l; i += 1 ) {
+            messageSK = storeKeys[i];
+            if ( messageSK && ( store.getStatus( messageSK ) & READY ) ) {
+                threadSK = store.getRecordFromStoreKey( messageSK )
+                                .getData()
+                                .threadId;
+                threadSKToIndex[ threadSK ] = i;
+            }
         }
+    }
+
+    return added.reduce( function ( result, item ) {
+        var threadIndex = item.threadSK && threadSKToIndex[ item.threadSK ];
+        if ( threadIndex !== undefined ) {
+            if ( threadIndex >= item.index ) {
+                replaced.push( storeKeys[ threadIndex ] );
+            } else {
+                return result;
+            }
+        }
+        result.push([ item.index + indexDelta, item.messageSK ]);
+        indexDelta += 1;
         return result;
-    }, [] ) : null;
+    }, [] );
 };
 
-var updateQueries = function ( filterTest, sortTest, deltas ) {
+const updateQueries = function ( filterTest, sortTest, deltas ) {
     // Set as obsolete any message list that is filtered by
     // one of the removed or added mailboxes. If it's a simple query,
     // pre-emptively update it.
-    var queries = store.getAllRemoteQueries();
+    var queries = store.getAllQueries();
     var l = queries.length;
-    var query, filter, sort, delta;
+    var query, filter, sort, mailboxSK, delta, replaced, added;
     while ( l-- ) {
         query = queries[l];
         if ( query instanceof MessageList ) {
-            filter = query.get( 'filter' );
+            filter = query.get( 'where' );
             sort = query.get( 'sort' );
             if ( deltas && isFilteredJustOnMailbox( filter ) ) {
-                delta = deltas[ filter.inMailboxes[0] ];
+                mailboxSK = store.getStoreKey(
+                    query.get( 'accountId' ), Mailbox, filter.inMailbox );
+                delta = deltas[ mailboxSK ];
                 if ( delta ) {
+                    replaced = [];
+                    added =
+                        calculatePreemptiveAdd( query, delta.added, replaced );
                     query.clientDidGenerateUpdate({
-                        added: calculatePreemptiveAdd( query, delta.added ),
-                        removed: delta.removed
+                        added: added,
+                        removed: delta.removed,
                     });
+                    if ( replaced.length ) {
+                        query.clientDidGenerateUpdate({
+                            added: null,
+                            removed: replaced,
+                        });
+                    }
                 }
             } else if ( filterTest( filter ) || sortTest( sort ) ) {
                 query.setObsolete();
@@ -5860,27 +7020,24 @@ var updateQueries = function ( filterTest, sortTest, deltas ) {
 
 // ---
 
-var identity = function ( v ) { return v; };
+const identity = function ( v ) { return v; };
 
-var addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messageSK ) {
+const addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messageSK ) {
     var l = willRemove ? willRemove.length : 1;
-    var i, addMailboxId, removeMailboxId, data;
+    var i, addMailbox, removeMailbox, key, data;
     for ( i = 0; i < l; i += 1 ) {
-        addMailboxId = willAdd ? willAdd[0].get( 'id' ) : '-';
-        removeMailboxId = willRemove ? willRemove[i].get( 'id' ) : '-';
-        data = inverse[ addMailboxId + removeMailboxId ];
+        addMailbox = willAdd ? willAdd[0] : null;
+        removeMailbox = willRemove ? willRemove[i] : null;
+        key = ( addMailbox ? addMailbox.get( 'storeKey' ) : '-' ) +
+            ( removeMailbox ? removeMailbox.get( 'storeKey' ) : '-' );
+        data = inverse[ key ];
         if ( !data ) {
             data = {
                 method: 'move',
                 messageSKs: [],
-                args: [
-                    null,
-                    willRemove && removeMailboxId,
-                    willAdd && addMailboxId,
-                    true
-                ]
+                args: [ null, removeMailbox, addMailbox, true ],
             };
-            inverse[ addMailboxId + removeMailboxId ] = data;
+            inverse[ key ] = data;
             undoManager.pushUndoData( data );
         }
         data.messageSKs.push( messageSK );
@@ -5890,16 +7047,17 @@ var addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messa
 
 // ---
 
-var NO = 0;
-var TO_THREAD = 1;
-var TO_MAILBOX = 2;
+const NO = 0;
+const TO_MAILBOX = 1;
+const TO_THREAD_IN_NOT_TRASH = 2;
+const TO_THREAD_IN_TRASH = 4;
+const TO_THREAD = (TO_THREAD_IN_NOT_TRASH|TO_THREAD_IN_TRASH);
 
-var getMessages = function getMessages ( messageSKs, expand, mailbox, messageToThreadSK, callback, hasDoneLoad ) {
+const getMessages = function getMessages ( messageSKs, expand, mailbox, callback, hasDoneLoad ) {
     // Map to threads, then make sure all threads, including headers
     // are loaded
     var allLoaded = true;
     var messages = [];
-    var inTrash;
 
     var checkMessage = function ( message ) {
         if ( message.is( READY ) ) {
@@ -5907,8 +7065,11 @@ var getMessages = function getMessages ( messageSKs, expand, mailbox, messageToT
                 if ( message.get( 'mailboxes' ).contains( mailbox ) ) {
                     messages.push( message );
                 }
-            } else if ( expand === TO_THREAD ) {
-                if ( message.isIn( 'trash' ) === inTrash ) {
+            } else if ( expand & TO_THREAD ) {
+                if ( (( expand & TO_THREAD_IN_NOT_TRASH ) &&
+                        message.get( 'isInNotTrash' )) ||
+                     (( expand & TO_THREAD_IN_TRASH ) &&
+                        message.get( 'isInTrash' )) ) {
                     messages.push( message );
                 }
             } else {
@@ -5920,18 +7081,26 @@ var getMessages = function getMessages ( messageSKs, expand, mailbox, messageToT
     };
 
     messageSKs.forEach( function ( messageSK ) {
-        var message = store.getRecord( Message, '#' + messageSK );
-        var threadSK = messageToThreadSK[ messageSK ];
-        var thread;
-        inTrash = message.isIn( 'trash' );
-        if ( expand && threadSK ) {
-            thread = store.getRecord( Thread, '#' + threadSK );
-            if ( thread.is( READY ) ) {
-                thread.get( 'messages' ).forEach( checkMessage );
+        var thread, message;
+        if ( expand ) {
+            if ( store.getStatus( messageSK ) & READY ) {
+                thread = store.getRecordFromStoreKey( messageSK )
+                              .get( 'thread' );
+                if ( thread.is( READY ) ) {
+                    thread.get( 'messages' ).forEach( checkMessage );
+                } else {
+                    allLoaded = false;
+                }
             } else {
+                // Fetch all messages in thread
+                JMAP.mail.fetchRecord(
+                    store.getAccountIdFromStoreKey( messageSK ),
+                    Message.Thread,
+                    store.getIdFromStoreKey( messageSK ) );
                 allLoaded = false;
             }
         } else {
+            message = store.getRecordFromStoreKey( messageSK );
             checkMessage( message );
         }
     });
@@ -5945,7 +7114,7 @@ var getMessages = function getMessages ( messageSKs, expand, mailbox, messageToT
         JMAP.mail.gc.isPaused = true;
         JMAP.mail.addCallback(
             getMessages.bind( null,
-                messageSKs, expand, mailbox, messageToThreadSK, callback, true )
+                messageSKs, expand, mailbox, callback, true )
         );
     }
     return true;
@@ -5953,7 +7122,7 @@ var getMessages = function getMessages ( messageSKs, expand, mailbox, messageToT
 
 // ---
 
-var doUndoAction = function ( method, args ) {
+const doUndoAction = function ( method, args ) {
     return function ( callback, messages ) {
         var mail = JMAP.mail;
         if ( messages ) {
@@ -5966,35 +7135,82 @@ var doUndoAction = function ( method, args ) {
 
 // ---
 
-var roleIndex = new O.Object({
+const roleIndex = new O.Object({
     index: null,
     clearIndex: function () {
         this.index = null;
     },
     buildIndex: function () {
-        return this.index = store.getAll( Mailbox ).reduce(
+        var index = this.index = store.getAll( Mailbox ).reduce(
             function ( index, mailbox ) {
+                var accountId = mailbox.get( 'accountId' );
                 var role = mailbox.get( 'role' );
                 if ( role ) {
-                    index[ role ] = mailbox.get( 'id' );
+                    ( index[ accountId ] ||
+                        ( index[ accountId ] = {} ) )[ role ] = mailbox;
                 }
                 return index;
             }, {} );
+        return index;
     },
     getIndex: function () {
         return this.index || this.buildIndex();
-    }
+    },
 });
 store.on( Mailbox, roleIndex, 'clearIndex' );
 
+const getMailboxForRole = function ( accountId, role ) {
+    if ( !accountId ) {
+        accountId = auth.get( 'defaultAccountId' );
+    }
+    var accountIndex = roleIndex.getIndex()[ accountId ];
+    return accountIndex && accountIndex[ role ] || null;
+};
+
 // ---
 
-O.extend( JMAP.mail, {
+Object.assign( JMAP.mail, {
 
     getMessages: getMessages,
 
-    getMailboxIdForRole: function ( role ) {
-        return roleIndex.getIndex()[ role ] || null;
+    getMailboxForRole: getMailboxForRole,
+
+    // ---
+
+    findMessage: function ( accountId, where ) {
+        return new Promise( function ( resolve, reject ) {
+            JMAP.mail.callMethod( 'Email/query', {
+                accountId: accountId,
+                filter: where,
+                sort: null,
+                position: 0,
+                limit: 1,
+            }, function ( response ) {
+                var call = response[0];
+                var method = call[0];
+                var args = call[1];
+                var id;
+                if ( method === 'Email/query' ) {
+                    id = args.ids[0];
+                    if ( id ) {
+                        resolve( store.getRecord( accountId, Message, id ) );
+                    } else {
+                        reject({
+                            type: 'notFound',
+                        });
+                    }
+                } else {
+                    reject( args );
+                }
+            }).callMethod( 'Email/get', {
+                '#ids': {
+                    resultOf: JMAP.mail.getPreviousMethodId(),
+                    name: 'Email/query',
+                    path: '/ids',
+                },
+                properties: Message.headerProperties,
+            });
+        });
     },
 
     // ---
@@ -6014,9 +7230,9 @@ O.extend( JMAP.mail, {
             // This is really needed to check for disappearing Messages/Threads,
             // but more efficient to run it here.
             afterCleanup: function () {
-                var queries = store.getAllRemoteQueries(),
-                    l = queries.length,
-                    query;
+                var queries = store.getAllQueries();
+                var l = queries.length;
+                var query;
                 while ( l-- ) {
                     query = queries[l];
                     if ( query instanceof MessageList ) {
@@ -6065,7 +7281,7 @@ O.extend( JMAP.mail, {
                 messageSKs = call.messageSKs;
                 if ( messageSKs ) {
                     sequence.then(
-                        getMessages.bind( null, messageSKs, NO, null, {} ) );
+                        getMessages.bind( null, messageSKs, NO, null ) );
                 }
                 sequence.then( doUndoAction( call.method, call.args ) );
             }
@@ -6094,7 +7310,6 @@ O.extend( JMAP.mail, {
 
     setUnread: function ( messages, isUnread, allowUndo ) {
         var mailboxDeltas = {};
-        var trashId = this.getMailboxIdForRole( 'trash' );
         var inverseMessageSKs = allowUndo ? [] : null;
         var inverse = allowUndo ? {
                 method: 'setUnread',
@@ -6108,20 +7323,22 @@ O.extend( JMAP.mail, {
 
         messages.forEach( function ( message ) {
             // Check we have something to do
-            if ( message.get( 'isUnread' ) === isUnread ) {
+            if ( message.get( 'isUnread' ) === isUnread ||
+                    !message.hasPermission( 'maySetSeen' ) ) {
                 return;
             }
 
             // Get the thread and cache the current unread state
             var thread = message.get( 'thread' );
             var isInTrash = message.get( 'isInTrash' );
-            var threadUnread =
-                    thread &&
-                    ( isInTrash ?
-                        thread.get( 'isUnreadInTrash' ) :
-                        thread.get( 'isUnread' ) ) ?
-                    1 : 0;
-            var mailboxCounts, mailboxId, mailbox, delta;
+            var isInNotTrash = message.get( 'isInNotTrash' );
+            var threadUnreadInTrash =
+                isInTrash && thread && thread.get( 'isUnreadInTrash' ) ?
+                1 : 0;
+            var threadUnreadInNotTrash =
+                isInNotTrash && thread && thread.get( 'isUnreadInNotTrash' ) ?
+                1 : 0;
+            var mailboxCounts, mailboxSK, mailbox, delta, unreadDelta;
 
             // Update the message
             message.set( 'isUnread', isUnread );
@@ -6137,36 +7354,34 @@ O.extend( JMAP.mail, {
             }
 
             // Calculate any changes to the mailbox unread message counts
-            if ( isInTrash ) {
-                getMailboxDelta( mailboxDeltas, trashId )
-                    .unreadMessages += isUnread ? 1 : -1;
-            } else {
-                message.get( 'mailboxes' ).forEach( function ( mailbox ) {
-                    var mailboxId = mailbox.get( 'id' );
-                    var delta = getMailboxDelta( mailboxDeltas, mailboxId );
-                    delta.unreadMessages += isUnread ? 1 : -1;
-                });
-            }
+            message.get( 'mailboxes' ).forEach( function ( mailbox ) {
+                var mailboxSK = mailbox.get( 'storeKey' );
+                var delta = getMailboxDelta( mailboxDeltas, mailboxSK );
+                delta.unreadEmails += isUnread ? 1 : -1;
+            });
 
             // See if the thread unread state has changed
-            if ( thread ) {
-                threadUnread = ( isInTrash ?
-                    thread.get( 'isUnreadInTrash' ) :
-                    thread.get( 'isUnread' )
-                ) - threadUnread;
+            if ( isInTrash && thread ) {
+                threadUnreadInTrash =
+                    Number( thread.get( 'isUnreadInTrash' ) ) -
+                        threadUnreadInTrash;
+            }
+            if ( isInNotTrash && thread ) {
+                threadUnreadInNotTrash =
+                    Number( thread.get( 'isUnreadInNotTrash' ) ) -
+                        threadUnreadInNotTrash;
             }
 
             // Calculate any changes to the mailbox unread thread counts
-            if ( threadUnread && isInTrash ) {
-                getMailboxDelta( mailboxDeltas, trashId )
-                    .unreadThreads += threadUnread;
-            } else {
+            if ( threadUnreadInNotTrash || threadUnreadInTrash ) {
                 mailboxCounts = thread.get( 'mailboxCounts' );
-                for ( mailboxId in mailboxCounts ) {
-                    if ( mailboxId !== trashId ) {
-                        mailbox = store.getRecord( Mailbox, mailboxId );
-                        delta = getMailboxDelta( mailboxDeltas, mailboxId );
-                        delta.unreadThreads += threadUnread;
+                for ( mailboxSK in mailboxCounts ) {
+                    mailbox = store.getRecordFromStoreKey( mailboxSK );
+                    unreadDelta = mailbox.get( 'role' ) === 'trash' ?
+                        threadUnreadInTrash : threadUnreadInNotTrash;
+                    if ( unreadDelta ) {
+                        delta = getMailboxDelta( mailboxDeltas, mailboxSK );
+                        delta.unreadThreads += unreadDelta;
                     }
                 }
             }
@@ -6199,7 +7414,8 @@ O.extend( JMAP.mail, {
 
         messages.forEach( function ( message ) {
             // Check we have something to do
-            if ( message.get( 'isFlagged' ) === isFlagged ) {
+            if ( message.get( 'isFlagged' ) === isFlagged ||
+                    !message.hasPermission( 'maySetKeywords' ) ) {
                 return;
             }
 
@@ -6222,42 +7438,45 @@ O.extend( JMAP.mail, {
         return this;
     },
 
-    move: function ( messages, addMailboxId, removeMailboxId, allowUndo ) {
+    move: function ( messages, addMailbox, removeMailbox, allowUndo ) {
         var mailboxDeltas = {};
         var inverse = allowUndo ? {} : null;
+        var removeAll = removeMailbox === 'ALL';
         var undoManager = this.undoManager;
-
-        var addMailbox = addMailboxId ?
-                store.getRecord( Mailbox, addMailboxId ) : null;
-        var removeMailbox = removeMailboxId ?
-                store.getRecord( Mailbox, removeMailboxId ) : null;
-        var isToTrash = addMailbox ?
-                addMailbox.get( 'role' ) === 'trash' : false;
-        var isFromTrash = removeMailbox ?
-                removeMailbox.get( 'role' ) === 'trash' : false;
-
-        // TODO: Check mailboxes still exist? Could in theory have been deleted.
+        var addMailboxOnlyIfNone = false;
+        var accountId;
+        if ( !addMailbox ) {
+            addMailboxOnlyIfNone = true;
+            accountId = messages.length ?
+                messages[0].get( 'accountId' ) : null;
+            addMailbox =
+                getMailboxForRole( accountId, 'archive' ) ||
+                getMailboxForRole( accountId, 'inbox' );
+        }
+        if ( removeAll ) {
+            removeMailbox = null;
+        }
 
         // Check we're not moving from/to the same place
-        if ( addMailbox === removeMailbox ) {
+        if ( addMailbox === removeMailbox && !addMailboxOnlyIfNone ) {
             return;
         }
 
         // Check ACLs
         if ( addMailbox && ( !addMailbox.is( READY ) ||
-                !addMailbox.get( 'mayAddItems' ) ) ) {
+                !addMailbox.get( 'myRights' ).mayAddItems ) ) {
             O.RunLoop.didError({
                 name: 'JMAP.mail.move',
-                message: 'May not add messages to ' + addMailbox.get( 'name' )
+                message: 'May not add messages to ' + addMailbox.get( 'name' ),
             });
             return this;
         }
         if ( removeMailbox && ( !removeMailbox.is( READY ) ||
-                !removeMailbox.get( 'mayRemoveItems' ) ) ) {
+                !removeMailbox.get( 'myRights' ).mayRemoveItems ) ) {
             O.RunLoop.didError({
                 name: 'JMAP.mail.move',
                 message: 'May not remove messages from ' +
-                    removeMailbox.get( 'name' )
+                    removeMailbox.get( 'name' ),
             });
             return this;
         }
@@ -6270,43 +7489,58 @@ O.extend( JMAP.mail, {
             var willAdd = addMailbox && [ addMailbox ];
             var willRemove = null;
             var mailboxToRemoveIndex = -1;
+            var alreadyHasMailbox = false;
 
-            var wasThreadUnread = false;
+            var wasThreadUnreadInNotTrash = false;
             var wasThreadUnreadInTrash = false;
-            var isThreadUnread = false;
+            var isThreadUnreadInNotTrash = false;
             var isThreadUnreadInTrash = false;
             var mailboxCounts = null;
 
             var isUnread, thread;
-            var deltaThreadUnread, deltaThreadUnreadInTrash;
+            var deltaThreadUnreadInNotTrash, deltaThreadUnreadInTrash;
             var decrementMailboxCount, incrementMailboxCount;
-            var delta, mailboxId, mailbox;
+            var delta, mailboxSK, mailbox;
 
             // Calculate the changes required to the message's mailboxes
-            mailboxes.forEach( function ( mailbox, index ) {
-                if ( mailbox === addMailbox ) {
-                    willAdd = null;
-                }
-                if ( mailbox === removeMailbox ) {
-                    willRemove = [ mailbox ];
-                    mailboxToRemoveIndex = index;
-                }
-            });
-            if ( willAdd && addMailbox.get( 'mustBeOnlyMailbox' ) ) {
+            if ( removeAll ) {
                 willRemove = mailboxes.map( identity );
                 mailboxToRemoveIndex = 0;
+                alreadyHasMailbox = mailboxes.contains( addMailbox );
+                if ( alreadyHasMailbox && willRemove.length === 1 ) {
+                    willRemove = willAdd = null;
+                }
+            } else {
+                mailboxes.forEach( function ( mailbox, index ) {
+                    if ( mailbox === addMailbox ) {
+                        willAdd = null;
+                    }
+                    if ( mailbox === removeMailbox ) {
+                        willRemove = [ mailbox ];
+                        mailboxToRemoveIndex = index;
+                    }
+                });
             }
 
             // Check we have something to do
-            if ( !willRemove && !willAdd ) {
+            if ( !willRemove && ( !willAdd || addMailboxOnlyIfNone ) ) {
                 return;
+            }
+
+            if ( addMailboxOnlyIfNone ) {
+                if ( willRemove.length !== mailboxes.get( 'length' ) ) {
+                    willAdd = null;
+                } else if ( !willAdd ) {
+                    // Can't remove from everything without adding
+                    return;
+                }
             }
 
             // Get the thread and cache the current unread state
             isUnread = message.get( 'isUnread' ) && !message.get( 'isDraft' );
             thread = message.get( 'thread' );
             if ( thread ) {
-                wasThreadUnread = thread.get( 'isUnread' );
+                wasThreadUnreadInNotTrash = thread.get( 'isUnreadInNotTrash' );
                 wasThreadUnreadInTrash = thread.get( 'isUnreadInTrash' );
             }
 
@@ -6316,11 +7550,16 @@ O.extend( JMAP.mail, {
                 willRemove ? willRemove.length : 0,
                 willAdd
             );
-            // FastMail specific
+            // #if FASTMAIL
             if ( willRemove ) {
-                message.set( 'previousFolderId', willRemove[0].get( 'id' ) );
+                message.set( 'previousMailbox', willRemove[0] );
             }
-            // end
+            // #end
+
+            if ( alreadyHasMailbox ) {
+                willAdd = null;
+                willRemove.erase( addMailbox );
+            }
 
             // Add inverse for undo
             if ( allowUndo ) {
@@ -6330,42 +7569,43 @@ O.extend( JMAP.mail, {
 
             // Calculate any changes to the mailbox message counts
             if ( thread ) {
-                isThreadUnread = thread.get( 'isUnread' );
+                isThreadUnreadInNotTrash = thread.get( 'isUnreadInNotTrash' );
                 isThreadUnreadInTrash = thread.get( 'isUnreadInTrash' );
                 mailboxCounts = thread.get( 'mailboxCounts' );
             }
 
             decrementMailboxCount = function ( mailbox ) {
-                var delta = getMailboxDelta(
-                        mailboxDeltas, mailbox.get( 'id' ) );
-                delta.removed.push( message.get( 'storeKey' ) );
-                delta.totalMessages -= 1;
+                var mailboxSK = mailbox.get( 'storeKey' );
+                var delta = getMailboxDelta( mailboxDeltas, mailboxSK );
+                delta.removed.push( messageSK );
+                delta.totalEmails -= 1;
                 if ( isUnread ) {
-                    delta.unreadMessages -= 1;
+                    delta.unreadEmails -= 1;
                 }
                 // If this was the last message in the thread in the mailbox
-                if ( thread && !mailboxCounts[ mailboxId ] ) {
+                if ( thread && !mailboxCounts[ mailboxSK ] ) {
                     delta.totalThreads -= 1;
                     if ( mailbox.get( 'role' ) === 'trash' ?
-                            wasThreadUnreadInTrash : wasThreadUnread ) {
+                            wasThreadUnreadInTrash :
+                            wasThreadUnreadInNotTrash ) {
                         delta.unreadThreads -= 1;
                     }
                 }
             };
             incrementMailboxCount = function ( mailbox ) {
-                var delta = getMailboxDelta(
-                        mailboxDeltas, mailbox.get( 'id' ) );
+                var mailboxSK = mailbox.get( 'storeKey' );
+                var delta = getMailboxDelta( mailboxDeltas, mailboxSK );
                 delta.added.push( message );
-                delta.totalMessages += 1;
+                delta.totalEmails += 1;
                 if ( isUnread ) {
-                    delta.unreadMessages += 1;
+                    delta.unreadEmails += 1;
                 }
                 // If this was the first message in the thread in the
                 // mailbox
-                if ( thread && mailboxCounts[ mailboxId ] === 1 ) {
+                if ( thread && mailboxCounts[ mailboxSK ] === 1 ) {
                     delta.totalThreads += 1;
                     if ( mailbox.get( 'role' ) === 'trash' ?
-                            isThreadUnreadInTrash : isThreadUnread ) {
+                            isThreadUnreadInTrash : isThreadUnreadInNotTrash ) {
                         delta.unreadThreads += 1;
                     }
                 }
@@ -6374,23 +7614,8 @@ O.extend( JMAP.mail, {
             if ( willRemove ) {
                 willRemove.forEach( decrementMailboxCount );
             }
-
-            // If moved to Trash, we have essentially removed from all other
-            // mailboxes, even if they are still present.
-            if ( isToTrash && willAdd && mailboxes.get( 'length' ) > 1 ) {
-                mailboxes.forEach( function ( mailbox ) {
-                    if ( mailbox !== addMailbox ) {
-                        decrementMailboxCount( mailbox );
-                    }
-                });
-            }
-
-            // If moved from trash, all mailboxes are essentially added
-            // for counts/message list purposes
-            if ( isFromTrash && willRemove ) {
-                mailboxes.forEach( incrementMailboxCount );
-            } else if ( willAdd ) {
-                incrementMailboxCount( addMailbox );
+            if ( willAdd ) {
+                willAdd.forEach( incrementMailboxCount );
             }
 
             // If the thread unread state has changed (due to moving in/out of
@@ -6401,28 +7626,23 @@ O.extend( JMAP.mail, {
             // 1. Have more than 1 message in the thread in it; or
             // 2. Not have been in the set of mailboxes we just added to this
             //    message
-            deltaThreadUnread =
-                ( isThreadUnread ? 1 : 0 ) -
-                ( wasThreadUnread ? 1 : 0 );
+            deltaThreadUnreadInNotTrash =
+                ( isThreadUnreadInNotTrash ? 1 : 0 ) -
+                ( wasThreadUnreadInNotTrash ? 1 : 0 );
             deltaThreadUnreadInTrash =
                 ( isThreadUnreadInTrash ? 1 : 0 ) -
                 ( wasThreadUnreadInTrash ? 1 : 0 );
 
-            if ( deltaThreadUnread || deltaThreadUnreadInTrash ) {
-                // If from trash, we've essentially added it to all the
-                // mailboxes it's currently in for counts purposes
-                if ( isFromTrash && willRemove ) {
-                    willAdd = mailboxes;
-                }
-                for ( mailboxId in mailboxCounts ) {
-                    mailbox = store.getRecord( Mailbox, mailboxId );
-                    if ( mailboxCounts[ mailboxId ] > 1 ||
+            if ( deltaThreadUnreadInNotTrash || deltaThreadUnreadInTrash ) {
+                for ( mailboxSK in mailboxCounts ) {
+                    mailbox = store.getRecordFromStoreKey( mailboxSK );
+                    if ( mailboxCounts[ mailboxSK ] > 1 ||
                             !willAdd.contains( mailbox ) ) {
-                        delta = getMailboxDelta( mailboxDeltas, mailboxId );
+                        delta = getMailboxDelta( mailboxDeltas, mailboxSK );
                         if ( mailbox.get( 'role' ) === 'trash' ) {
                             delta.unreadThreads += deltaThreadUnreadInTrash;
                         } else {
-                            delta.unreadThreads += deltaThreadUnread;
+                            delta.unreadThreads += deltaThreadUnreadInNotTrash;
                         }
                     }
                 }
@@ -6442,24 +7662,25 @@ O.extend( JMAP.mail, {
         var mailboxDeltas = {};
 
         messages.forEach( function ( message ) {
+            var messageSK = message.get( 'storeKey' );
             var mailboxes = message.get( 'mailboxes' );
 
-            var wasThreadUnread = false;
+            var wasThreadUnreadInNotTrash = false;
             var wasThreadUnreadInTrash = false;
-            var isThreadUnread = false;
+            var isThreadUnreadInNotTrash = false;
             var isThreadUnreadInTrash = false;
             var mailboxCounts = null;
 
             var isUnread, thread;
-            var deltaThreadUnread, deltaThreadUnreadInTrash;
-            var delta, mailboxId, mailbox, messageWasInMailbox, countInMailbox;
+            var deltaThreadUnreadInNotTrash, deltaThreadUnreadInTrash;
+            var delta, mailboxSK, mailbox, messageWasInMailbox, isTrash;
 
             // Get the thread and cache the current unread state
             isUnread = message.get( 'isUnread' ) && !message.get( 'isDraft' );
             thread = message.get( 'thread' );
             if ( thread ) {
                 mailboxCounts = thread.get( 'mailboxCounts' );
-                wasThreadUnread = thread.get( 'isUnread' );
+                wasThreadUnreadInNotTrash = thread.get( 'isUnreadInNotTrash' );
                 wasThreadUnreadInTrash = thread.get( 'isUnreadInTrash' );
             }
 
@@ -6469,47 +7690,51 @@ O.extend( JMAP.mail, {
             if ( thread ) {
                 // Preemptively update the thread
                 thread.get( 'messages' ).remove( message );
-                thread.refresh();
+                thread.fetch();
 
                 // Calculate any changes to the mailbox message counts
-                isThreadUnread = thread.get( 'isUnread' );
+                isThreadUnreadInNotTrash = thread.get( 'isUnreadInNotTrash' );
                 isThreadUnreadInTrash = thread.get( 'isUnreadInTrash' );
 
-                deltaThreadUnread =
-                    ( isThreadUnread ? 1 : 0 ) -
-                    ( wasThreadUnread ? 1 : 0 );
+                deltaThreadUnreadInNotTrash =
+                    ( isThreadUnreadInNotTrash ? 1 : 0 ) -
+                    ( wasThreadUnreadInNotTrash ? 1 : 0 );
                 deltaThreadUnreadInTrash =
                     ( isThreadUnreadInTrash ? 1 : 0 ) -
                     ( wasThreadUnreadInTrash ? 1 : 0 );
 
-                for ( mailboxId in mailboxCounts ) {
-                    mailbox = store.getRecord( Mailbox, mailboxId );
+                for ( mailboxSK in mailboxCounts ) {
+                    mailbox = store.getRecordFromStoreKey( mailboxSK );
                     messageWasInMailbox = mailboxes.contains( mailbox );
-                    countInMailbox = mailboxCounts[ mailboxId ];
+                    isTrash = mailbox.get( 'role' ) === 'trash';
                     if ( messageWasInMailbox ) {
-                        delta = getMailboxDelta( mailboxDeltas, mailboxId );
-                        delta.totalMessages -= 1;
+                        delta = getMailboxDelta( mailboxDeltas, mailboxSK );
+                        delta.totalEmails -= 1;
                         if ( isUnread ) {
-                            delta.unreadMessages -= 1;
+                            delta.unreadEmails -= 1;
+                        }
+                        delta.removed.push( messageSK );
+                        if ( mailboxCounts[ mailboxSK ] === 1 ) {
+                            delta.totalThreads -= 1;
                         }
                     }
-                    if ( deltaThreadUnread || deltaThreadUnreadInTrash ) {
-                        delta = getMailboxDelta( mailboxDeltas, mailboxId );
-                        if ( mailbox.get( 'role' ) === 'trash' ) {
-                            delta.unreadThreads += deltaThreadUnreadInTrash;
-                        } else {
-                            delta.unreadThreads += deltaThreadUnread;
-                        }
+                    if ( isTrash && deltaThreadUnreadInTrash ) {
+                        getMailboxDelta( mailboxDeltas, mailboxSK )
+                            .unreadThreads += deltaThreadUnreadInTrash;
+                    } else if ( !isTrash && deltaThreadUnreadInNotTrash ) {
+                        getMailboxDelta( mailboxDeltas, mailboxSK )
+                            .unreadThreads += deltaThreadUnreadInNotTrash;
                     }
                 }
             } else {
                 mailboxes.forEach( function ( mailbox ) {
                     var delta = getMailboxDelta(
-                            mailboxDeltas, mailbox.get( 'id' ) );
-                    delta.totalMessages -= 1;
+                        mailboxDeltas, mailbox.get( 'storeKey' ) );
+                    delta.totalEmails -= 1;
                     if ( isUnread ) {
-                        delta.unreadMessages -= 1;
+                        delta.unreadEmails -= 1;
                     }
+                    delta.removed.push( messageSK );
                 });
             }
         });
@@ -6524,28 +7749,35 @@ O.extend( JMAP.mail, {
     },
 
     report: function ( messages, asSpam, allowUndo ) {
-        var messageIds = [];
         var messageSKs = [];
+        var accounts = {};
+        var accountId;
 
         messages.forEach( function ( message ) {
-            messageIds.push( message.get( 'id' ) );
+            var accountId = message.get( 'accountId' );
+            var account = accounts[ accountId ] ||
+                ( accounts[ accountId ] = [] );
+            account.push( message.get( 'id' ) );
             messageSKs.push( message.get( 'storeKey' ) );
         });
 
-        this.callMethod( 'reportMessages', {
-            messageIds: messageIds,
-            asSpam: asSpam
-        });
+        for ( accountId in accounts ) {
+            this.callMethod( 'Email/report', {
+                accountId: accountId,
+                ids: accounts[ accountId ],
+                type: asSpam ? 'spam' : 'notspam',
+            });
+        }
 
         if ( allowUndo ) {
             this.undoManager.pushUndoData({
-                method: 'reportMessages',
+                method: 'report',
                 messageSKs: messageSKs,
                 args: [
                     null,
                     !asSpam,
                     true
-                ]
+                ],
             });
         }
 
@@ -6554,47 +7786,150 @@ O.extend( JMAP.mail, {
 
     // ---
 
-    saveDraft: function ( message ) {
-        var inReplyToMessageId = message.get( 'inReplyToMessageId' );
-        var inReplyToMessage = null;
-        var thread = null;
-        var messages = null;
-        var isFirstDraft = true;
-        if ( inReplyToMessageId &&
-                ( store.getRecordStatus(
-                    Message, inReplyToMessageId ) & READY ) ) {
-            inReplyToMessage = store.getRecord( Message, inReplyToMessageId );
-            thread = inReplyToMessage.get( 'thread' );
-            if ( thread && thread.is( READY ) ) {
-                messages = thread.get( 'messages' );
+    create: function ( message ) {
+        var thread = message.get( 'thread' );
+        var mailboxes = message.get( 'mailboxes' );
+        var wasThreadUnreadInNotTrash = false;
+        var wasThreadUnreadInTrash = false;
+        var isThreadUnreadInNotTrash = false;
+        var isThreadUnreadInTrash = false;
+        var deltaThreadUnreadInTrash = false;
+        var deltaThreadUnreadInNotTrash = false;
+        var isDraft = message.get( 'isDraft' );
+        var isUnread = !isDraft && message.get( 'isUnread' );
+        var mailboxDeltas = {};
+        var mailboxCounts = null;
+        var messageSK, mailboxSK, mailbox, isTrash;
+
+        // Cache the current thread state
+        if ( thread && thread.is( READY ) ) {
+            mailboxCounts = thread.get( 'mailboxCounts' );
+            wasThreadUnreadInNotTrash = thread.get( 'isUnreadInNotTrash' );
+            wasThreadUnreadInTrash = thread.get( 'isUnreadInTrash' );
+        }
+
+        // If not in any mailboxes, make it a draft
+        if ( mailboxes.get( 'length' ) === 0 ) {
+            message
+                .set( 'isDraft', true )
+                .set( 'isUnread', false );
+            mailboxes.add(
+                getMailboxForRole( message.get( 'accountId' ), 'drafts' ) ||
+                getMailboxForRole( null, 'drafts' )
+            );
+        }
+
+        // Create the message
+        message.saveToStore();
+        messageSK = message.get( 'storeKey' );
+
+        if ( mailboxCounts ) {
+            // Preemptively update the thread
+            var inReplyTo = isDraft &&
+                    message.getFromPath( 'headers.in-reply-to' ) || '';
+            var messages = thread.get( 'messages' );
+            var seenInReplyTo = false;
+            var l = messages.get( 'length' );
+            var i, messageInThread;
+
+            if ( inReplyTo ) {
+                for ( i = 0; i < l; i += 1 ) {
+                    messageInThread = messages.getObjectAt( i );
+                    if ( seenInReplyTo ) {
+                        if ( !messageInThread.get( 'isDraft' ) ||
+                                inReplyTo !== messageInThread
+                                    .getFromPath( 'headers.in-reply-to' ) ) {
+                            break;
+                        }
+                    } else if ( inReplyTo === messageInThread
+                            .getFromPath( 'headers.message-id' ) ) {
+                        seenInReplyTo = true;
+                    }
+                }
+            } else {
+                i = l;
+            }
+            messages.replaceObjectsAt( i, 0, [ message ] );
+            thread.fetch();
+
+            // Calculate any changes to the mailbox message counts
+            isThreadUnreadInNotTrash = thread.get( 'isUnreadInNotTrash' );
+            isThreadUnreadInTrash = thread.get( 'isUnreadInTrash' );
+
+            deltaThreadUnreadInNotTrash =
+                ( isThreadUnreadInNotTrash ? 1 : 0 ) -
+                ( wasThreadUnreadInNotTrash ? 1 : 0 );
+            deltaThreadUnreadInTrash =
+                ( isThreadUnreadInTrash ? 1 : 0 ) -
+                ( wasThreadUnreadInTrash ? 1 : 0 );
+        }
+
+        mailboxes.forEach( function ( mailbox ) {
+            var mailboxSK = mailbox.get( 'storeKey' );
+            var delta = getMailboxDelta( mailboxDeltas, mailboxSK );
+            delta.added.push( message );
+            delta.totalEmails += 1;
+            if ( isUnread ) {
+                delta.unreadEmails += 1;
+            }
+            if ( mailboxCounts && !mailboxCounts[ mailboxSK ] ) {
+                delta.totalThreads += 1;
+                if ( mailbox.get( 'role' ) === 'trash' ?
+                        isThreadUnreadInTrash : isThreadUnreadInNotTrash ) {
+                    delta.unreadThreads += 1;
+                }
+            }
+        });
+
+        for ( mailboxSK in mailboxCounts ) {
+            mailbox = store.getRecordFromStoreKey( mailboxSK );
+            isTrash = mailbox.get( 'role' ) === 'trash';
+            if ( !mailboxes.contains( mailbox ) ) {
+                if ( isTrash && deltaThreadUnreadInTrash ) {
+                    getMailboxDelta( mailboxDeltas, mailboxSK )
+                        .unreadThreads += deltaThreadUnreadInTrash;
+                } else if ( !isTrash && deltaThreadUnreadInNotTrash ) {
+                    getMailboxDelta( mailboxDeltas, mailboxSK )
+                        .unreadThreads += deltaThreadUnreadInNotTrash;
+                }
             }
         }
 
-        // Save message
-        message.get( 'mailboxes' ).add(
-            store.getRecord( Mailbox, this.getMailboxIdForRole( 'drafts' ) )
-        );
-        message.saveToStore();
+        // Update counts on mailboxes
+        updateMailboxCounts( mailboxDeltas );
 
-        // Pre-emptively update thread
-        if ( messages ) {
-            isFirstDraft = !messages.some( function ( message ) {
-                return message.isIn( 'drafts' );
-            });
-            messages.replaceObjectsAt(
-                messages.indexOf( inReplyToMessage ) + 1, 0, [ message ] );
-            thread.refresh();
-        }
-
-        // Pre-emptively update draft mailbox counts
-        store.getRecord( Mailbox, this.getMailboxIdForRole( 'drafts' ) )
-            .increment( 'totalMessages', 1 )
-            .increment( 'totalThreads', isFirstDraft ? 1 : 0 )
-            .setObsolete()
-            .refresh();
+        // Update message list queries, or mark in need of refresh
+        updateQueries( isTrue, isFalse, mailboxDeltas );
 
         return this;
-    }
+    },
+
+    // ---
+
+    redirect: function ( messages, identity, to ) {
+        var accountId = identity.get( 'accountId' );
+        var envelope = {
+            mailFrom: {
+                email: identity.get( 'email' ),
+                parameters: null,
+            },
+            rcptTo: to.map( function ( address ) {
+                return {
+                    email: address.email,
+                    parameters: null,
+                };
+            }),
+        };
+
+        return messages.map( function ( message ) {
+            return new MessageSubmission( store )
+                .set( 'accountId', accountId )
+                .set( 'identity', identity )
+                .set( 'message', message )
+                .set( 'envelope', envelope )
+                .saveToStore();
+        });
+    },
 });
 
 }( JMAP ) );

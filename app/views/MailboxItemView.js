@@ -2,8 +2,6 @@
 // File: MailboxItemView.js                                                   \\
 // Module: Mail                                                               \\
 // Requires: namespace.js                                                     \\
-// Author: Neil Jenkins                                                       \\
-// License: © 2010–2015 FastMail Pty Ltd. MIT Licensed.                       \\
 // -------------------------------------------------------------------------- \\
 
 /*global O, App, JMAP */
@@ -16,11 +14,10 @@ var filterIsSentOrDraft = function ( filter ) {
     if ( filter.operator ) {
         return filter.conditions.every( filterIsSentOrDraft );
     }
-    var inMailboxes = filter.inMailboxes;
-    return !!inMailboxes && inMailboxes.every( function ( mailboxId ) {
-        return JMAP.store.getRecord( JMAP.Mailbox, mailboxId )
-                         .get( 'isForSentOrDraft' );
-    });
+    var inMailbox = filter.inMailbox;
+    var role = inMailbox &&
+            JMAP.store.getRecord( null, JMAP.Mailbox, mailboxId ).get( 'role' );
+    return role === 'sent' || role === 'draft';
 };
 var filterIsText = function ( filter ) {
     if ( filter.operator ) {
@@ -28,7 +25,7 @@ var filterIsText = function ( filter ) {
     }
     for ( var prop in filter ) {
         if ( typeof filter[ prop ] === 'string' && filter[ prop ] &&
-                prop !== 'category' ) {
+                prop !== 'inMailbox' ) {
             return true;
         }
     }
@@ -141,12 +138,11 @@ var MailboxItemView = O.Class({
 
     threadDidChange: function () {
         var thread = this.get( 'thread' ),
-            inMailboxes, isInTrash;
+            inMailbox, isInTrash;
         if ( thread.is( READY ) ) {
-            inMailboxes = this.getFromPath( 'list.filter.inMailboxes' );
-            isInTrash = this.isInTrash = inMailboxes &&
-                inMailboxes.length === 1 &&
-                inMailboxes[0] === JMAP.mail.getMailboxIdForRole( 'trash' );
+            inMailbox = this.getFromPath( 'list.filter.inMailbox' );
+            isInTrash = this.isInTrash = inMailbox ===
+                JMAP.mail.getMailboxForRole( null, 'trash' ).get( 'id' );
             this.set( 'isUnread', isInTrash ?
                     thread.get( 'isUnreadInTrash' ) :
                     thread.get( 'isUnread' )
@@ -165,12 +161,8 @@ var MailboxItemView = O.Class({
             isRemoved = this.get( 'isRemoved' ),
             isAdded = this.get( 'isAdded' );
         return {
-            top: 0,
+            top: ( index - ( isAdded ? 1 : 0 ) ) * itemHeight,
             left: 0,
-            transform:
-                'translate3d(0,' +
-                    ( ( index - ( isAdded ? 1 : 0 ) ) * itemHeight ) + 'px,' +
-                '0)',
             opacity: isRemoved ? 0 : 1
         };
     }.property( 'index', 'itemHeight', 'isAdded', 'isRemoved' ),
@@ -201,7 +193,7 @@ var MailboxItemView = O.Class({
                 ).map( function ( person ) {
                     return person.name || person.email;
                 }).join( ', ' ),
-            date = message.get( 'date' ),
+            receivedAt = message.get( 'receivedAt' ),
             total = thread.get( isInTrash ? 'totalInTrash' : 'total' ),
             subject = message.get( 'subject' );
 
@@ -213,9 +205,9 @@ var MailboxItemView = O.Class({
                 name
             ]),
             el( 'time.v-MailboxItem-time', [
-                date.isToday() ?
-                    O.i18n.date( date, 'time' ) :
-                    O.i18n.date( date, 'date' )
+                receivedAt.isToday() ?
+                    O.i18n.date( receivedAt, 'time' ) :
+                    O.i18n.date( receivedAt, 'date' )
             ]),
             el( 'span.v-MailboxItem-subject', [
                 subject
@@ -286,7 +278,7 @@ var MailboxItemView = O.Class({
                     selection.get( 'length' ) : 1;
             var el = O.Element.create;
 
-            drag._draggedStoreKey = id;
+            drag._draggedStoreKey = storeKey;
             drag.set( 'dragImage', el( 'div.v-MailboxItem-drag', [
                 O.i18n.localise(
                     '[*2,_1,1 conversation,%n conversations]', count )
