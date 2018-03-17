@@ -8,7 +8,25 @@
 <link rel="stylesheet" type="text/css" href="styles/icons.css">
 <link rel="stylesheet" type="text/css" href="styles/app.css">
 </head>
-<body>
+<body data-session='{
+  "authenticationUrl": "/jmap/auth",
+  "username": "user@example.com",
+  "accessToken": "password",
+  "accounts": {
+    "foo": {
+      "isPrimary": true,
+      "hasDataFor": [
+        "mail",
+        "contacts",
+        "calendars"
+      ]
+    }
+  },
+  "apiUrl": "/jmap",
+  "eventSourceUrl": "/events",
+  "uploadUrl": "/upload",
+  "downloadUrl": "/raw/{blobId}/{name}"
+}'>
 <!-- Comment out the following line to talk to a real server -->
 <script type="text/javascript" src="fixtures.js"></script>
 
@@ -26,5 +44,6 @@
 <script type="text/javascript" src="app/state.js"></script>
 <script type="text/javascript" src="app/actions.js"></script>
 <script type="text/javascript" src="app/view.js"></script>
+
 </body>
 </html>

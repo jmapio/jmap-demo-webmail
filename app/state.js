@@ -21,23 +21,8 @@ var Thread = JMAP.Thread;
 var Message = JMAP.Message;
 
 // --- Temp hack to talk to proxy without implementing proper auth ---
-
-var userPath = ( /k=([0-9a-f\-]+)/.exec( location.href ) || [ '', '' ] )[1];
-
-JMAP.auth.didAuthenticate({
-    username:       'user@example.com',
-    accessToken:    'password',
-    accounts: {
-        [userPath]: {
-            isPrimary: true,
-            hasDataFor: [ 'mail', 'contacts', 'calendars' ],
-        }
-    },
-    apiUrl:         '/jmap/'   + userPath,
-    eventSourceUrl: '/events/' + userPath,
-    uploadUrl:      '/upload/' + userPath,
-    downloadUrl:    '/raw/'    + userPath + '/{blobId}/{name}'
-});
+JMAP.auth.didAuthenticate(
+    JSON.parse( document.body.getAttribute( 'data-session' ) ) );
 
 // ---
 
