@@ -137,12 +137,13 @@ var MailboxItemView = O.Class({
     },
 
     threadDidChange: function () {
-        var thread = this.get( 'thread' ),
-            inMailbox, isInTrash;
+        var thread = this.get( 'thread' );
+        var trash = JMAP.mail.getMailboxForRole( null, 'trash' );
+        var inMailbox, isInTrash;
         if ( thread.is( READY ) ) {
             inMailbox = this.getFromPath( 'list.filter.inMailbox' );
-            isInTrash = this.isInTrash = inMailbox ===
-                JMAP.mail.getMailboxForRole( null, 'trash' ).get( 'id' );
+            isInTrash = this.isInTrash =
+                !!trash && inMailbox === trash.get( 'id' );
             this.set( 'isUnread', isInTrash ?
                     thread.get( 'isUnreadInTrash' ) :
                     thread.get( 'isUnread' )
