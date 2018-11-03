@@ -527,6 +527,56 @@ var splitter =
 
 Object.assign( String.prototype, {
     /**
+        Method: String#runeAt
+
+        Like charAt, but if the index points to an octet that is part of a
+        surrogate pair, the whole pair is returned (as a string).
+
+        Parameters:
+            index - {Number} The index (in bytes) into the string
+
+        Returns:
+            {String} The rune at this index.
+    */
+    runeAt: function runeAt ( index ) {
+        var code = this.charCodeAt( index );
+
+        // Outside bounds
+        if ( Number.isNaN( code ) ) {
+            return ''; // Position not found
+        }
+
+        // Normal char
+        if ( code < 0xD800 || code > 0xDFFF ) {
+            return this.charAt( index );
+        }
+
+        // High surrogate (could change last hex to 0xDB7F to treat high
+        // private surrogates as single characters)
+        if ( 0xD800 <= code && code <= 0xDBFF ) {
+            if ( this.length <= ( index + 1 ) ) {
+                // High surrogate without following low surrogate
+                return '';
+            }
+        // Low surrogate (0xDC00 <= code && code <= 0xDFFF)
+        } else {
+            if ( index === 0 ) {
+                // Low surrogate without preceding high surrogate
+                return '';
+            }
+            index -= 1;
+        }
+
+        code = this.charCodeAt( index + 1 );
+        if ( 0xDC00 > code || code > 0xDFFF ) {
+            // Not a valid surrogate pair
+            return '';
+        }
+
+        return this.charAt( index ) + this.charAt( index + 1 );
+    },
+
+    /**
         Method: String#format
 
         Format a string by substituting in arguments. The method can also add
@@ -1046,7 +1096,7 @@ Object.assign( Date, {
 });
 
 var pad = function ( num, nopad, character ) {
-    return ( nopad || num > 9 ) ? num : ( character || '0' ) + num;
+    return ( nopad || num > 9 ? '' : ( character || '0' ) ) + num;
 };
 
 var aDay = 86400000; // milliseconds in a day
@@ -1124,7 +1174,7 @@ Object.assign( Date.prototype, {
             {String} Localised day name.
     */
     getDayName: function getDayName ( abbreviate, utc ) {
-        var names = LocaleController$1 && LocaleController$1.get(
+        var names = LocaleController && LocaleController.get(
                 ( abbreviate ? 'abbreviatedD' : 'd' ) + 'ayNames' );
         var day = utc ? this.getUTCDay() : this.getDay();
         return names ? names[ day ] : day;
@@ -1147,7 +1197,7 @@ Object.assign( Date.prototype, {
             {String} Localised month name.
     */
     getMonthName: function getMonthName ( abbreviate, utc ) {
-        var names = LocaleController$1 && LocaleController$1.get(
+        var names = LocaleController && LocaleController.get(
                 ( abbreviate ? 'abbreviatedM' : 'm' ) + 'onthNames' );
         var day = utc ? this.getUTCMonth() : this.getMonth();
         return names ? names[ day ] : day;
@@ -1320,6 +1370,10 @@ Object.assign( Date.prototype, {
         H - Hour of the day in 24h clock (00-23).
         I - Hour of the day in 12h clock (01-12).
         j - Day of the year as a decimal number (001-366).
+        k - Hour of the day in 12h clock (0-23), padded with a space if single
+            digit.
+        l - Hour of the day in 12h clock (1-12), padded with a space if single
+            digit.
         m - Month of the year (01-12).
         M - Minute of the hour (00-59).
         n - Newline character.
@@ -1346,6 +1400,7 @@ Object.assign( Date.prototype, {
         X - The locale's appropriate time representation.
         y - Year without century (00-99).
         Y - Year with century (0-9999)
+        z - Timezone offset
         Z - Timezone name or abbreviation.
         % - A '%' character.
 
@@ -1361,7 +1416,7 @@ Object.assign( Date.prototype, {
         return format$1 ?
             format$1.replace(/%(-)?([%A-Za-z])/g,
                 function ( string, nopad, character ) {
-            var num, str;
+            var num, str, offset, sign, hoursOffset, minutesOffset;
             switch ( character ) {
             case 'a':
                 // Abbreviated day of the week, e.g. 'Mon'.
@@ -1377,8 +1432,8 @@ Object.assign( Date.prototype, {
                 return date.getMonthName( false, utc );
             case 'c':
                 // The locale's appropriate date and time representation.
-                return LocaleController$1 ?
-                    LocaleController$1.date( date, 'fullDateAndTime' ) :
+                return LocaleController ?
+                    LocaleController.date( date, 'fullDateAndTime' ) :
                     date.toLocaleString();
             case 'C':
                 // Century number (00-99).
@@ -1405,11 +1460,25 @@ Object.assign( Date.prototype, {
             case 'I':
                 // Hour of the day in 12h clock (01-12).
                 num = utc ? date.getUTCHours() : date.getHours();
-                return num ? pad( num < 13 ? num : num - 12, nopad ) : 12;
+                return num ? pad( num < 13 ? num : num - 12, nopad ) : '12';
             case 'j':
                 // Day of the year as a decimal number (001-366).
                 num = date.getDayOfYear( utc );
-                return nopad ? num : num < 100 ? '0' + pad( num ) : pad( num );
+                return nopad ?
+                    num + '' :
+                    num < 100 ? '0' + pad( num ) : pad( num );
+            case 'k':
+                // Hour of the day in 12h clock (0-23), padded with a space if
+                // single digit.
+                return pad(
+                    utc ? date.getUTCHours() : date.getHours(), nopad, ' ' );
+            case 'l':
+                // Hour of the day in 12h clock (1-12), padded with a space if
+                // single digit.
+                num = utc ? date.getUTCHours() : date.getHours();
+                return num ?
+                    pad( num < 13 ? num : num - 12, nopad, ' ' ) :
+                    '12';
             case 'm':
                 // Month of the year (01-12).
                 return pad(
@@ -1425,8 +1494,8 @@ Object.assign( Date.prototype, {
                 // Localised equivalent of AM or PM.
                 str = ( utc ? date.getUTCHours() : date.getHours() ) < 12 ?
                     'am' : 'pm';
-                return LocaleController$1 ?
-                    LocaleController$1.get( str + 'Designator' ) : str.toUpperCase();
+                return LocaleController ?
+                    LocaleController.get( str + 'Designator' ) : str.toUpperCase();
             case 'r':
                 // The time in AM/PM notation: '%I:%M:%S %p'.
                 return date.format( '%I:%M:%S %p', utc );
@@ -1468,13 +1537,13 @@ Object.assign( Date.prototype, {
                 return pad( this.getWeekNumber( 1, utc ), nopad );
             case 'x':
                 // The locale's appropriate date representation.
-                return LocaleController$1 ?
-                    LocaleController$1.date( date, 'date' ) :
+                return LocaleController ?
+                    LocaleController.date( date, 'date' ) :
                     date.format( '%d/%m/%y', utc );
             case 'X':
                 // The locale's appropriate time representation.
-                return LocaleController$1 ?
-                    LocaleController$1.date( date, 'time' ) : date.format( '%H:%M', utc );
+                return LocaleController ?
+                    LocaleController.date( date, 'time' ) : date.format( '%H:%M', utc );
             case 'y':
                 // Year without century (00-99).
                 return ( utc ?
@@ -1483,6 +1552,16 @@ Object.assign( Date.prototype, {
             case 'Y':
                 // Year with century (0-9999).
                 return utc ? date.getUTCFullYear() : date.getFullYear();
+            case 'z':
+                // Timezone offset
+                offset = date.getTimezoneOffset();
+                sign = ( offset > 0 ? '-' : '+' );
+                offset = Math.abs( offset );
+                hoursOffset = ~~( offset / 60 );
+                minutesOffset = offset - ( 60 * hoursOffset );
+                return sign +
+                    '%\'02n'.format( hoursOffset ) +
+                    ':%\'02n'.format( minutesOffset );
             case 'Z':
                 // Timezone name or abbreviation.
                 return ( /\((.*)\)/.exec( date.toString() ) || [ '' ] ).pop();
@@ -2273,7 +2352,7 @@ var alternatives = {
 */
 var active = locales.xx;
 
-var LocaleController$1 = {
+var LocaleController = {
     /**
         Property: O.LocaleController.activeLocaleCode
         Type: String
@@ -2502,7 +2581,7 @@ var LocaleController$1 = {
     letterAlternatives: alternatives,
 };
 
-var loc = LocaleController$1.localise;
+var loc = LocaleController.localise;
 
 // Yeah, core is importing something from localisation. Boundaries like “core”
 // and “localisation” aren’t solid boundaries these days, anyway. Deal with it.
@@ -2551,7 +2630,7 @@ function sortByProperties ( properties ) {
                         aVal = +aVal;
                         bVal = +bVal;
                     } else {
-                        return LocaleController$1.compare( aVal, bVal );
+                        return LocaleController.compare( aVal, bVal );
                     }
                 }
                 if ( aVal < bVal ) {
@@ -2783,7 +2862,7 @@ Object.assign( Object, {
 
     A regular expression for detecting an email address.
 */
-RegExp.email = /\b([\w.%+-]+@(?:[\w-]+\.)+[A-Z]{2,})\b/i;
+RegExp.email = /\b([\w.%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,})\b/i;
 
 /**
     Property: RegExp.url
@@ -3018,6 +3097,42 @@ var Timeout = function ( time, period, fn, bind ) {
     this.bind = bind;
 };
 
+var parentsBeforeChildren = function ( a, b ) {
+    var aView = a[1];
+    var bView = b[1];
+
+    // Cheap test for ( x instanceof View )
+    if ( !aView || !aView.parentView ) {
+        aView = null;
+    }
+    if ( !bView || !bView.parentView ) {
+        bView = null;
+    }
+
+    // If equal, order doesn't matter
+    if ( aView === bView ) {
+        return 0;
+    }
+
+    // Redraw views before bindings directly to DOM nodes; it may remove
+    // the view from the DOM so the update is cheaper
+    if ( !aView || !bView ) {
+        return !aView ? 1 : -1;
+    }
+
+    // Redraw parents before children; it may remove the child so nullify
+    // the need to redraw.
+    var aDepth = 0;
+    var bDepth = 0;
+    while (( aView = aView.get( 'parentView' ) )) {
+        aDepth += 1;
+    }
+    while (( bView = bView.get( 'parentView' ) )) {
+        bDepth += 1;
+    }
+    return aDepth - bDepth;
+};
+
 /**
     Class: O.RunLoop
 
@@ -3032,7 +3147,7 @@ var processTimeouts;
 var nextFrame;
 // (Because of a false positive. TODO(cmorgan): report this as a bug in eslint.)
 
-var RunLoop$1 = {
+var RunLoop = {
 
     mayRedraw: false,
 
@@ -3115,6 +3230,10 @@ var RunLoop$1 = {
         if ( l ) {
             this._queues[ queue ] = [];
 
+            if ( queue === 'render' ) {
+                toInvoke.sort( parentsBeforeChildren );
+            }
+
             for ( var i = 0; i < l; i += 1 ) {
                 var tuple = toInvoke[i];
                 var fn = tuple[0];
@@ -3126,7 +3245,7 @@ var RunLoop$1 = {
                         fn();
                     }
                 } catch ( error ) {
-                    RunLoop$1.didError( error );
+                    RunLoop.didError( error );
                 }
             }
             return true;
@@ -3153,26 +3272,19 @@ var RunLoop$1 = {
         var order = this._queueOrder;
         var l = order.length;
         var i = 0;
-        var doneWork = false;
         while ( i < l ) {
             // "Render" waits for next frame, except if in bg, since
             // animation frames don't fire while in the background and we want
             // to flush queues in a reasonable time, as they may redraw the tab
             // name, favicon etc.
-            //
-            // "After" waits for next frame if we draw anything, as it's often
-            // expensive measuring operations and we don't want to hold up
-            // display
             if ( !document.hidden && (
-                    ( i === 3 && !this$1.mayRedraw ) ||
-                    ( i === 4 && doneWork ) ) ) {
+                    ( i === 3 && !this$1.mayRedraw ) ) ) {
                 if ( !this$1._queues.nextFrame.length ) {
                     requestAnimFrame( nextFrame );
                 }
                 return;
             }
             if ( this$1.flushQueue( order[i] ) ) {
-                doneWork = true;
                 i = 0;
             } else {
                 i = i + 1;
@@ -3207,7 +3319,7 @@ var RunLoop$1 = {
             try {
                 fn();
             } catch ( error ) {
-                RunLoop$1.didError( error );
+                RunLoop.didError( error );
             }
         } else {
             if ( !allowDups ) {
@@ -3252,7 +3364,7 @@ var RunLoop$1 = {
                 returnValue = fn();
             }
         } catch ( error ) {
-            RunLoop$1.didError( error );
+            RunLoop.didError( error );
         }
         if ( this._depth === 1 ) {
             this.flushAllQueues();
@@ -3457,7 +3569,7 @@ Object.assign( Function.prototype, {
     queue: function queue ( queue$1 ) {
         var fn = this;
         return function () {
-            RunLoop$1.queueFn( queue$1, fn, this );
+            RunLoop.queueFn( queue$1, fn, this );
             return this;
         };
     },
@@ -3472,7 +3584,7 @@ Object.assign( Function.prototype, {
     nextLoop: function nextLoop () {
         var fn = this;
         return function () {
-            RunLoop$1.invokeInNextEventLoop( fn, this );
+            RunLoop.invokeInNextEventLoop( fn, this );
             return this;
         };
     },
@@ -3487,7 +3599,7 @@ Object.assign( Function.prototype, {
     nextFrame: function nextFrame () {
         var fn = this;
         return function () {
-            RunLoop$1.invokeInNextFrame( fn, this );
+            RunLoop.invokeInNextFrame( fn, this );
             return this;
         };
     },
@@ -3503,21 +3615,21 @@ Object.assign( Function.prototype, {
     invokeInRunLoop: function invokeInRunLoop () {
         var fn = this;
         return function () {
-            return RunLoop$1.invoke( fn, this, arguments );
+            return RunLoop.invoke( fn, this, arguments );
         };
     },
 });
 
-nextLoop = RunLoop$1.invoke.bind( RunLoop$1,
-    RunLoop$1.flushQueue, RunLoop$1, [ 'nextLoop' ]
+nextLoop = RunLoop.invoke.bind( RunLoop,
+    RunLoop.flushQueue, RunLoop, [ 'nextLoop' ]
 );
-processTimeouts = RunLoop$1.processTimeouts.bind( RunLoop$1 );
+processTimeouts = RunLoop.processTimeouts.bind( RunLoop );
 
 nextFrame = function ( time ) {
-    RunLoop$1.frameStartTime = time;
-    RunLoop$1.mayRedraw = true;
-    RunLoop$1.invoke( RunLoop$1.flushQueue, RunLoop$1, [ 'nextFrame' ] );
-    RunLoop$1.mayRedraw = false;
+    RunLoop.frameStartTime = time;
+    RunLoop.mayRedraw = true;
+    RunLoop.invoke( RunLoop.flushQueue, RunLoop, [ 'nextFrame' ] );
+    RunLoop.mayRedraw = false;
 };
 
 // TODO(cmorgan/modulify): do something about these exports: Function#queue,
@@ -3860,7 +3972,7 @@ var Binding = Class({
         // connects are, in which case delay connecting it a bit.
         if ( !this._doNotDelayConnection && ( !fromObject || !toObject ) ) {
             this._doNotDelayConnection = true;
-            RunLoop$1.queueFn( 'before', this.connect, this );
+            RunLoop.queueFn( 'before', this.connect, this );
             return this;
         }
 
@@ -4007,7 +4119,7 @@ var Binding = Class({
         this.isNotInSync = true;
         if ( !inQueue && !this.isSuspended ) {
             if ( queue ) {
-                RunLoop$1.queueFn( queue, this.sync, this, true );
+                RunLoop.queueFn( queue, this.sync, this, true );
             } else {
                 this.sync();
             }
@@ -5272,7 +5384,7 @@ var EventTarget = {
                         ( handler.object || target )[ handler.method ]( event );
                     }
                 } catch ( error ) {
-                    RunLoop$1.didError( error );
+                    RunLoop.didError( error );
                 }
             }
             // Move up the hierarchy, unless stopPropagation was called
@@ -5974,18 +6086,22 @@ var ObservableProps = {
             var key = path.slice( 0, nextDot );
             var value = this.get( key );
             var restOfPath = path.slice( nextDot + 1 );
-            var observers = meta( this ).observers[ key ];
+            var observers = meta( this ).observers;
+            var keyObservers = observers[ key ];
 
-            if ( observers ) {
-                var l = observers.length;
+            if ( keyObservers ) {
+                var l = keyObservers.length;
                 while ( l-- ) {
-                    var observer = observers[l];
+                    var observer = keyObservers[l];
                     if ( observer.path === restOfPath &&
                          observer.object === object &&
                          observer.method === method) {
-                            observers.splice( l, 1 );
+                            keyObservers.splice( l, 1 );
                             break;
                     }
+                }
+                if ( !keyObservers.length ) {
+                    delete observers[ key ];
                 }
             }
             if ( value ) {
@@ -6190,6 +6306,28 @@ var ObservableRange = {
             }
         }
         return this;
+    },
+
+    /**
+        Method: O.ObservableRange#hasRangeObservers
+
+        Returns true a range is being observed on the object by another object.
+
+        Returns:
+            {Boolean} Does the object have any range observers?
+    */
+    hasRangeObservers: function hasRangeObservers () {
+        var this$1 = this;
+
+        var observers = meta( this ).rangeObservers;
+        var l = observers ? observers.length : 0;
+        while ( l-- ) {
+            var object = observers[l].object;
+            if ( object && object !== this$1 ) {
+                return true;
+            }
+        }
+        return false;
     },
 };
 
@@ -7001,7 +7139,7 @@ var getViewFromNode = function ( node ) {
     var doc = node.ownerDocument;
     var view = null;
     while ( !view && node && node !== doc ) {
-        view = activeViews[ node.id ];
+        view = activeViews[ node.id ] || null;
         node = node.parentNode;
     }
     return view;
@@ -7333,6 +7471,7 @@ var View = Class({
     init: function init (/* ...mixins */) {
         var this$1 = this;
 
+        this._suspendRedraw = false;
         this._needsRedraw = null;
 
         this.parentView = null;
@@ -7370,6 +7509,25 @@ var View = Class({
         }
         this.clearPropertyCache();
         View.parent.destroy.call( this );
+    },
+
+    suspend: function suspend () {
+        if ( !this._suspendRedraw ) {
+            this.suspendBindings();
+            this._suspendRedraw = true;
+        }
+        return this;
+    },
+
+    resume: function resume () {
+        if ( this._suspendRedraw ) {
+            this._suspendRedraw = false;
+            this.resumeBindings();
+            if ( this._needsRedraw && this.get( 'isInDocument' ) ) {
+                RunLoop.queueFn( 'render', this.redraw, this );
+            }
+        }
+        return this;
     },
 
     // --- Screen reader accessibility ---
@@ -7488,7 +7646,7 @@ var View = Class({
     */
     willEnterDocument: function willEnterDocument () {
         if ( this.get( 'syncOnlyInDocument' ) ) {
-            this.resumeBindings();
+            this.resume();
         }
 
         if ( this._needsRedraw ) {
@@ -7517,7 +7675,7 @@ var View = Class({
         // If change was made since willEnterDocument, will not be
         // flushed, so add redraw to render queue.
         if ( this._needsRedraw ) {
-            RunLoop$1.queueFn( 'render', this.redraw, this );
+            RunLoop.queueFn( 'render', this.redraw, this );
         }
         this.set( 'isInDocument', true );
 
@@ -7582,7 +7740,7 @@ var View = Class({
             children[l].didLeaveDocument();
         }
         if ( this.get( 'syncOnlyInDocument' ) ) {
-            this.suspendBindings();
+            this.suspend();
         }
         return this;
     },
@@ -7753,8 +7911,8 @@ var View = Class({
             needsRedraw[l] = [
                 layerProperty,
                 oldProp ];
-            if ( this.get( 'isInDocument' ) ) {
-                RunLoop$1.queueFn( 'render', this.redraw, this );
+            if ( !this._suspendRedraw && this.get( 'isInDocument' ) ) {
+                RunLoop.queueFn( 'render', this.redraw, this );
             }
         }
         return this;
@@ -7776,7 +7934,8 @@ var View = Class({
 
         var needsRedraw = this._needsRedraw;
         var layer, i, l, prop;
-        if ( needsRedraw && !this.isDestroyed && this.get( 'isRendered' ) ) {
+        if ( needsRedraw && !this._suspendRedraw &&
+                !this.isDestroyed && this.get( 'isRendered' ) ) {
             layer = this.get( 'layer' );
             this._needsRedraw = null;
             for ( i = 0, l = needsRedraw.length; i < l; i += 1 ) {
@@ -7821,9 +7980,11 @@ var View = Class({
         );
         isRedrawingLayer = false;
 
-        childViews = this.get( 'childViews' );
-        for ( var i = 0; i < childViews.length; i += 1 ) {
-            childViews[i].didEnterDocument();
+        if ( this.get( 'isInDocument' ) ) {
+            childViews = this.get( 'childViews' );
+            for ( var i = 0; i < childViews.length; i += 1 ) {
+                childViews[i].didEnterDocument();
+            }
         }
 
         Element$1.forView( prevView );
@@ -7839,7 +8000,10 @@ var View = Class({
             layer - {Element} The view's layer.
     */
     redrawClassName: function redrawClassName ( layer ) {
-        layer.className = this.get( 'className' );
+        var className = this.get( 'className' );
+        if ( className !== undefined ) {
+            layer.className = className;
+        }
     },
 
     /**
@@ -7853,7 +8017,7 @@ var View = Class({
     */
     redrawLayerStyles: function redrawLayerStyles ( layer ) {
         layer.style.cssText = Object.toCSSString( this.get( 'layerStyles' ) );
-        this.didResize();
+        this.parentViewDidResize();
     },
 
     /**
@@ -7916,7 +8080,7 @@ var View = Class({
         var children = this.get( 'childViews' );
         var l = children.length;
         while ( l-- ) {
-            children[l].parentViewDidResize();
+            children[l].didResize();
         }
     },
 
@@ -7978,7 +8142,7 @@ var View = Class({
                 break;
             }
             offset += layer.offsetTop;
-        } while ( ( layer = layer.offsetParent ) !== parent );
+        } while ( ( layer = layer.offsetParent ) && ( layer !== parent ) );
         return offset;
     }.property( 'pxLayout' ),
 
@@ -8003,7 +8167,7 @@ var View = Class({
                 break;
             }
             offset += layer.offsetLeft;
-        } while ( ( layer = layer.offsetParent ) !== parent );
+        } while ( ( layer = layer.offsetParent ) && ( layer !== parent ) );
         return offset;
     }.property( 'pxLayout' ),
 
@@ -8777,73 +8941,6 @@ var Element$1 = {
     },
 
     /**
-        Function: O.Element.hasClass
-
-        Determines if an element has a particular class name.
-
-        DEPRECATED. Use `el.classList.contains( className )` directly.
-
-        Parameters:
-            el        - {Element} The element to test.
-            className - {String} The class name to check.
-
-        Returns:
-            {Boolean} Does the element have the class?
-    */
-    hasClass: function hasClass ( el, className ) {
-        if ( window.console && console.warn ) {
-            console.warn( 'O.Element.hasClass is deprecated' );
-        }
-        return el.classList.contains( className );
-    },
-
-    /**
-        Function: O.Element.addClass
-
-        Adds a class to the element if not already there.
-
-        DEPRECATED. Use `el.classList.add( className )` directly (remembering
-        however that it doesn’t return `this`).
-
-        Parameters:
-            el        - {Element} The element to add the class to.
-            className - {String} The class name to add.
-
-        Returns:
-            {O.Element} Returns self.
-    */
-    addClass: function addClass ( el, className ) {
-        if ( window.console && console.warn ) {
-            console.warn( 'O.Element.addClass is deprecated' );
-        }
-        el.classList.add( className );
-        return this;
-    },
-
-    /**
-        Function: O.Element.removeClass
-
-        Removes a class from the element if present.
-
-        DEPRECATED. Use `el.classList.remove( className )` directly (remembering
-        however that it doesn’t return `this`).
-
-        Parameters:
-            el        - {Element} The element to remove the class from.
-            className - {String} The class name to remove.
-
-        Returns:
-            {O.Element} Returns self.
-    */
-    removeClass: function removeClass ( el, className ) {
-        if ( window.console && console.warn ) {
-            console.warn( 'O.Element.removeClass is deprecated' );
-        }
-        el.classList.remove( className );
-        return this;
-    },
-
-    /**
         Function: O.Element.setStyle
 
         Sets a CSS style on the element.
@@ -8868,7 +8965,7 @@ var Element$1 = {
             try {
                 el.style[ style ] = value;
             } catch ( error ) {
-                RunLoop$1.didError({
+                RunLoop.didError({
                     name: 'Element#setStyle',
                     message: 'Invalid value set',
                     details:
@@ -9193,11 +9290,11 @@ var nextFrame$1 = function () {
     // Cache to local variable for speed
     var anims = animations;
     var l = anims.length;
-    var time = RunLoop$1.frameStartTime;
+    var time = RunLoop.frameStartTime;
 
     if ( l ) {
         // Request first to get in shortest time.
-        RunLoop$1.invokeInNextFrame( nextFrame$1 );
+        RunLoop.invokeInNextFrame( nextFrame$1 );
 
         while ( l-- ) {
             var objAnimations = anims[l];
@@ -9360,7 +9457,7 @@ var Animation = Class({
 
         // Start loop if no current animations
         if ( !animations.length ) {
-            RunLoop$1.invokeInNextFrame( nextFrame$1 );
+            RunLoop.invokeInNextFrame( nextFrame$1 );
         }
 
         // And add objectAnimations to animation queue
@@ -9522,8 +9619,8 @@ var styleAnimators = {
                 end = [ endValue ];
             }
             for ( i = 0, l = start.length; i < l; i += 1 ) {
-                if ( start[i] === 0 && /^[,\)]/.test( start[ i + 1 ] ) ) {
-                    start[ i + 1 ] = end[ i + 1 ].replace( /[,\)].*/g, '' ) +
+                if ( start[i] === 0 && /^[,)]/.test( start[ i + 1 ] ) ) {
+                    start[ i + 1 ] = end[ i + 1 ].replace( /[,)].*/g, '' ) +
                         start[ i + 1 ];
                 }
             }
@@ -9534,7 +9631,10 @@ var styleAnimators = {
                 ); }),
             };
         },
-        calcValue: function calcValue ( position, deltaValue ) {
+        calcValue: function calcValue ( position, deltaValue, _, end ) {
+            if ( !deltaValue ) {
+                return end;
+            }
             var start = deltaValue.start;
             var delta = deltaValue.delta;
             var transform = start[0];
@@ -9647,9 +9747,6 @@ var StyleAnimation = Class({
                         delta[ property ] = parseInt( end, 10 ) - start;
                     }
                 } else {
-                    RunLoop$1.didError({
-                        name: 'Can’t animate property: ' + property,
-                    });
                     current[ property ] = end;
                     setStyle$1( element, property, end );
                 }
@@ -9675,11 +9772,12 @@ var StyleAnimation = Class({
                     parts[1] = ( parseInt( parts[1], 10 ) + delta.top ) + 'px';
                     transform = parts.join( ',' );
                 }
-                delta.transform = styleAnimators.transform.calcDelta(
+                delta.tt = styleAnimators.transform.calcDelta(
                     from.transform || '',
                     transform
                 );
-                delta.top = 0;
+                animated.push( 'tt' );
+                animated = animated.filter( function (x) { return x !== 'top' && x !== 'tt'; } );
             }
         }
 
@@ -9714,27 +9812,48 @@ var StyleAnimation = Class({
 
         while ( l-- ) {
             var property = animated[l];
+            var delta = deltaValue[ property ];
+            var isTopTransform = ( property === 'tt' );
+            if ( isTopTransform ) {
+                property = 'transform';
+            }
 
-            // Calculate new value.
             var start = startValue[ property ];
             var end = endValue[ property ];
-            var delta = deltaValue[ property ];
             var unit = units[ property ];
-
             var animator = styleAnimators[ property ];
-
-            var value = current[ property ] = isRunning ?
+            var value = isRunning ?
                 animator ?
                     animator.calcValue( position, delta, start, end ) :
                     ( start + ( position * delta ) ) + unit :
                 end;
 
-            // And set.
+            if ( isTopTransform ) {
+                if ( !isRunning ) {
+                    continue;
+                }
+            } else {
+                current[ property ] = value;
+                if ( isRunning && deltaValue.tt &&
+                        ( property === 'top' || property === 'transform' ) ) {
+                    continue;
+                }
+            }
             setStyle$1( element, property, value );
         }
-        if ( !isRunning ) {
+    },
+
+    stop: function stop () {
+        if ( this.isRunning ) {
+            var element = this.element;
+            if ( this.deltaValue.tt ) {
+                var current = this.current;
+                setStyle$1( element, 'top', current.top );
+                setStyle$1( element, 'transform', current.transform );
+            }
             setStyle$1( element, 'will-change', 'auto' );
         }
+        return StyleAnimation.parent.stop.call( this );
     },
 });
 
@@ -9802,8 +9921,11 @@ var AnimatableView = {
         animating a property on the object. Decrements the <#animating>
         property.
     */
-    didAnimate: function didAnimate () {
+    didAnimate: function didAnimate ( animation ) {
         this.increment( 'animating', -1 );
+        if ( !this.get( 'animating' ) && animation instanceof StyleAnimation ) {
+            this.parentViewDidResize();
+        }
     },
 
     /**
@@ -9845,6 +9967,10 @@ var AnimatableView = {
                 this.get( 'animateLayerDuration' ),
                 this.get( 'animateLayerEasing' )
             );
+            if ( !layerAnimation.isRunning ) {
+                this.willAnimate( layerAnimation );
+                this.didAnimate( layerAnimation );
+            }
         } else {
             // Or just set.
             layerAnimation.stop();
@@ -9855,6 +9981,7 @@ var AnimatableView = {
                     setStyle( layer, property, value );
                 }
             }
+            this.parentViewDidResize();
         }
         // Just remove styles that are not specified in the new styles, but were
         // in the old styles
@@ -10436,6 +10563,495 @@ var Tap = new Gesture({
     },
 });
 
+/**
+    Class: O.AbstractControlView
+
+    Extends: O.View
+
+    The superclass for most DOM-control view classes. This is an abstract class
+    and should not be instantiated directly; it is only intended to be
+    subclassed.
+*/
+var AbstractControlView = Class({
+
+    Extends: View,
+
+    /**
+        Property: O.AbstractControlView#isDisabled
+        Type: Boolean
+        Default: false
+
+        Is the control disabled?
+    */
+    isDisabled: false,
+
+    /**
+        Property: O.AbstractControlView#isFocused
+        Type: Boolean
+
+        Represents whether the control currently has focus or not.
+    */
+    isFocused: false,
+
+    /**
+        Property: O.AbstractControlView#label
+        Type: String|Element|null
+        Default: ''
+
+        A label for the control, to be displayed next to it.
+    */
+    label: '',
+
+    /**
+        Property: O.AbstractControlView#name
+        Type: String|undefined
+        Default: undefined
+
+        If set, this will be the name attribute of the control.
+    */
+    name: undefined,
+
+    /**
+        Property: O.AbstractControlView#value
+        Type: *
+        Default: false
+
+        The value represented by this control, for example true/false if a
+        checkbox is checked/unchecked, or the text input into a textarea.
+    */
+    value: false,
+
+    /**
+        Property: O.AbstractControlView#tabIndex
+        Type: Number|undefined
+        Default: undefined
+
+        If set, this will become the tab index for the control.
+    */
+    tabIndex: undefined,
+
+    /**
+        Property: O.AbstractControlView#shortcut
+        Type: String
+        Default: ''
+
+        If set, this will be registered as the keyboard shortcut to activate the
+        control when it is in the document.
+    */
+    shortcut: '',
+
+    /**
+        Property: O.AbstractControlView#tooltip
+        Type: String
+        Default: '' or 'Shortcut: <shortcut>'
+
+        A tooltip to show when the mouse hovers over the view. Defaults to
+        informing the user of the keyboard shortcut for the control, if set.
+    */
+    tooltip: function () {
+        var shortcut = this.get( 'shortcut' );
+        return shortcut ?
+            loc( 'Shortcut: [_1]',
+                shortcut
+                    .split( ' ' )
+                    .map( formatKeyForPlatform )
+                    .join( ' ' + loc( 'or' ) + ' ' )
+            ) : '';
+    }.property( 'shortcut' ),
+
+    /**
+        Method: O.AbstractControlView#didEnterDocument
+
+        Overridden to add keyboard shortcuts.
+        See <O.View#didEnterDocument>.
+    */
+    didEnterDocument: function didEnterDocument () {
+        var this$1 = this;
+
+        AbstractControlView.parent.didEnterDocument.call( this );
+        var shortcut = this.get( 'shortcut' );
+        if ( shortcut ) {
+            shortcut.split( ' ' ).forEach( function (key) {
+                ViewEventsController.kbShortcuts
+                    .register( key, this$1, 'activate' );
+            });
+        }
+        return this;
+    },
+
+    /**
+        Method: O.AbstractControlView#didEnterDocument
+
+        Overridden to remove keyboard shortcuts.
+        See <O.View#didEnterDocument>.
+    */
+    willLeaveDocument: function willLeaveDocument () {
+        var this$1 = this;
+
+        var shortcut = this.get( 'shortcut' );
+        if ( shortcut ) {
+            shortcut.split( ' ' ).forEach( function (key) {
+                ViewEventsController.kbShortcuts
+                    .deregister( key, this$1, 'activate' );
+            });
+        }
+        // iOS is very buggy if you remove a focused control from the doc;
+        // the picker/keyboard stays up and cannot be dismissed
+        if ( UA.isIOS && this.get( 'isFocused' ) ) {
+            this.blur();
+        }
+        return AbstractControlView.parent.willLeaveDocument.call(
+            this );
+    },
+
+    /**
+        Property: O.AbstractControlView#layerTag
+        Type: String
+        Default: 'label'
+
+        Overrides default in <O.View#layerTag>.
+    */
+    layerTag: 'label',
+
+    /**
+        Property (private): O.AbstractControlView#_domControl
+        Type: Element|null
+
+        A reference to the DOM control managed by the view.
+    */
+    _domControl: null,
+
+    /**
+        Property (private): O.AbstractControlView#_domLabel
+        Type: Element|null
+
+        A reference to the DOM element containing the label for the view.
+    */
+    _domLabel: null,
+
+    /**
+        Method: O.AbstractControlView#draw
+
+        Overridden to set properties and add label. See <O.View#draw>.
+    */
+    draw: function draw ( layer, Element, el ) {
+        var control = this._domControl;
+        var name = this.get( 'name' );
+        var shortcut = this.get( 'shortcut' );
+        var tabIndex = this.get( 'tabIndex' );
+
+        if ( !control.id ) {
+            control.id = this.get( 'id' ) + '-input';
+        }
+        control.disabled = this.get( 'isDisabled' );
+
+        if ( name !== undefined ) {
+            control.name = name;
+        }
+
+        if ( tabIndex !== undefined ) {
+            control.tabIndex = tabIndex;
+        }
+
+        if ( shortcut && /^\w$/.test( shortcut ) ) {
+            control.accessKey = shortcut;
+        }
+
+        layer.title = this.get( 'tooltip' );
+        return this._domLabel = el( 'span.label', [ this.get( 'label' ) ] );
+    },
+
+    // --- Keep render in sync with state ---
+
+    abstractControlNeedsRedraw: function ( self, property, oldValue ) {
+        return this.propertyNeedsRedraw( self, property, oldValue );
+    }.observes(
+        'isDisabled', 'label', 'name', 'tooltip', 'tabIndex', 'shortcut' ),
+
+    /**
+        Method: O.AbstractControlView#redrawIsDisabled
+
+        Updates the disabled attribute on the DOM control to match the
+        isDisabled property of the view.
+    */
+    redrawIsDisabled: function redrawIsDisabled () {
+        this._domControl.disabled = this.get( 'isDisabled' );
+    },
+
+    /**
+        Method: O.AbstractControlView#redrawLabel
+
+        Updates the DOM label to match the label property of the view.
+    */
+    redrawLabel: function redrawLabel () {
+        var label = this._domLabel;
+        var child;
+        while ( child = label.firstChild ) {
+            label.removeChild( child );
+        }
+        Element$1.appendChildren( label, [
+            this.get( 'label' ) ]);
+    },
+
+    /**
+        Method: O.AbstractControlView#redrawName
+
+        Updates the name attribute on the DOM control to match the name
+        property of the view.
+    */
+    redrawName: function redrawName () {
+        this._domControl.name = this.get( 'name' );
+    },
+
+    /**
+        Method: O.AbstractControlView#redrawTooltip
+
+        Parameters:
+            layer - {Element} The DOM layer for the view.
+
+        Updates the title attribute on the DOM layer to match the tooltip
+        property of the view.
+    */
+    redrawTooltip: function redrawTooltip ( layer ) {
+        layer.title = this.get( 'tooltip' );
+    },
+
+    /**
+        Method: O.AbstractControlView#redrawTabIndex
+
+        Updates the tabIndex attribute on the DOM control to match the tabIndex
+        property of the view.
+    */
+    redrawTabIndex: function redrawTabIndex () {
+        this._domControl.tabIndex = this.get( 'tabIndex' );
+    },
+
+    redrawShortcut: function redrawShortcut () {
+        var shortcut = this.get( 'shortcut' );
+        if ( shortcut && !/^\w$/.test( shortcut ) ) {
+            shortcut = '';
+        }
+        this._domControl.accessKey = shortcut;
+    },
+
+    // --- Focus ---
+
+    /**
+        Method: O.AbstractControlView#focus
+
+        Focusses the control.
+
+        Returns:
+            {O.AbstractControlView} Returns self.
+    */
+    focus: function focus () {
+        if ( this.get( 'isInDocument' ) ) {
+            this._domControl.focus();
+            // Fire event synchronously.
+            if ( !this.get( 'isFocused' ) ) {
+                this.fire( 'focus' );
+            }
+        }
+        return this;
+    },
+
+    /**
+        Method: O.AbstractControlView#blur
+
+        Removes focus from the control.
+
+        Returns:
+            {O.AbstractControlView} Returns self.
+    */
+    blur: function blur () {
+        if ( this.get( 'isInDocument' ) ) {
+            this._domControl.blur();
+            // Fire event synchronously.
+            if ( this.get( 'isFocused' ) ) {
+                this.fire( 'blur' );
+            }
+        }
+        return this;
+    },
+
+    /**
+        Method (private): O.AbstractControlView#_updateIsFocused
+
+        Updates the <#isFocused> property.
+
+        Parameters:
+            event - {Event} The focus event.
+    */
+    _updateIsFocused: function ( event ) {
+        this.set( 'isFocused', event.type === 'focus' );
+    }.on( 'focus', 'blur' ),
+
+    // --- Activate ---
+
+    /**
+        Method: O.AbstractControlView#activate
+
+        An abstract method to be overridden by subclasses. This is the action
+        performed when the control is activated, either by being clicked on or
+        via a keyboard shortcut.
+    */
+    activate: function activate () {},
+
+});
+
+var passiveSupported = false;
+
+try {
+    var options = Object.defineProperty( {}, 'passive', {
+        get: function get () {
+            passiveSupported = true;
+        },
+    });
+    window.addEventListener( 'test', options, options);
+    window.removeEventListener( 'test', options, options);
+} catch ( error ) {
+    passiveSupported = false;
+}
+
+/**
+    Class: O.RootView
+
+    Extends: O.View
+
+    An O.RootView instance uses an existing DOM node for its layer, and forms
+    the root of the O.View tree making up your application. The root view adds
+    DOM event listeners to its layer to observe and dispatch events for the
+    whole view hierarchy.
+
+        MyApp.views.mainWindow = new O.RootView( document );
+
+    Normally, you will create an O.RootView instance with the document node for
+    each window in your application, but if your application is not taking over
+    the full page, it can be initiated with any other node already in the
+    document.
+*/
+var RootView = Class({
+
+    Extends: View,
+
+    syncOnlyInDocument: false,
+
+    layer: null,
+
+    init: function init ( node /*, ...mixins */) {
+        var this$1 = this;
+
+        RootView.parent.constructor.apply( this,
+            Array.prototype.slice.call( arguments, 1 ) );
+
+        // Node.DOCUMENT_NODE => 9.
+        var nodeIsDocument = ( node.nodeType === 9 );
+        var doc = nodeIsDocument ? node : node.ownerDocument;
+        var win = doc.defaultView;
+        var events, l;
+
+        events = [
+            'click', 'mousedown', 'mouseup', 'dblclick',
+            'keypress', 'keydown', 'keyup',
+            'dragstart',
+            'touchstart', 'touchmove', 'touchend', 'touchcancel',
+            'wheel',
+            'cut',
+            'submit' ];
+        for ( l = events.length; l--; ) {
+            node.addEventListener( events[l], this$1, passiveSupported ? {
+                passive: false,
+            } : false );
+        }
+        // These events don't bubble: have to capture.
+        // In IE, we use a version of focus and blur which will bubble, but
+        // there's no way of bubbling/capturing change and input.
+        // These events are automatically added to all inputs when created
+        // instead.
+        events = [ 'focus', 'blur', 'change', 'input' ];
+        for ( l = events.length; l--; ) {
+            node.addEventListener( events[l], this$1, true );
+        }
+        events = [ 'resize', 'scroll' ];
+        for ( l = events.length; l--; ) {
+            win.addEventListener( events[l], this$1, false );
+        }
+
+        this.isRendered = true;
+        this.isInDocument = true;
+        this.layer = nodeIsDocument ? node.body : node;
+    },
+
+    safeAreaInsetBottom: 0,
+
+    _onScroll: function ( event ) {
+        var layer = this.get( 'layer' );
+        var isBody = ( layer.nodeName === 'BODY' );
+        var doc = layer.ownerDocument;
+        var win = doc.defaultView;
+        var left = isBody ? win.pageXOffset : layer.scrollLeft;
+        var top = isBody ? win.pageYOffset : layer.scrollTop;
+        this.beginPropertyChanges()
+                .set( 'scrollLeft', left )
+                .set( 'scrollTop', top )
+            .endPropertyChanges();
+        event.stopPropagation();
+    }.on( 'scroll' ),
+
+    preventRootScroll: UA.isIOS ? function ( event ) {
+        var view = event.targetView;
+        var doc, win;
+        if ( !( view instanceof ScrollView ) &&
+                !view.getParent( ScrollView ) ) {
+            doc = this.layer.ownerDocument;
+            win = doc.defaultView;
+            if ( this.get( 'pxHeight' ) <= win.innerHeight &&
+                    !/^(?:INPUT|TEXTAREA)$/.test(
+                        doc.activeElement.nodeName ) ) {
+                event.preventDefault();
+            }
+        }
+    }.on( 'touchmove' ) : null,
+
+    focus: function focus () {
+        var layer = this.get( 'layer' );
+        var activeElement = layer.ownerDocument.activeElement;
+        var view = getViewFromNode( activeElement );
+        if ( view instanceof AbstractControlView ) {
+            view.blur();
+        } else if ( activeElement.blur ) {
+            activeElement.blur();
+        }
+    },
+
+    pxTop: 0,
+    pxLeft: 0,
+
+    handleEvent: function ( event ) {
+        switch ( event.type ) {
+        // We observe mousemove when mousedown.
+        case 'mousedown':
+            this.get( 'layer' ).ownerDocument
+                .addEventListener( 'mousemove', this, false );
+            break;
+        case 'mouseup':
+            this.get( 'layer' ).ownerDocument
+                .removeEventListener( 'mousemove', this, false );
+            break;
+        // Window resize events: just notify parent has resized.
+        case 'resize':
+            this.didResize();
+            return;
+        // Scroll events are special.
+        case 'scroll':
+            this._onScroll( event );
+            return;
+        }
+        ViewEventsController.handleEvent( event, null, this );
+    }.invokeInRunLoop(),
+});
+
+var el = Element$1.create;
 var setStyle$2 = Element$1.setStyle;
 
 var ScrollAnimation = Class({
@@ -10544,6 +11160,11 @@ var ScrollView = Class({
         return styles;
     }.property( 'layout', 'positioning', 'showScrollbarX', 'showScrollbarY' ),
 
+    isFixedDimensions: function () {
+        var positioning = this.get( 'positioning' );
+        return positioning === 'absolute' || positioning === 'fixed';
+    }.property( 'positioning' ),
+
     /**
         Property: O.ScrollView#keys
         Type: Object
@@ -10569,6 +11190,20 @@ var ScrollView = Class({
 
     didCreateLayer: function didCreateLayer ( layer ) {
         layer.tabIndex = -1;
+    },
+
+    willEnterDocument: function willEnterDocument () {
+        ScrollView.parent.willEnterDocument.call( this );
+        if ( this.get( 'isFixedDimensions' ) ) {
+            var scrollContents = this._scrollContents || this.get( 'layer' );
+            scrollContents.appendChild(
+                this._safeAreaPadding = el( 'div.v-Scroll-safeAreaPadding' )
+            );
+            this.getParent( RootView ).addObserverForKey(
+                'safeAreaInsetBottom', this, 'redrawSafeArea' );
+            this.redrawSafeArea();
+        }
+        return this;
     },
 
     didEnterDocument: function didEnterDocument () {
@@ -10600,6 +11235,35 @@ var ScrollView = Class({
 
         return ScrollView.parent.willLeaveDocument.call( this );
     },
+
+    didLeaveDocument: function didLeaveDocument () {
+        var safeAreaPadding = this._safeAreaPadding;
+        if ( safeAreaPadding ) {
+            this.getParent( RootView ).removeObserverForKey(
+                'safeAreaInsetBottom', this, 'redrawSafeArea' );
+            safeAreaPadding.parentNode.removeChild( safeAreaPadding );
+            this._safeAreaPadding = null;
+        }
+        return ScrollView.parent.didLeaveDocument.call( this );
+    },
+
+    insertView: function insertView ( view, relativeTo, where ) {
+        var safeAreaPadding = this._safeAreaPadding;
+        if ( !relativeTo && safeAreaPadding &&
+                ( !where || where === 'bottom' ) ) {
+            relativeTo = safeAreaPadding;
+            where = 'before';
+        }
+        return ScrollView.parent.insertView.call(
+            this, view, relativeTo, where );
+    },
+
+    redrawSafeArea: function redrawSafeArea () {
+        this._safeAreaPadding.style.height =
+            this.getParent( RootView ).get( 'safeAreaInsetBottom' ) + 'px';
+    },
+
+    // ---
 
     _restoreScroll: function () {
         // Scroll is reset to 0 in some browsers whenever it is removed from the
@@ -10815,7 +11479,7 @@ var ScrollView = Class({
         layer.scrollTop = y;
         // In case we've gone past the end.
         if ( x || y ) {
-            RunLoop$1.queueFn( 'after', this.syncBackScroll, this );
+            RunLoop.queueFn( 'after', this.syncBackScroll, this );
         }
     },
 
@@ -10864,11 +11528,6 @@ var ScrollView = Class({
 
 if ( UA.isIOS ) {
     Object.assign( ScrollView.prototype, {
-        isFixedDimensions: function () {
-            var positioning = this.get( 'positioning' );
-            return positioning === 'absolute' || positioning === 'fixed';
-        }.property( 'positioning' ),
-
         draw: function draw ( layer, Element, el ) {
             var isFixedDimensions = this.get( 'isFixedDimensions' );
             var scrollFixerHeight = 1;
@@ -10898,7 +11557,6 @@ if ( UA.isIOS ) {
             Element.appendChildren( layer, children );
 
             if ( isFixedDimensions ) {
-                layer.style.paddingBottom = 'constant(safe-area-inset-bottom)';
                 layer.appendChild(
                     el( 'div', {
                         style: 'position:absolute;top:100%;left:0px;' +
@@ -10933,14 +11591,16 @@ if ( UA.isIOS ) {
         }.on( 'touchmove' ),
 
         insertView: function insertView ( view, relativeTo, where ) {
-            if ( !relativeTo && this.get( 'isRendered' ) &&
-                    this.get( 'isFixedDimensions' ) ) {
+            var safeAreaPadding = this._safeAreaPadding;
+            if ( !relativeTo && safeAreaPadding ) {
                 relativeTo = this.get( 'layer' );
                 if ( where === 'top' ) {
                     relativeTo = relativeTo.firstChild;
                     where = 'after';
                 } else if ( !where || where === 'bottom' ) {
-                    relativeTo = relativeTo.lastChild;
+                    relativeTo = this.get( 'isFixedDimensions' ) ?
+                        safeAreaPadding.previousSibling :
+                        safeAreaPadding;
                     where = 'before';
                 }
             }
@@ -10950,480 +11610,13 @@ if ( UA.isIOS ) {
     });
 }
 
-/**
-    Class: O.AbstractControlView
-
-    Extends: O.View
-
-    The superclass for most DOM-control view classes. This is an abstract class
-    and should not be instantiated directly; it is only intended to be
-    subclassed.
-*/
-var AbstractControlView = Class({
-
-    Extends: View,
-
-    /**
-        Property: O.AbstractControlView#isDisabled
-        Type: Boolean
-        Default: false
-
-        Is the control disabled?
-    */
-    isDisabled: false,
-
-    /**
-        Property: O.AbstractControlView#isFocused
-        Type: Boolean
-
-        Represents whether the control currently has focus or not.
-    */
-    isFocused: false,
-
-    /**
-        Property: O.AbstractControlView#label
-        Type: String|Element|null
-        Default: ''
-
-        A label for the control, to be displayed next to it.
-    */
-    label: '',
-
-    /**
-        Property: O.AbstractControlView#name
-        Type: String|undefined
-        Default: undefined
-
-        If set, this will be the name attribute of the control.
-    */
-    name: undefined,
-
-    /**
-        Property: O.AbstractControlView#value
-        Type: *
-        Default: false
-
-        The value represented by this control, for example true/false if a
-        checkbox is checked/unchecked, or the text input into a textarea.
-    */
-    value: false,
-
-    /**
-        Property: O.AbstractControlView#tabIndex
-        Type: Number|undefined
-        Default: undefined
-
-        If set, this will become the tab index for the control.
-    */
-    tabIndex: undefined,
-
-    /**
-        Property: O.AbstractControlView#shortcut
-        Type: String
-        Default: ''
-
-        If set, this will be registered as the keyboard shortcut to activate the
-        control when it is in the document.
-    */
-    shortcut: '',
-
-    /**
-        Property: O.AbstractControlView#tooltip
-        Type: String
-        Default: '' or 'Shortcut: <shortcut>'
-
-        A tooltip to show when the mouse hovers over the view. Defaults to
-        informing the user of the keyboard shortcut for the control, if set.
-    */
-    tooltip: function () {
-        var shortcut = this.get( 'shortcut' );
-        return shortcut ?
-            loc( 'Shortcut: [_1]',
-                shortcut
-                    .split( ' ' )
-                    .map( formatKeyForPlatform )
-                    .join( ' ' + loc( 'or' ) + ' ' )
-            ) : '';
-    }.property( 'shortcut' ),
-
-    /**
-        Method: O.AbstractControlView#didEnterDocument
-
-        Overridden to add keyboard shortcuts.
-        See <O.View#didEnterDocument>.
-    */
-    didEnterDocument: function didEnterDocument () {
-        var this$1 = this;
-
-        var shortcut = this.get( 'shortcut' );
-        if ( shortcut ) {
-            shortcut.split( ' ' ).forEach( function (key) {
-                ViewEventsController.kbShortcuts
-                    .register( key, this$1, 'activate' );
-            });
-        }
-        return AbstractControlView.parent.didEnterDocument.call( this );
-    },
-
-    /**
-        Method: O.AbstractControlView#didEnterDocument
-
-        Overridden to remove keyboard shortcuts.
-        See <O.View#didEnterDocument>.
-    */
-    willLeaveDocument: function willLeaveDocument () {
-        var this$1 = this;
-
-        var shortcut = this.get( 'shortcut' );
-        if ( shortcut ) {
-            shortcut.split( ' ' ).forEach( function (key) {
-                ViewEventsController.kbShortcuts
-                    .deregister( key, this$1, 'activate' );
-            });
-        }
-        // iOS is very buggy if you remove a focused control from the doc;
-        // the picker/keyboard stays up and cannot be dismissed
-        if ( UA.isIOS && this.get( 'isFocused' ) ) {
-            this.blur();
-        }
-        return AbstractControlView.parent.willLeaveDocument.call(
-            this );
-    },
-
-    /**
-        Property: O.AbstractControlView#layerTag
-        Type: String
-        Default: 'label'
-
-        Overrides default in <O.View#layerTag>.
-    */
-    layerTag: 'label',
-
-    /**
-        Property (private): O.AbstractControlView#_domControl
-        Type: Element|null
-
-        A reference to the DOM control managed by the view.
-    */
-    _domControl: null,
-
-    /**
-        Property (private): O.AbstractControlView#_domLabel
-        Type: Element|null
-
-        A reference to the DOM element containing the label for the view.
-    */
-    _domLabel: null,
-
-    /**
-        Method: O.AbstractControlView#draw
-
-        Overridden to set properties and add label. See <O.View#draw>.
-    */
-    draw: function draw ( layer, Element, el ) {
-        var control = this._domControl;
-        var name = this.get( 'name' );
-        var shortcut = this.get( 'shortcut' );
-        var tabIndex = this.get( 'tabIndex' );
-
-        if ( !control.id ) {
-            control.id = this.get( 'id' ) + '-input';
-        }
-        control.disabled = this.get( 'isDisabled' );
-
-        if ( name !== undefined ) {
-            control.name = name;
-        }
-
-        if ( tabIndex !== undefined ) {
-            control.tabIndex = tabIndex;
-        }
-
-        if ( shortcut && ( /^\w$/.test( shortcut ) ) ) {
-            control.accessKey = shortcut;
-        }
-
-        layer.title = this.get( 'tooltip' );
-        return this._domLabel = el( 'span.label', [ this.get( 'label' ) ] );
-    },
-
-    // --- Keep render in sync with state ---
-
-    abstractControlNeedsRedraw: function ( self, property, oldValue ) {
-        return this.propertyNeedsRedraw( self, property, oldValue );
-    }.observes( 'isDisabled', 'label', 'name', 'tooltip', 'tabIndex' ),
-
-    /**
-        Method: O.AbstractControlView#redrawIsDisabled
-
-        Updates the disabled attribute on the DOM control to match the
-        isDisabled property of the view.
-    */
-    redrawIsDisabled: function redrawIsDisabled () {
-        this._domControl.disabled = this.get( 'isDisabled' );
-    },
-
-    /**
-        Method: O.AbstractControlView#redrawLabel
-
-        Updates the DOM label to match the label property of the view.
-    */
-    redrawLabel: function redrawLabel () {
-        var label = this._domLabel;
-        var child;
-        while ( child = label.firstChild ) {
-            label.removeChild( child );
-        }
-        Element$1.appendChildren( label, [
-            this.get( 'label' ) ]);
-    },
-
-    /**
-        Method: O.AbstractControlView#redrawName
-
-        Updates the name attribute on the DOM control to match the name
-        property of the view.
-    */
-    redrawName: function redrawName () {
-        this._domControl.name = this.get( 'name' );
-    },
-
-    /**
-        Method: O.AbstractControlView#redrawTooltip
-
-        Parameters:
-            layer - {Element} The DOM layer for the view.
-
-        Updates the title attribute on the DOM layer to match the tooltip
-        property of the view.
-    */
-    redrawTooltip: function redrawTooltip ( layer ) {
-        layer.title = this.get( 'tooltip' );
-    },
-
-    /**
-        Method: O.AbstractControlView#redrawTabIndex
-
-        Updates the tabIndex attribute on the DOM control to match the tabIndex
-        property of the view.
-    */
-    redrawTabIndex: function redrawTabIndex () {
-        this._domControl.tabIndex = this.get( 'tabIndex' );
-    },
-
-    // --- Focus ---
-
-    /**
-        Method: O.AbstractControlView#focus
-
-        Focusses the control.
-
-        Returns:
-            {O.AbstractControlView} Returns self.
-    */
-    focus: function focus () {
-        if ( this.get( 'isInDocument' ) ) {
-            this._domControl.focus();
-            // Fire event synchronously.
-            if ( !this.get( 'isFocused' ) ) {
-                this.fire( 'focus' );
-            }
-        }
-        return this;
-    },
-
-    /**
-        Method: O.AbstractControlView#blur
-
-        Removes focus from the control.
-
-        Returns:
-            {O.AbstractControlView} Returns self.
-    */
-    blur: function blur () {
-        if ( this.get( 'isInDocument' ) ) {
-            this._domControl.blur();
-            // Fire event synchronously.
-            if ( this.get( 'isFocused' ) ) {
-                this.fire( 'blur' );
-            }
-        }
-        return this;
-    },
-
-    /**
-        Method (private): O.AbstractControlView#_updateIsFocused
-
-        Updates the <#isFocused> property.
-
-        Parameters:
-            event - {Event} The focus event.
-    */
-    _updateIsFocused: function ( event ) {
-        this.set( 'isFocused', event.type === 'focus' );
-    }.on( 'focus', 'blur' ),
-
-    // --- Activate ---
-
-    /**
-        Method: O.AbstractControlView#activate
-
-        An abstract method to be overridden by subclasses. This is the action
-        performed when the control is activated, either by being clicked on or
-        via a keyboard shortcut.
-    */
-    activate: function activate () {},
-
-});
-
-var passiveSupported = false;
-
-try {
-    var options = Object.defineProperty( {}, 'passive', {
-        get: function () {
-            passiveSupported = true;
-        }
-    });
-    window.addEventListener( 'test', options, options);
-    window.removeEventListener( 'test', options, options);
-} catch ( error ) {
-    passiveSupported = false;
-}
-
-/**
-    Class: O.RootView
-
-    Extends: O.View
-
-    An O.RootView instance uses an existing DOM node for its layer, and forms
-    the root of the O.View tree making up your application. The root view adds
-    DOM event listeners to its layer to observe and dispatch events for the
-    whole view hierarchy.
-
-        MyApp.views.mainWindow = new O.RootView( document );
-
-    Normally, you will create an O.RootView instance with the document node for
-    each window in your application, but if your application is not taking over
-    the full page, it can be initiated with any other node already in the
-    document.
-*/
-var RootView = Class({
-
-    Extends: View,
-
-    syncOnlyInDocument: false,
-
-    layer: null,
-
-    init: function init ( node /*, ...mixins */) {
-        var this$1 = this;
-
-        RootView.parent.constructor.apply( this,
-            Array.prototype.slice.call( arguments, 1 ) );
-
-        // Node.DOCUMENT_NODE => 9.
-        var nodeIsDocument = ( node.nodeType === 9 );
-        var doc = nodeIsDocument ? node : node.ownerDocument;
-        var win = doc.defaultView;
-        var events, l;
-
-        events = [
-            'click', 'mousedown', 'mouseup', 'dblclick',
-            'keypress', 'keydown', 'keyup',
-            'dragstart',
-            'touchstart', 'touchmove', 'touchend', 'touchcancel',
-            'cut',
-            'submit' ];
-        for ( l = events.length; l--; ) {
-            node.addEventListener( events[l], this$1, passiveSupported ? {
-                passive: false,
-            } : false );
-        }
-        // These events don't bubble: have to capture.
-        // In IE, we use a version of focus and blur which will bubble, but
-        // there's no way of bubbling/capturing change and input.
-        // These events are automatically added to all inputs when created
-        // instead.
-        events = [ 'focus', 'blur', 'change', 'input' ];
-        for ( l = events.length; l--; ) {
-            node.addEventListener( events[l], this$1, true );
-        }
-        events = [ 'resize', 'scroll' ];
-        for ( l = events.length; l--; ) {
-            win.addEventListener( events[l], this$1, false );
-        }
-
-        this.isRendered = true;
-        this.isInDocument = true;
-        this.layer = nodeIsDocument ? node.body : node;
-    },
-
-    _onScroll: function ( event ) {
-        var layer = this.get( 'layer' );
-        var isBody = ( layer.nodeName === 'BODY' );
-        var doc = layer.ownerDocument;
-        var win = doc.defaultView;
-        var left = isBody ? win.pageXOffset : layer.scrollLeft;
-        var top = isBody ? win.pageYOffset : layer.scrollTop;
-        this.beginPropertyChanges()
-                .set( 'scrollLeft', left )
-                .set( 'scrollTop', top )
-            .endPropertyChanges();
-        event.stopPropagation();
-    }.on( 'scroll' ),
-
-    preventRootScroll: UA.isIOS ? function ( event ) {
-        var view = event.targetView;
-        var doc, win;
-        if ( !( view instanceof ScrollView ) &&
-                !view.getParent( ScrollView ) ) {
-            doc = this.layer.ownerDocument;
-            win = doc.defaultView;
-            if ( this.get( 'pxHeight' ) <= win.innerHeight &&
-                    !/^(?:INPUT|TEXTAREA)$/.test(
-                        doc.activeElement.nodeName ) ) {
-                event.preventDefault();
-            }
-        }
-    }.on( 'touchmove' ) : null,
-
-    focus: function focus () {
-        var layer = this.get( 'layer' );
-        var activeElement = layer.ownerDocument.activeElement;
-        var view = getViewFromNode( activeElement );
-        if ( view instanceof AbstractControlView ) {
-            view.blur();
-        } else if ( activeElement.blur ) {
-            activeElement.blur();
-        }
-    },
-
-    pxTop: 0,
-    pxLeft: 0,
-
-    handleEvent: function ( event ) {
-        switch ( event.type ) {
-        // We observe mousemove when mousedown.
-        case 'mousedown':
-            this.get( 'layer' ).ownerDocument
-                .addEventListener( 'mousemove', this, false );
-            break;
-        case 'mouseup':
-            this.get( 'layer' ).ownerDocument
-                .removeEventListener( 'mousemove', this, false );
-            break;
-        // Window resize events: just notify parent has resized.
-        case 'resize':
-            this.didResize();
-            return;
-        // Scroll events are special.
-        case 'scroll':
-            this._onScroll( event );
-            return;
-        }
-        ViewEventsController.handleEvent( event, null, this );
-    }.invokeInRunLoop(),
-});
+var inView = function ( view, event ) {
+    var targetView = event.targetView;
+    while ( targetView && targetView !== view ) {
+        targetView = targetView.get( 'parentView' );
+    }
+    return !!targetView;
+};
 
 var ModalEventHandler = Class({
 
@@ -11432,15 +11625,6 @@ var ModalEventHandler = Class({
     init: function init (/* ...mixins */) {
         ModalEventHandler.parent.constructor.apply( this, arguments );
         this._seenMouseDown = false;
-    },
-
-    inView: function inView ( event ) {
-        var targetView = event.targetView;
-        var view = this.get( 'view' );
-        while ( targetView && targetView !== view ) {
-            targetView = targetView.get( 'parentView' );
-        }
-        return !!targetView;
     },
 
     // If a user clicks outside the menu we want to close it. But we don't want
@@ -11460,24 +11644,28 @@ var ModalEventHandler = Class({
     // before hiding on click. On Android/iOS, we will not see a mousedown
     // event, so we also count a touchstart event.
     handleMouse: function ( event ) {
+        var view = this.get( 'view' );
         var type = event.type;
-        var view;
-        if ( !event.seenByModal && !this.inView( event ) ) {
+        if ( !event.seenByModal && !inView( view, event ) ) {
             event.stopPropagation();
             if ( type === 'mousedown' ) {
                 this._seenMouseDown = true;
             } else if ( type === 'click' ) {
                 event.preventDefault();
                 if ( this._seenMouseDown ) {
-                    view = this.get( 'view' );
                     if ( view.clickedOutside ) {
                         view.clickedOutside( event );
                     }
                 }
+            } else if ( type === 'wheel' ) {
+                var scrollView = this.get( 'view' ).getParent( ScrollView );
+                if ( !scrollView || !inView( scrollView, event ) ) {
+                    event.preventDefault();
+                }
             }
         }
         event.seenByModal = true;
-    }.on( 'click', 'mousedown', 'mouseup', 'tap' ),
+    }.on( 'click', 'mousedown', 'mouseup', 'tap', 'wheel' ),
 
     // If the user clicks on a scroll bar to scroll (I know, who does that
     // these days right?), we don't want to count that as a click. So cancel
@@ -11487,10 +11675,10 @@ var ModalEventHandler = Class({
     }.on( 'scroll' ),
 
     handleKeys: function ( event ) {
-        if ( !event.seenByModal && !this.inView( event ) ) {
+        var view = this.get( 'view' );
+        if ( !event.seenByModal && !inView( view, event ) ) {
             event.stopPropagation();
             // View may be interested in key events:
-            var view = this.get( 'view' );
             if ( view.keyOutside ) {
                 view.keyOutside( event );
             }
@@ -11499,7 +11687,8 @@ var ModalEventHandler = Class({
     }.on( 'keypress', 'keydown', 'keyup' ),
 
     handleTouch: function ( event ) {
-        if ( !event.seenByModal && !this.inView( event ) ) {
+        var view = this.get( 'view' );
+        if ( !event.seenByModal && !inView( view, event ) ) {
             event.preventDefault();
             event.stopPropagation();
             // Clicks outside should now close the modal.
@@ -11513,188 +11702,150 @@ var PopOverView = Class({
 
     Extends: View,
 
-    className: 'v-PopOver',
+    init: function init () {
+        this.parentPopOverView = null;
+        this.isVisible = false;
+        this.options = {};
+        this._inResize = false;
+        PopOverView.parent.init.apply( this, arguments );
+    },
+
+    className: function () {
+        var options = this.get( 'options' );
+        var positionToThe = options && options.positionToThe || 'bottom';
+        var alignEdge = options && options.alignEdge || 'left';
+        return 'v-PopOverContainer' +
+            ' v-PopOverContainer--p' + positionToThe.charAt( 0 ) +
+            ' v-PopOverContainer--a' + alignEdge.charAt( 0 );
+    }.property( 'options' ),
 
     positioning: 'absolute',
-
-    isVisible: false,
-    parentPopOverView: null,
 
     ariaAttributes: {
         modal: 'true',
     },
 
-    /*
-        Options
-        - view -> The view to append to the pop over
-        - alignWithView -> the view to align to
-        - atNode -> the node within the view to align to
-        - positionToThe -> 'bottom'/'top'/'left'/'right'
-        - alignEdge -> 'left'/'centre'/'right'/'top'/'middle'/'bottom'
-        - inParent -> The view to insert the pop over in (optional)
-        - showCallout -> true/false
-        - offsetLeft
-        - offsetTop
-        - resistHiding -> true to stop clicking outside or pressing Esc closing
-          the popover, false for normal behaviour; may also be a function
-          returning true or false
-          (incidental note: this would be nicer if options was an O.Object)
-        - onHide: fn
-    */
-    show: function show ( options ) {
-        if ( options.alignWithView === this ) {
-            return this.get( 'subPopOverView' ).show( options );
+    draw: function draw ( layer, Element, el ) {
+        var children = [
+            this._aFlex = el( 'div' ),
+            this._popOver = el( 'div.v-PopOver', [
+                this._callout = el( 'b.v-PopOver-callout', [
+                    el( 'b.v-PopOver-triangle' ) ]) ]),
+            this._bFlex = el( 'div' ) ];
+        this.redrawLayer();
+        return children;
+    },
+
+    redrawLayer: function redrawLayer () {
+        var options = this.get( 'options' );
+        if ( !options ) {
+            return;
         }
-        this.hide();
-
-        this._options = options;
-
-        // Set layout and insert in the right place
-        var eventHandler = this.get( 'eventHandler' );
-        var view = options.view;
         var alignWithView = options.alignWithView;
-        var atNode = options.atNode || alignWithView.get( 'layer' );
-        var atNodeWidth = atNode.offsetWidth;
-        var atNodeHeight = atNode.offsetHeight;
+        var atNode = options.atNode ||
+            ( alignWithView === this.get( 'parentPopOverView' ) ?
+                alignWithView._popOver : alignWithView.get( 'layer' ) );
         var positionToThe = options.positionToThe || 'bottom';
+        var positionToTheLeftOrRight =
+            positionToThe === 'left' || positionToThe === 'right';
         var alignEdge = options.alignEdge || 'left';
-        var parent = options.inParent;
-        var deltaLeft = 0;
-        var deltaTop = 0;
-        var el = Element$1.create;
+        var offsetTop = options.offsetTop || 0;
+        var offsetLeft = options.offsetLeft || 0;
+        var rootView = alignWithView.getParent( RootView );
+        var position = atNode.getBoundingClientRect();
+        var posTop = position.top;
+        var posLeft = position.left;
+        var posWidth = position.width;
+        var posHeight = position.height;
+        var aFlexEl = this._aFlex;
+        var bFlexEl = this._bFlex;
+        var popOverEl = this._popOver;
+        var calloutEl = this._callout;
+        var safeAreaInsetBottom = rootView.get( 'safeAreaInsetBottom' );
+        var layout = {};
+        var calloutStyle = '';
+        var aFlex, bFlex, startDistance, endDistance;
 
-        // Want nearest parent scroll view (or root view if none).
-        // Special case parent == parent pop-over view.
-        if ( !parent ) {
-            parent = options.atNode ?
-                alignWithView : alignWithView.get( 'parentView' );
-            while ( !( parent instanceof RootView ) &&
-                    !( parent instanceof ScrollView ) &&
-                    !( parent instanceof PopOverView ) ) {
-                parent = parent.get( 'parentView' );
-            }
+        this.insertView( options.view, this._popOver );
+
+        if ( safeAreaInsetBottom ) {
+            layout.paddingBottom = safeAreaInsetBottom;
         }
-
-        // Now find out our offsets;
-        var position = Element$1.getPosition( atNode, parent.get( 'layer' ) );
-        var top = position.top;
-        var left = position.left;
-
         switch ( positionToThe ) {
+        case 'top':
+            layout.paddingBottom = Math.max( safeAreaInsetBottom,
+                rootView.get( 'pxHeight' ) - posTop - offsetTop );
+            break;
         case 'right':
-            left += atNodeWidth;
-            /* falls through */
-        case 'left':
-            switch ( alignEdge ) {
-            // case 'top':
-            //    break; // nothing to do
-            case 'middle':
-                atNodeHeight = atNodeHeight >> 1;
-                /* falls through */
-            case 'bottom':
-                top += atNodeHeight;
-                break;
-            }
+            layout.paddingLeft = posLeft + posWidth + offsetLeft;
             break;
         case 'bottom':
-            top += atNodeHeight;
-            /* falls through */
-        case 'top':
-            switch ( alignEdge ) {
-            // case 'left':
-            //     break; // nothing to do
-            case 'centre':
-                atNodeWidth = atNodeWidth >> 1;
-                /* falls through */
-            case 'right':
-                left += atNodeWidth;
-                break;
-            }
+            layout.paddingTop = posTop + posHeight + offsetTop;
             break;
-        }
-
-        top += options.offsetTop || 0;
-        left += options.offsetLeft || 0;
-
-        // Round values to prevent buggy callout rendering.
-        top = Math.round( top );
-        left = Math.round( left );
-
-        // Set layout
-        this.set( 'layout', {
-            top: 0,
-            left: 0,
-            transform: 'translate(' +
-                ( left + deltaLeft ) + 'px,' +
-                ( top + deltaTop ) + 'px' +
-            ')',
-        });
-
-        // Insert view
-        this.insertView( view );
-        this.render();
-
-        // Callout
-        var layer = this.get( 'layer' );
-        if ( options.showCallout ) {
-            layer.appendChild(
-                el( 'b', {
-                    className: 'v-PopOver-callout' +
-                        ' v-PopOver-callout--' + positionToThe.charAt( 0 ) +
-                        ' v-PopOver-callout--' + alignEdge,
-                }, [
-                    this._callout = el( 'b', {
-                        className: 'v-PopOver-triangle' +
-                            ' v-PopOver-triangle--' + positionToThe.charAt( 0 ),
-                    }) ])
-            );
-        }
-
-        // Insert into parent.
-        parent.insertView( this );
-
-        // Adjust positioning
-        switch ( positionToThe ) {
         case 'left':
-            deltaLeft -= layer.offsetWidth;
-            /* falls through */
-        case 'right':
-            switch ( alignEdge ) {
-            // case 'top':
-            //    break; // nothing to do
-            case 'middle':
-                deltaTop -= layer.offsetHeight >> 1;
-                break;
-            case 'bottom':
-                deltaTop -= layer.offsetHeight;
-                break;
-            }
+            layout.paddingRight =
+                rootView.get( 'pxWidth' ) - posLeft - offsetLeft;
             break;
+        }
+
+        // 0% rather than 0 for IE11 compatibility due to Bug #4
+        // in https://github.com/philipwalton/flexbugs
+        switch ( alignEdge ) {
         case 'top':
-            deltaTop -= layer.offsetHeight;
-            /* falls through */
+            aFlex = '0 1 ' + ( posTop + offsetTop ) + 'px';
+            bFlex = '1 0 0%';
+            break;
+        case 'middle':
+            startDistance =
+                Math.round( posTop + offsetTop + ( posHeight / 2 ) );
+            endDistance = rootView.get( 'pxHeight' ) -
+                safeAreaInsetBottom - startDistance;
+            aFlex = startDistance + ' 0 0';
+            bFlex = endDistance + ' 0 0';
+            calloutStyle = 'top:' +
+                ( 100 * startDistance / ( startDistance + endDistance ) ) + '%';
+            break;
         case 'bottom':
-            switch ( alignEdge ) {
-            // case 'left':
-            //     break; // nothing to do
-            case 'centre':
-                deltaLeft -= layer.offsetWidth >> 1;
-                break;
-            case 'right':
-                deltaLeft -= layer.offsetWidth;
-                break;
-            }
+            aFlex = '1 0 0%';
+            bFlex = '0 1 ' + ( rootView.get( 'pxHeight' ) -
+                ( posTop + posHeight + offsetTop ) ) + 'px';
+            break;
+        case 'left':
+            aFlex = '0 1 ' + ( posLeft + offsetLeft ) + 'px';
+            bFlex = '1 0 0%';
+            break;
+        case 'centre':
+            startDistance =
+                Math.round( posLeft + offsetLeft + ( posWidth / 2 ) );
+            endDistance = rootView.get( 'pxWidth' ) - startDistance;
+            aFlex = startDistance + ' 0 0';
+            bFlex = endDistance + ' 0 0';
+            calloutStyle = 'left:' +
+                ( 100 * startDistance / ( startDistance + endDistance ) ) + '%';
+            break;
+        case 'right':
+            aFlex = '1 0 0%';
+            bFlex = '0 1 ' + ( rootView.get( 'pxWidth' ) -
+                ( posLeft + posWidth + offsetLeft ) ) + 'px';
             break;
         }
 
-        this.adjustPosition( deltaLeft, deltaTop );
-
-        if ( eventHandler ) {
-            ViewEventsController.addEventTarget( eventHandler, 10 );
+        if ( !options.showCallout ) {
+            calloutStyle = 'display:none';
         }
-        this.set( 'isVisible', true );
 
-        return this;
+        aFlexEl.className = positionToTheLeftOrRight ?
+            'v-PopOverContainer-top' : 'v-PopOverContainer-left';
+        aFlexEl.style.cssText = 'flex:' + aFlex;
+        bFlexEl.className = positionToTheLeftOrRight ?
+            'v-PopOverContainer-bottom' : 'v-PopOverContainer-right';
+        bFlexEl.style.cssText = 'flex:' + bFlex;
+        popOverEl.style.cssText = '';
+        calloutEl.style.cssText = calloutStyle;
+
+        this.set( 'layout', layout )
+            .redraw()
+            .keepInBounds();
     },
 
     /**
@@ -11711,104 +11862,142 @@ var PopOverView = Class({
         bottom: 10,
     },
 
-    adjustPosition: function adjustPosition ( deltaLeft, deltaTop ) {
-        var parent = this.get( 'parentView' );
-        var layer = this.get( 'layer' );
-        var positionToThe = this._options.positionToThe || 'bottom';
-        var callout = this._callout;
-        var calloutIsAtTopOrBottom =
-                ( positionToThe === 'top' || positionToThe === 'bottom' );
+    keepInBounds: function () {
+        if ( !this.get( 'isInDocument' ) ) {
+            return;
+        }
+        var rootView = this.get( 'parentView' );
+        var popOverEl = this._popOver;
+        var options = this.get( 'options' );
+        var positionToThe = options.positionToThe;
+        var positionToTheLeftOrRight =
+            positionToThe === 'left' || positionToThe === 'right';
         var parentMargin = this.get( 'parentMargin' );
+        var keepInVerticalBounds = options.keepInVerticalBounds;
+        var keepInHorizontalBounds = options.keepInHorizontalBounds;
+        var deltaLeft = 0;
+        var deltaTop = 0;
 
-        if ( !deltaLeft ) {
-            deltaLeft = 0;
+        if ( keepInHorizontalBounds === undefined ) {
+            keepInHorizontalBounds = !positionToTheLeftOrRight;
         }
-        if ( !deltaTop ) {
-            deltaTop = 0;
+        if ( keepInVerticalBounds === undefined ) {
+            keepInVerticalBounds = positionToTheLeftOrRight;
         }
 
-        // Check not run off screen.
-        if ( parent instanceof PopOverView ) {
-            parent = parent.getParent( ScrollView ) ||
-                parent.getParent( RootView );
-        }
-        var position = Element$1.getPosition( layer, parent.get( 'layer' ) );
+        // Check not run off screen. We only move it on the axis the pop over
+        // has been positioned along. It is up to the contents to ensure the
+        // pop over is not too long in the other direction.
+        var position = popOverEl.getBoundingClientRect();
         var gap;
-        var calloutDelta = 0;
 
-        // Check right edge
-        if ( !parent.get( 'showScrollbarX' ) ) {
-            gap = parent.get( 'pxWidth' ) - position.left - deltaLeft -
-                layer.offsetWidth;
-            // If gap is negative, move the view.
-            if ( gap < 0 ) {
-                deltaLeft += gap;
-                deltaLeft -= parentMargin.right;
-                if ( callout && calloutIsAtTopOrBottom ) {
-                    calloutDelta += gap;
-                    calloutDelta -= parentMargin.right;
+        if ( keepInHorizontalBounds ) {
+            // Check right edge
+            if ( !rootView.get( 'showScrollbarX' ) ) {
+                gap = rootView.get( 'pxWidth' ) - position.right;
+                // If gap is negative, move the view.
+                if ( gap < 0 ) {
+                    deltaLeft += gap;
+                    deltaLeft -= parentMargin.right;
                 }
             }
-        }
 
-        // Check left edge
-        gap = position.left + deltaLeft;
-        if ( gap < 0 ) {
-            deltaLeft -= gap;
-            deltaLeft += parentMargin.left;
-            if ( callout && calloutIsAtTopOrBottom ) {
-                calloutDelta -= gap;
-                calloutDelta += parentMargin.left;
+            // Check left edge
+            gap = position.left + deltaLeft;
+            if ( gap < 0 ) {
+                deltaLeft -= gap;
+                deltaLeft += parentMargin.left;
             }
         }
-
-        // Check bottom edge
-        if ( !parent.get( 'showScrollbarY' ) ) {
-            gap = parent.get( 'pxHeight' ) - position.top - deltaTop -
-                layer.offsetHeight;
-            if ( gap < 0 ) {
-                deltaTop += gap;
-                deltaTop -= parentMargin.bottom;
-                if ( callout && !calloutIsAtTopOrBottom ) {
-                    calloutDelta += gap;
-                    calloutDelta -= parentMargin.bottom;
+        if ( keepInVerticalBounds ) {
+            // Check bottom edge
+            if ( !rootView.get( 'showScrollbarY' ) ) {
+                gap = rootView.get( 'pxHeight' ) - position.bottom;
+                if ( gap < 0 ) {
+                    deltaTop += gap;
+                    deltaTop -= parentMargin.bottom;
                 }
             }
-        }
 
-        // Check top edge
-        gap = position.top + deltaTop;
-        if ( gap < 0 ) {
-            deltaTop -= gap;
-            deltaTop += parentMargin.top;
-            if ( callout && !calloutIsAtTopOrBottom ) {
-                calloutDelta -= gap;
-                calloutDelta += parentMargin.top;
+            // Check top edge
+            gap = position.top + deltaTop;
+            if ( gap < 0 ) {
+                deltaTop -= gap;
+                deltaTop += parentMargin.top;
             }
         }
 
-        if ( deltaLeft || deltaTop ) {
-            var transform = this.get( 'layout' ).transform
-                    .slice( 10, -1 )
-                    .split( ',' );
-            var left = parseInt( transform[0], 10 );
-            var top = parseInt( transform[1], 10 );
-            // Redraw immediately to prevent "flashing"
-            this.set( 'layout', {
-                top: 0,
-                left: 0,
-                transform: 'translate(' +
-                    ( left + deltaLeft ) + 'px,' +
-                    ( top + deltaTop ) + 'px' +
-                ')',
-            }).redraw();
+        Element$1.setStyle( this._popOver, 'transform',
+            'translate(' + deltaLeft + 'px,' + deltaTop + 'px)' );
+        Element$1.setStyle( this._callout, 'transform',
+            'translate(' +
+                ( positionToTheLeftOrRight ? 0 : -deltaLeft ) + 'px,' +
+                ( positionToTheLeftOrRight ? -deltaTop : 0 ) + 'px)'
+        );
+    }.queue( 'after' ),
+
+    viewNeedsRedraw: function () {
+        this.propertyNeedsRedraw( this, 'layer' );
+    }.observes( 'options' ),
+
+    didResize: function didResize () {
+        if ( !this._inResize ) {
+            // We redraw layer styles as part of redrawing layer; don't get
+            // stuck in infinite call stack!
+            this._inResize = true;
+            if ( this.get( 'options' ).alignWithView.get( 'isInDocument' ) ) {
+                this.redrawLayer();
+            } else {
+                this.hide();
+            }
+            this._inResize = false;
         }
-        if ( calloutDelta ) {
-            Element$1.setStyle( callout,
-                calloutIsAtTopOrBottom ? 'left' : 'top',
-                -calloutDelta + 'px'
-            );
+    },
+
+    /*
+        Options
+        - view -> The view to append to the pop over
+        - alignWithView -> the view to align to
+        - atNode -> the node within the view to align to
+        - positionToThe -> 'bottom'/'top'/'left'/'right'
+        - alignEdge -> 'left'/'centre'/'right'/'top'/'middle'/'bottom'
+        - showCallout -> true/false
+        - offsetLeft
+        - offsetTop
+        - resistHiding -> true to stop clicking outside or pressing Esc closing
+          the popover, false for normal behaviour; may also be a function
+          returning true or false
+          (incidental note: this would be nicer if options was an O.Object)
+        - onHide: fn
+    */
+    show: function show ( options ) {
+        var alignWithView = options.alignWithView;
+        if ( alignWithView === this ) {
+            return this.get( 'subPopOverView' ).show( options );
         }
+
+        this.hide();
+        this.set( 'options', options );
+        alignWithView.getParent( RootView ).insertView( this );
+
+        var eventHandler = this.get( 'eventHandler' );
+        ViewEventsController.addEventTarget( eventHandler, 10 );
+        this.set( 'isVisible', true );
+
+        return this;
+    },
+
+    didEnterDocument: function didEnterDocument () {
+        PopOverView.parent.didEnterDocument.call( this );
+        this.getParent( RootView ).addObserverForKey(
+            'safeAreaInsetBottom', this, 'viewNeedsRedraw' );
+        return this;
+    },
+
+    willLeaveDocument: function willLeaveDocument () {
+        this.getParent( RootView ).removeObserverForKey(
+            'safeAreaInsetBottom', this, 'viewNeedsRedraw' );
+        return PopOverView.parent.willLeaveDocument.call( this );
     },
 
     didLeaveDocument: function didLeaveDocument () {
@@ -11822,26 +12011,18 @@ var PopOverView = Class({
             var subPopOverView = this.hasSubView() ?
                     this.get( 'subPopOverView' ) : null;
             var eventHandler = this.get( 'eventHandler' );
-            var options = this._options;
-            var onHide, layer;
+            var options = this.get( 'options' );
+            var onHide;
             if ( subPopOverView ) {
                 subPopOverView.hide();
             }
-            this.set( 'isVisible', false );
-            var view = this.get( 'childViews' )[0];
-            this.detach();
-            this.removeView( view );
-            if ( options.showCallout ) {
-                layer = this.get( 'layer' );
-                layer.removeChild( layer.firstChild );
-                this._callout = null;
-            }
-            if ( eventHandler ) {
-                ViewEventsController.removeEventTarget( eventHandler );
-                eventHandler._seenMouseDown = false;
-            }
-            this._options = null;
-            if ( onHide = options.onHide ) {
+            this.set( 'isVisible', false )
+                .detach()
+                .removeView( this.get( 'childViews' )[0] );
+            ViewEventsController.removeEventTarget( eventHandler );
+            eventHandler._seenMouseDown = false;
+            this.set( 'options', null );
+            if (( onHide = options.onHide )) {
                 onHide( options, this );
             }
         }
@@ -11858,32 +12039,29 @@ var PopOverView = Class({
     }.property(),
 
     eventHandler: function () {
-        return this.get( 'parentPopOverView' ) ?
-            null : new ModalEventHandler({ view: this });
+        return new ModalEventHandler({ view: this });
     }.property(),
 
     softHide: function softHide () {
-        var options = this._options;
-        if ( !options.resistHiding || (
+        var options = this.get( 'options' );
+        if ( this.get( 'isVisible' ) && ( !options.resistHiding || (
                 typeof options.resistHiding === 'function' &&
-                !options.resistHiding() ) ) {
+                !options.resistHiding() ) ) ) {
             this.hide();
         }
     },
 
     clickedOutside: function clickedOutside () {
-        this.softHide();
+        var view = this;
+        var parent;
+        while (( parent = view.get( 'parentPopOverView' ) )) {
+            view = parent;
+        }
+        view.softHide();
     },
 
     keyOutside: function keyOutside ( event ) {
-        var view = this;
-        while ( view.hasSubView() ) {
-            view = view.get( 'subPopOverView' );
-        }
-        view.get( 'childViews' )[0].fire( event.type, event );
-        if ( event.type === 'keydown' ) {
-            view.closeOnEsc( event );
-        }
+        this.get( 'childViews' )[0].fire( event.type, event );
     },
 
     closeOnEsc: function ( event ) {
@@ -12201,7 +12379,7 @@ var ButtonView = Class({
         if ( event.type !== 'mouseup' ||
                 this.getParentWhere( function (x) { return x.isMenuView; } ) ) {
             this._ignoreUntil = 4102444800000; // 1st Jan 2100...
-            RunLoop$1.invokeInNextEventLoop( this._setIgnoreUntil, this );
+            RunLoop.invokeInNextEventLoop( this._setIgnoreUntil, this );
             this.activate();
             event.preventDefault();
             // Firefox keeps focus on the button after clicking. If the user
@@ -12257,7 +12435,7 @@ var MenuOptionView = Class({
             ( this.get( 'isFocused' ) ? ' is-focused' : '' );
     }.property( 'isFocused' ),
 
-    draw: function (/* layer, Element, el */) {
+    draw: function draw (/* layer, Element, el */) {
         return this.get( 'content' ).get( 'button' );
     },
 
@@ -12275,7 +12453,7 @@ var MenuOptionView = Class({
         if ( !this.get( 'isFocused' ) && !this._focusTimeout ) {
             var popOverView = this.getParent( PopOverView );
             if ( popOverView && popOverView.hasSubView() ) {
-                this._focusTimeout = RunLoop$1.invokeAfterDelay(
+                this._focusTimeout = RunLoop.invokeAfterDelay(
                     this.takeFocus, 75, this );
             } else {
                 this.takeFocus();
@@ -12285,7 +12463,7 @@ var MenuOptionView = Class({
 
     mouseout: function () {
         if ( this._focusTimeout ) {
-            RunLoop$1.cancel( this._focusTimeout );
+            RunLoop.cancel( this._focusTimeout );
             this._focusTimeout = null;
         }
         if ( this.get( 'isFocused' ) &&
@@ -12412,7 +12590,7 @@ var MenuButtonView = Class({
         if ( !this.get( 'isActive' ) && !this.get( 'isDisabled' ) ) {
             this.set( 'isActive', true );
             var buttonView = this;
-            var popOverView, menuOptionView, rootView;
+            var popOverView, menuOptionView, rootView, position;
             var popOverOptions = Object.assign({
                     view: this.get( 'menuView' ),
                     alignWithView: buttonView,
@@ -12428,18 +12606,18 @@ var MenuButtonView = Class({
             if ( this.get( 'isInMenu' ) ) {
                 popOverView = this.getParent( PopOverView );
                 menuOptionView = this.get( 'parentView' );
-                rootView = buttonView.getParent( RootView );
-
+                rootView = this.getParent( RootView );
+                position = this.get( 'layer' ).getBoundingClientRect();
                 popOverOptions.alignWithView = popOverView;
                 popOverOptions.atNode = this.get( 'layer' );
                 popOverOptions.positionToThe =
-                    buttonView.getPositionRelativeTo( rootView ).left +
-                    buttonView.get( 'pxWidth' ) + 180 <
-                        rootView.get( 'pxWidth' ) ?
+                    position.left < rootView.get( 'pxWidth' ) - position.right ?
                             'right' : 'left';
+                popOverOptions.showCallout = false;
                 popOverOptions.alignEdge = 'top';
                 popOverOptions.offsetTop =
                     popOverOptions.view.get( 'showFilter' ) ? -35 : -5;
+                popOverOptions.offsetLeft = 0;
             } else {
                 popOverView = this.get( 'popOverView' );
             }
@@ -12447,8 +12625,8 @@ var MenuButtonView = Class({
             // of this popOverView, and is returned from the show method.
             popOverView = popOverView.show( popOverOptions );
             if ( menuOptionView ) {
-                menuOptionView.addObserverForKey(
-                    'isFocused', popOverView, 'hide' );
+                menuOptionView.get( 'controller' ).addObserverForKey(
+                    'focused', popOverView, 'hide' );
             }
         }
     },
@@ -12478,7 +12656,7 @@ var OptionsController = Class({
         this.isFiltering = false;
         this.focused = null;
         this.selected = null;
-        OptionsController.parent.init.apply( this, arguments );
+        OptionsController.parent.constructor.apply( this, arguments );
         this.setOptions();
     },
 
@@ -12512,7 +12690,7 @@ var OptionsController = Class({
     }.queue( 'before' ).observes( 'content', 'search', 'isFiltering' ),
 
     filterOptions: function filterOptions ( content, search/*, isFiltering*/ ) {
-        var pattern = search ? LocaleController$1.makeSearchRegExp( search ) : null;
+        var pattern = search ? LocaleController.makeSearchRegExp( search ) : null;
         return pattern ? content.filter( function ( option ) {
             return pattern.test( option.get( 'name' ) );
         }) : Array.isArray( content ) ? content : content.get( '[]' );
@@ -12607,8 +12785,7 @@ var OptionsController = Class({
     DIRTY        - Changes have been made to the record which have not yet been
                    committed to the source.
     OBSOLETE     - Changes may have been made to the record in the source which
-                   have not yet been fetched. If the record is loading, this
-                   means the result of the load may not be the latest.
+                   have not yet loaded.
 */
 
 // Core states:
@@ -12682,9 +12859,15 @@ var ListView = Class({
         };
 
         this.controller = null;
+        this.focused = null;
         this.selection = null;
 
         ListView.parent.constructor.apply( this, arguments );
+
+        var focused = this.get( 'focused' );
+        if ( focused ) {
+            focused.addObserverForKey( 'record', this, 'redrawFocused' );
+        }
 
         var selection = this.get( 'selection' );
         if ( selection ) {
@@ -12699,6 +12882,12 @@ var ListView = Class({
             selection.removeObserverForKey(
                 'selectedStoreKeys', this, 'redrawSelection' );
         }
+
+        var focused = this.get( 'focused' );
+        if ( focused ) {
+            focused.removeObserverForKey( 'record', this, 'redrawFocused' );
+        }
+
         if ( this.get( 'isRendered' ) ) {
             var content = this.get( 'content' );
             if ( content ) {
@@ -12707,6 +12896,7 @@ var ListView = Class({
                 content.off( 'query:updated', this, 'contentWasUpdated' );
             }
         }
+
         ListView.parent.destroy.call( this );
     },
 
@@ -12765,13 +12955,14 @@ var ListView = Class({
 
     // -----------------------------------------------------------------------
 
-    isCorrectItemView: function isCorrectItemView ( view, item ) {
-        return view.get( 'content' ) === item;
+    isCorrectItemView: function isCorrectItemView (/* view, item */) {
+        return true;
     },
 
     createItemView: function createItemView ( content, index, list, isAdded ) {
         var ItemView = this.get( 'ItemView' );
-        return new ItemView({
+        var focused = this.get( 'focused' );
+        var view = new ItemView({
             controller: this.get( 'controller' ),
             selection: this.get( 'selection' ),
             parentView: this,
@@ -12780,6 +12971,10 @@ var ListView = Class({
             list: list,
             isAdded: isAdded,
         });
+        if ( focused ) {
+            view.set( 'isFocused', content === focused.get( 'record' ) );
+        }
+        return view;
     },
 
     destroyItemView: function destroyItemView ( view ) {
@@ -12911,6 +13106,23 @@ var ListView = Class({
         this.endPropertyChanges();
     },
 
+    redrawFocused: function redrawFocused ( _, __, oldRecord ) {
+        var rendered = this._rendered;
+        var newRecord = this.get( 'focused' ).get( 'record' );
+        if ( oldRecord ) {
+            var view = rendered[ guid( oldRecord ) ];
+            if ( view ) {
+                view.set( 'isFocused', false );
+            }
+        }
+        if ( newRecord ) {
+            var view$1 = rendered[ guid( newRecord ) ];
+            if ( view$1 ) {
+                view$1.set( 'isFocused', true );
+            }
+        }
+    },
+
     redrawSelection: function redrawSelection () {
         var selection = this.get( 'selection' );
         var itemViews = this.get( 'childViews' );
@@ -12935,12 +13147,12 @@ var OptionsListView = Class({
 
     Extends: ListView,
 
-    init: function () {
-        this._focused = null;
-        this._selected = null;
+    init: function init () {
+        this._focusedOption = null;
+        this._selectedOption = null;
         this._views = {};
 
-        OptionsListView.parent.init.apply( this, arguments );
+        OptionsListView.parent.constructor.apply( this, arguments );
     },
 
     layerTag: 'ul',
@@ -12955,8 +13167,8 @@ var OptionsListView = Class({
 
     // ---
 
-    focused: bind( 'controller*focused' ),
-    selected: bind( 'controller*selected' ),
+    focusedOption: bind( 'controller*focused' ),
+    selectedOption: bind( 'controller*selected' ),
 
     createItemView: function createItemView ( item, index, list ) {
         var itemHeight = this.get( 'itemHeight' );
@@ -12969,8 +13181,8 @@ var OptionsListView = Class({
                 .set( 'list', list )
                 .set( 'parentView', this );
         } else {
-            var isFocused = ( item === this.get( 'focused' ) );
-            var isSelected = ( item === this.get( 'selected' ) );
+            var isFocused = ( item === this.get( 'focusedOption' ) );
+            var isSelected = ( item === this.get( 'selectedOption' ) );
             view = this._views[ id ] = new View({
                 controller: this.get( 'controller' ),
                 parentView: this,
@@ -12982,10 +13194,10 @@ var OptionsListView = Class({
                 isSelected: isSelected,
             });
             if ( isFocused ) {
-                this._focused = view;
+                this._focusedOption = view;
             }
             if ( isSelected ) {
-                this._selected = view;
+                this._selectedOption = view;
             }
         }
         return view;
@@ -13004,8 +13216,8 @@ var OptionsListView = Class({
     },
 
     redrawFocused: function () {
-        var item = this.get( 'focused' );
-        var oldView = this._focused;
+        var item = this.get( 'focusedOption' );
+        var oldView = this._focusedOption;
         var newView = item && this.getView( item );
         if ( oldView !== newView ) {
             if ( oldView ) {
@@ -13015,13 +13227,13 @@ var OptionsListView = Class({
                 newView.set( 'isFocused', true );
                 this.scrollIntoView( newView );
             }
-            this._focused = newView;
+            this._focusedOption = newView;
         }
-    }.observes( 'focused' ),
+    }.observes( 'focusedOption' ),
 
     redrawSelected: function () {
-        var item = this.get( 'selected' );
-        var oldView = this._selected;
+        var item = this.get( 'selectedOption' );
+        var oldView = this._selectedOption;
         var newView = item && this.getView( item );
         if ( oldView !== newView ) {
             if ( oldView ) {
@@ -13031,9 +13243,9 @@ var OptionsListView = Class({
                 newView.set( 'isSelected', true );
                 this.scrollIntoView( newView );
             }
-            this._selected = newView;
+            this._selectedOption = newView;
         }
-    }.observes( 'selected' ),
+    }.observes( 'selectedOption' ),
 
     scrollIntoView: function scrollIntoView ( view ) {
         var scrollView = this.getParent( ScrollView );
@@ -13403,20 +13615,20 @@ var TextView = Class({
         this.focus();
     },
 
-    selectAll: function () {
+    selectAll: function selectAll () {
         return this.set( 'selection', {
             start: 0,
             end: this.get( 'value' ).length,
         });
     },
 
-    copySelectionToClipboard: function () {
-        var didSucceed = false;
+    copySelectionToClipboard: function copySelectionToClipboard () {
         var focused = null;
         if ( !this.get( 'isFocused' ) ) {
             focused = document.activeElement;
             this.focus();
         }
+        var didSucceed = false;
         try {
             didSucceed = document.execCommand( 'copy' );
         }  catch ( error ) {}
@@ -13575,7 +13787,7 @@ var ClearSearchButtonView = Class({
 
     Extends: ButtonView,
 
-    type: 'v-ClearSearchButton',
+    className: 'v-ClearSearchButton',
     positioning: 'absolute',
     shortcut: 'Ctrl-/',
 });
@@ -13587,6 +13799,9 @@ var SearchTextView = Class({
     type: 'v-SearchText',
 
     icon: null,
+
+    // Helps password managers know this is not a username input!
+    name: 'search',
 
     draw: function draw ( layer, Element, el ) {
         var children =
@@ -13632,13 +13847,6 @@ var MenuFilterView = Class({
             blurOnKeys: {},
             value: bindTwoWay( controller, 'search' ),
         });
-
-        // Remove Ctrl-/ shortcut from search clear button.
-        searchTextView
-            .render()
-            .get( 'childViews' )
-            .last()
-            .set( 'shortcut', '' );
 
         return searchTextView;
     },
@@ -13760,7 +13968,7 @@ var MenuController = Class({
         this.content = content.map(
             function (button) { return new MenuOption( button, this$1 ); }
         );
-        MenuController.parent.init.call( this, {
+        MenuController.parent.constructor.call( this, {
             isFiltering: isFiltering,
         });
     },
@@ -13819,28 +14027,6 @@ var MenuView = Class({
         MenuView.parent.didEnterDocument.call( this );
 
         var layer = this.get( 'layer' );
-        var scrollView = this.scrollView;
-        var windowHeight, delta, menuFilterView;
-
-        if ( scrollView ) {
-            windowHeight = ( this.getParent( ScrollView ) ||
-                this.getParent( RootView ) ).get( 'pxHeight' );
-            delta = layer.getBoundingClientRect().bottom - windowHeight;
-            // Must redraw immediately so size is correct when PopOverView
-            // checks if it is positioned off screen.
-            scrollView.set( 'layout', {
-                maxHeight: Math.max(
-                    scrollView.get( 'pxHeight' ) - delta - 10,
-                    windowHeight / 2
-                ),
-            }).redraw();
-        }
-
-        if ( this.get( 'showFilter' ) ) {
-            menuFilterView = this.filterView;
-            RunLoop$1.invokeInNextFrame( menuFilterView.focus, menuFilterView );
-        }
-
         layer.addEventListener( 'mousemove', this, false );
         layer.addEventListener( 'mouseout', this, false );
 
@@ -13891,23 +14077,23 @@ var MenuView = Class({
     hide: function hide () {
         var parent = this.get( 'parentView' );
         if ( parent ) {
-            RunLoop$1.invokeInNextFrame( parent.hide, parent );
+            RunLoop.invokeInNextFrame( parent.hide, parent );
         }
     },
 
     buttonDidActivate: function () {
         if ( this.get( 'closeOnActivate' ) ) {
             var popOverView = this.getParent( PopOverView ) ||
-                    this.get( 'parentView' ),
-                parent;
+                    this.get( 'parentView' );
+            var parent;
             if ( popOverView ) {
-                while ( parent = popOverView.get( 'parentPopOverView' ) ) {
+                while (( parent = popOverView.get( 'parentPopOverView' ) )) {
                     popOverView = parent;
                 }
-                RunLoop$1.invokeInNextFrame( popOverView.hide, popOverView );
+                popOverView.hide();
             }
         }
-    }.on( 'button:activate' ),
+    }.nextFrame().on( 'button:activate' ),
 
     keydown: function ( event ) {
         var key = lookupKey( event );
@@ -14020,6 +14206,23 @@ var OverflowMenuView = Class({
     },
 });
 
+var viewIsBeforeFlex = function ( view, flex ) {
+    var layer = view.get( 'layer' );
+    var childNodes = flex.parentNode.childNodes;
+    var l = childNodes.length;
+    var node;
+    while ( l-- ) {
+        node = childNodes[l];
+        if ( node === layer ) {
+            return false;
+        }
+        if ( node === flex ) {
+            return true;
+        }
+    }
+    return true;
+};
+
 var ToolbarView = Class({
 
     Extends: View,
@@ -14029,6 +14232,7 @@ var ToolbarView = Class({
     config: 'standard',
     minimumGap: 20,
     preventOverlap: false,
+    popOverOptions: null,
 
     init: function init (/* ...mixins */) {
         ToolbarView.parent.constructor.apply( this, arguments );
@@ -14037,6 +14241,7 @@ var ToolbarView = Class({
                 label: loc( 'More' ),
                 shortcut: '.',
                 popOverView: this.popOverView || new PopOverView(),
+                popOverOptions: this.get( 'popOverOptions' ),
             }),
         };
         this._configs = {
@@ -14047,6 +14252,7 @@ var ToolbarView = Class({
         };
         this._measureView = null;
         this._widths = {};
+        this._flex = null;
     },
 
     registerView: function registerView ( name, view, _dontMeasure ) {
@@ -14111,12 +14317,15 @@ var ToolbarView = Class({
 
     left: function () {
         var leftConfig = this.get( 'leftConfig' );
-        var rightConfig = this.get( 'rightConfig' );
-        var pxWidth = this.get( 'pxWidth' );
-        var widths = this._widths;
-        var i, l, config;
-
         if ( this.get( 'preventOverlap' ) ) {
+            var rightConfig = this.get( 'rightConfig' );
+            var widths = this._widths;
+            var pxWidth = this.get( 'pxWidth' );
+            var rootView, i, l, config;
+            if ( !pxWidth ) {
+                rootView = this.getParent( RootView );
+                pxWidth = rootView ? rootView.get( 'pxWidth' ) : 1024;
+            }
             pxWidth -= this.get( 'minimumGap' );
             for ( i = 0, l = rightConfig.length; i < l; i += 1 ) {
                 pxWidth -= widths[ rightConfig[i] ];
@@ -14170,7 +14379,7 @@ var ToolbarView = Class({
     preMeasure: function preMeasure () {
         this.insertView( this._measureView =
             new View({
-                className: 'v-Toolbar-section v-Toolbar-section--measure',
+                className: 'v-Toolbar-measure',
                 layerStyles: {},
                 childViews: Object.values( this._views )
                                   .filter( function (view) { return !view.get( 'parentView' ); } ),
@@ -14179,9 +14388,7 @@ var ToolbarView = Class({
                         el( 'span.v-Toolbar-divider' ),
                         View.prototype.draw.call( this, layer, Element, el ) ];
                 },
-            }),
-            this.get( 'layer' ).lastChild,
-            'before'
+            })
         );
         return this;
     },
@@ -14218,30 +14425,26 @@ var ToolbarView = Class({
     },
 
     willEnterDocument: function willEnterDocument () {
+        ToolbarView.parent.willEnterDocument.call( this );
         if ( this.get( 'preventOverlap' ) ) {
             this.preMeasure();
         }
-        return ToolbarView.parent.willEnterDocument.call( this );
+        return this;
     },
 
     didEnterDocument: function didEnterDocument () {
-        this.beginPropertyChanges();
         ToolbarView.parent.didEnterDocument.call( this );
         if ( this.get( 'preventOverlap' ) ) {
-            RunLoop$1.invokeInNextFrame( this.postMeasure, this );
+            this.postMeasure();
         }
-        this.endPropertyChanges();
         return this;
     },
 
     draw: function draw ( layer, Element, el ) {
         return [
-            el( 'div.v-Toolbar-section.v-Toolbar-section--left',
-                this.get( 'left' )
-            ),
-            el( 'div.v-Toolbar-section.v-Toolbar-section--right',
-                this.get( 'right' )
-            ) ];
+            this.get( 'left' ),
+            this._flex = el( 'div.v-Toolbar-flex' ),
+            this.get( 'right' ) ];
     },
 
     toolbarNeedsRedraw: function ( self, property, oldValue ) {
@@ -14251,17 +14454,18 @@ var ToolbarView = Class({
     }.observes( 'left', 'right' ),
 
     redrawLeft: function redrawLeft ( layer, oldViews ) {
-        this.redrawSide( layer.firstChild, oldViews, this.get( 'left' ) );
+        this.redrawSide( layer, true, oldViews, this.get( 'left' ) );
     },
     redrawRight: function redrawRight ( layer, oldViews ) {
-        this.redrawSide( layer.lastChild, oldViews, this.get( 'right' ) );
+        this.redrawSide( layer, false, oldViews, this.get( 'right' ) );
     },
 
-    redrawSide: function redrawSide ( container, oldViews, newViews ) {
+    redrawSide: function redrawSide ( layer, isLeft, oldViews, newViews ) {
         var this$1 = this;
 
         var start = 0;
         var isEqual$$1 = true;
+        var flex = this._flex;
         var i, l, view, parent;
 
         for ( i = start, l = oldViews.length; i < l; i += 1 ) {
@@ -14272,7 +14476,7 @@ var ToolbarView = Class({
                 } else {
                     isEqual$$1 = false;
                     // Check it hasn't already swapped sides!
-                    if ( view.get( 'layer' ).parentNode === container ) {
+                    if ( viewIsBeforeFlex( view, flex ) === isLeft ) {
                         this$1.removeView( view );
                     }
                 }
@@ -14281,23 +14485,27 @@ var ToolbarView = Class({
                     start += 1;
                     newViews[i] = view;
                 } else {
-                    container.removeChild( view );
+                    layer.removeChild( view );
                 }
             }
         }
         for ( i = start, l = newViews.length; i < l; i += 1 ) {
             view = newViews[i];
             if ( view instanceof View ) {
-                if ( parent = view.get( 'parentView' ) ) {
+                if (( parent = view.get( 'parentView' ) )) {
                     parent.removeView( view );
                 }
-                this$1.insertView( view, container );
-            } else {
-                container.appendChild( view );
+                this$1.insertView( view,
+                    isLeft ? flex : layer,
+                    isLeft ? 'before' : 'bottom' );
+            } else if ( view ) {
+                layer.insertBefore( view, isLeft ? flex : null );
             }
         }
     },
 });
+
+ToolbarView.OverflowMenuView = OverflowMenuView;
 
 /**
     Class: O.FileButtonView
@@ -14472,8 +14680,9 @@ var popOver = new PopOverView();
 var equalTo = Transform.isEqualToValue;
 
 var TOOLBAR_HIDDEN = 0;
-var TOOLBAR_AT_SELECTION = 1;
-var TOOLBAR_AT_TOP = 2;
+var TOOLBAR_INLINE = 1;
+var TOOLBAR_AT_SELECTION = 2;
+var TOOLBAR_AT_TOP = 3;
 
 var hiddenFloatingToolbarLayout = {
     top: 0,
@@ -14481,6 +14690,61 @@ var hiddenFloatingToolbarLayout = {
     maxWidth: '100%',
     transform: 'translate3d(-100vw,0,0)',
 };
+
+var URLPickerView = Class({
+
+    Extends: View,
+
+    prompt: '',
+    placeholder: '',
+    confirm: '',
+
+    value: '',
+
+    className: 'v-UrlPicker',
+
+    draw: function draw ( layer, Element, el ) {
+        return [
+            el( 'h3.u-bold', [
+                this.get( 'prompt' ) ]),
+            this._input = new TextView({
+                value: bindTwoWay( this, 'value' ),
+                placeholder: this.get( 'placeholder' ),
+            }),
+            el( 'p.u-alignRight', [
+                new ButtonView({
+                    type: 'v-Button--destructive v-Button--size13',
+                    label: loc( 'Cancel' ),
+                    target: popOver,
+                    method: 'hide',
+                }),
+                new ButtonView({
+                    type: 'v-Button--constructive v-Button--size13',
+                    label: this.get( 'confirm' ),
+                    target: this,
+                    method: 'add',
+                }) ]) ];
+    },
+
+    // ---
+
+    autoFocus: function () {
+        if ( this.get( 'isInDocument' ) ) {
+            this._input.set( 'selection', {
+                start: 0,
+                end: this.get( 'value' ).length,
+            }).focus();
+            // IE8 and Safari 6 don't fire this event for some reason.
+            this._input.fire( 'focus' );
+        }
+    }.nextFrame().observes( 'isInDocument' ),
+
+    addOnEnter: function ( event ) {
+        if ( lookupKey( event ) === 'Enter' ) {
+            this.add();
+        }
+    }.on( 'keyup' ),
+});
 
 var RichTextView = Class({
 
@@ -14495,6 +14759,7 @@ var RichTextView = Class({
 
     // ---
 
+    savedSelection: null,
     isTextSelected: false,
 
     setIsTextSelected: function ( event ) {
@@ -14504,16 +14769,19 @@ var RichTextView = Class({
     // ---
 
     showToolbar: UA.isIOS ? TOOLBAR_AT_SELECTION : TOOLBAR_AT_TOP,
-    fontFaceOptions: [
-        [ loc( 'Default' ), null ],
-        [ 'Arial', 'arial, sans-serif' ],
-        [ 'Georgia', 'georgia, serif' ],
-        [ 'Helvetica', 'helvetica, arial, sans-serif' ],
-        [ 'Monospace', 'menlo, consolas, monospace' ],
-        [ 'Tahoma', 'tahoma, sans-serif' ],
-        [ 'Times New Roman', '"Times New Roman", times, serif' ],
-        [ 'Trebuchet MS', '"Trebuchet MS", sans-serif' ],
-        [ 'Verdana', 'verdana, sans-serif' ] ],
+    fontFaceOptions: function () {
+        return [
+            [ loc( 'Default' ), null ],
+            [ 'Arial', 'arial, sans-serif' ],
+            [ 'Georgia', 'georgia, serif' ],
+            [ 'Helvetica', 'helvetica, arial, sans-serif' ],
+            [ 'Monospace', 'menlo, consolas, monospace' ],
+            [ 'Tahoma', 'tahoma, sans-serif' ],
+            [ 'Times New Roman', '"Times New Roman", times, serif' ],
+            [ 'Trebuchet MS', '"Trebuchet MS", sans-serif' ],
+            [ 'Verdana', 'verdana, sans-serif' ] ];
+    }.property(),
+
     fontSizeOptions: function () {
         return [
             [ loc( 'Small' ), '10px' ],
@@ -14523,6 +14791,7 @@ var RichTextView = Class({
     }.property(),
 
     editor: null,
+    editorId: undefined,
     editorClassName: '',
     styles: null,
     blockDefaults: null,
@@ -14564,35 +14833,59 @@ var RichTextView = Class({
     },
 
     didEnterDocument: function didEnterDocument () {
-        var scrollView = this.getParent( ScrollView );
-        if ( scrollView ) {
-            if ( this.get( 'showToolbar' ) === TOOLBAR_AT_TOP ) {
-                scrollView.addObserverForKey(
-                    'scrollTop', this, '_calcToolbarPosition' );
-            }
-            if ( UA.isIOS ) {
-                scrollView.addObserverForKey(
-                    'scrollTop', this, 'redrawIOSCursor' );
-            }
+        RichTextView.parent.didEnterDocument.call( this );
+
+        var selection = this.get( 'savedSelection' );
+        var editor = this.get( 'editor' );
+        if ( selection ) {
+            editor.setSelection(
+                editor.createRange(
+                    selection.sc, selection.so,
+                    selection.ec, selection.eo
+                )
+            ).focus();
+            this.set( 'savedSelection', null );
+        } else {
+            editor.moveCursorToStart();
         }
-        this.get( 'editor' ).moveCursorToStart();
-        return RichTextView.parent.didEnterDocument.call( this );
+
+        var scrollView = this.getParent( ScrollView );
+        if ( scrollView && this.get( 'showToolbar' ) === TOOLBAR_AT_TOP ) {
+            scrollView.addObserverForKey(
+                'scrollTop', this, '_calcToolbarPosition' );
+            // Need to queue rather than call immediately because the toolbar
+            // will be in the rich text view and if we need to make it sticky
+            // we need to shift it round. But we're in the middle of the
+            // will/did enter callbacks, so we might end up in an inconsistent
+            // state.
+            RunLoop.queueFn( 'after', this._calcToolbarPosition.bind( this,
+                scrollView, '', 0, scrollView.get( 'scrollTop' ) ) );
+        }
+
+        return this;
     },
 
     willLeaveDocument: function willLeaveDocument () {
         var scrollView = this.getParent( ScrollView );
-        if ( scrollView ) {
-            if ( this.get( 'showToolbar' ) === TOOLBAR_AT_TOP ) {
-                scrollView.removeObserverForKey(
-                    'scrollTop', this, '_calcToolbarPosition' );
-                this._setToolbarPosition(
-                    scrollView, this.get( 'toolbarView' ), false );
-            }
-            if ( UA.isIOS ) {
-                scrollView.removeObserverForKey(
-                    'scrollTop', this, 'redrawIOSCursor' );
-            }
+        if ( scrollView && this.get( 'showToolbar' ) === TOOLBAR_AT_TOP ) {
+            scrollView.removeObserverForKey(
+                'scrollTop', this, '_calcToolbarPosition' );
+            this._setToolbarPosition(
+                scrollView, this.get( 'toolbarView' ), false );
         }
+
+        // If focused, save cursor position
+        if ( this.get( 'isFocused' ) ) {
+            var selection = this.get( 'editor' ).getSelection();
+            this.set( 'savedSelection', {
+                sc: selection.startContainer,
+                so: selection.startOffset,
+                ec: selection.endContainer,
+                eo: selection.endOffset,
+            });
+            this.blur();
+        }
+
         return RichTextView.parent.willLeaveDocument.call( this );
     },
 
@@ -14617,6 +14910,7 @@ var RichTextView = Class({
     draw: function draw ( layer, Element, el ) {
         var editorClassName = this.get( 'editorClassName' );
         var editingLayer = this._editingLayer = el( 'div', {
+            id: this.get( 'editorId' ),
             'role': 'textbox',
             'aria-multiline': 'true',
             'aria-label': this.get( 'label' ),
@@ -14637,7 +14931,7 @@ var RichTextView = Class({
             .addEventListener( 'undoStateChange', this )
             .addEventListener( 'dragover', this )
             .addEventListener( 'drop', this )
-            .didError = RunLoop$1.didError;
+            .didError = RunLoop.didError;
         this.set( 'editor', editor )
             .set( 'path', editor.getPath() );
 
@@ -14668,13 +14962,6 @@ var RichTextView = Class({
     },
 
     // ---
-
-    redrawIOSCursor: function () {
-        if ( this.get( 'isFocused' ) ) {
-            var editor = this.get( 'editor' );
-            editor.setSelection( editor.getSelection() );
-        }
-    }.nextFrame(),
 
     scrollIntoView: function () {
         if ( !this.get( 'isFocused' ) ) {
@@ -14739,6 +15026,7 @@ var RichTextView = Class({
             this._setToolbarPosition( scrollView, toolbarView, isSticky );
         }
     },
+
     _setToolbarPosition: function _setToolbarPosition ( scrollView, toolbarView, isSticky ) {
         if ( isSticky ) {
             var newParent = scrollView.get( 'parentView' );
@@ -14801,7 +15089,10 @@ var RichTextView = Class({
         if ( !toolbarIsVisible && this.get( 'isTextSelected' ) ) {
             this.showFloatingToolbar();
         }
-    }.on( 'mouseup' ),
+    // (You might think 'select' was the right event to hook onto, but that
+    // causes trouble as it shows the toolbar while the mouse is still down,
+    // which gets in the way of the selection. So mouseup it is.)
+    }.on( 'mouseup', 'keyup' ),
 
     // ---
 
@@ -14827,20 +15118,22 @@ var RichTextView = Class({
         return new ToolbarView({
             className: 'v-Toolbar v-RichText-toolbar',
             positioning: 'absolute',
-            layout: showToolbar === TOOLBAR_AT_TOP ? {
-                overflow: 'hidden',
-                zIndex: 1,
-                top: 0,
-                left: 0,
-                right: 0,
-            } : bind( this, 'floatingToolbarLayout' ),
+            layout: showToolbar === TOOLBAR_AT_SELECTION ?
+                bind( this, 'floatingToolbarLayout' ) :
+                {
+                    overflow: 'hidden',
+                    zIndex: 1,
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                },
             preventOverlap: showToolbar === TOOLBAR_AT_TOP,
         }).registerViews({
             bold: new ButtonView({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-bold',
-                isActive: bind( 'isBold', this ),
+                isActive: bind( this, 'isBold' ),
                 label: loc( 'Bold' ),
                 tooltip: loc( 'Bold' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-b' ),
@@ -14857,7 +15150,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-italic',
-                isActive: bind( 'isItalic', this ),
+                isActive: bind( this, 'isItalic' ),
                 label: loc( 'Italic' ),
                 tooltip: loc( 'Italic' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-i' ),
@@ -14874,7 +15167,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-underline',
-                isActive: bind( 'isUnderlined', this ),
+                isActive: bind( this, 'isUnderlined' ),
                 label: loc( 'Underline' ),
                 tooltip: loc( 'Underline' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-u' ),
@@ -14891,7 +15184,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-strikethrough',
-                isActive: bind( 'isStriked', this ),
+                isActive: bind( this, 'isStriked' ),
                 label: loc( 'Strikethrough' ),
                 tooltip: loc( 'Strikethrough' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-Shift-7' ),
@@ -14944,7 +15237,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-link',
-                isActive: bind( 'isLink', this ),
+                isActive: bind( this, 'isLink' ),
                 label: loc( 'Link' ),
                 tooltip: loc( 'Link' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-k' ),
@@ -14953,6 +15246,23 @@ var RichTextView = Class({
                         richTextView.removeLink();
                     } else {
                         richTextView.showLinkOverlay( this );
+                    }
+                    this.fire( 'button:activate' );
+                },
+            }),
+            code: new ButtonView({
+                tabIndex: -1,
+                type: 'v-Button--iconOnly',
+                icon: 'icon-code',
+                isActive: bind( this, 'isCode' ),
+                label: loc( 'Preformatted Text' ),
+                tooltip: loc( 'Preformatted Text' ) + '\n' +
+                    formatKeyForPlatform( 'Cmd-d' ),
+                activate: function activate () {
+                    if ( richTextView.get( 'isCode' ) ) {
+                        richTextView.removeCode();
+                    } else {
+                        richTextView.code();
                     }
                     this.fire( 'button:activate' );
                 },
@@ -14968,11 +15278,20 @@ var RichTextView = Class({
                 target: this,
                 method: 'insertImagesFromFiles',
             }),
+            remoteImage: new ButtonView({
+                tabIndex: -1,
+                type: 'v-Button--iconOnly',
+                icon: 'icon-image',
+                label: loc( 'Insert Image' ),
+                tooltip: loc( 'Insert Image' ),
+                target: this,
+                method: 'showInsertImageOverlay',
+            }),
             left: new ButtonView({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-paragraph-left',
-                isActive: bind( 'alignment', this, equalTo( 'left' ) ),
+                isActive: bind( this, 'alignment', equalTo( 'left' ) ),
                 label: loc( 'Left' ),
                 tooltip: loc( 'Left' ),
                 activate: function activate () {
@@ -14984,7 +15303,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-paragraph-centre',
-                isActive: bind( 'alignment', this, equalTo( 'center' ) ),
+                isActive: bind( this, 'alignment', equalTo( 'center' ) ),
                 label: loc( 'Center' ),
                 tooltip: loc( 'Center' ),
                 activate: function activate () {
@@ -14996,7 +15315,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-paragraph-right',
-                isActive: bind( 'alignment', this, equalTo( 'right' ) ),
+                isActive: bind( this, 'alignment', equalTo( 'right' ) ),
                 label: loc( 'Right' ),
                 tooltip: loc( 'Right' ),
                 activate: function activate () {
@@ -15008,7 +15327,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-paragraph-justify',
-                isActive: bind( 'alignment', this, equalTo( 'justify' ) ),
+                isActive: bind( this, 'alignment', equalTo( 'justify' ) ),
                 label: loc( 'Justify' ),
                 tooltip: loc( 'Justify' ),
                 activate: function activate () {
@@ -15020,7 +15339,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-lefttoright',
-                isActive: bind( 'direction', this, equalTo( 'ltr' ) ),
+                isActive: bind( this, 'direction', equalTo( 'ltr' ) ),
                 label: loc( 'Text Direction: Left to Right' ),
                 tooltip: loc( 'Text Direction: Left to Right' ),
                 activate: function activate () {
@@ -15032,7 +15351,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-righttoleft',
-                isActive: bind( 'direction', this, equalTo( 'rtl' ) ),
+                isActive: bind( this, 'direction', equalTo( 'rtl' ) ),
                 label: loc( 'Text Direction: Right to Left' ),
                 tooltip: loc( 'Text Direction: Right to Left' ),
                 activate: function activate () {
@@ -15064,7 +15383,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-list',
-                isActive: bind( 'isUnorderedList', this ),
+                isActive: bind( this, 'isUnorderedList' ),
                 label: loc( 'Unordered List' ),
                 tooltip: loc( 'Unordered List' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-Shift-8' ),
@@ -15081,7 +15400,7 @@ var RichTextView = Class({
                 tabIndex: -1,
                 type: 'v-Button--iconOnly',
                 icon: 'icon-numbered-list',
-                isActive: bind( 'isOrderedList', this ),
+                isActive: bind( this, 'isOrderedList' ),
                 label: loc( 'Ordered List' ),
                 tooltip: loc( 'Ordered List' ) + '\n' +
                     formatKeyForPlatform( 'Cmd-Shift-9' ),
@@ -15248,48 +15567,13 @@ var RichTextView = Class({
 
     linkOverlayView: function () {
         var richTextView = this;
-        return new View({
-            className: 'v-UrlPicker',
-            value: '',
-            draw: function draw ( layer, Element, el ) {
-                return [
-                    el( 'h3.u-bold', [
-                        loc( 'Add a link to the following URL or email:' ) ]),
-                    this._input = new TextView({
-                        value: bindTwoWay( 'value', this ),
-                        placeholder: 'e.g. www.example.com',
-                    }),
-                    el( 'p.u-alignRight', [
-                        new ButtonView({
-                            type: 'v-Button--destructive v-Button--size13',
-                            label: loc( 'Cancel' ),
-                            target: popOver,
-                            method: 'hide',
-                        }),
-                        new ButtonView({
-                            type: 'v-Button--constructive v-Button--size13',
-                            label: loc( 'Add Link' ),
-                            target: this,
-                            method: 'addLink',
-                        }) ]) ];
-            },
-            focus: function () {
-                if ( this.get( 'isInDocument' ) ) {
-                    this._input.set( 'selection', this.get( 'value' ).length )
-                               .focus();
-                    // Safari 6 doesn't fire this event for some reason.
-                    this._input.fire( 'focus' );
-                }
-            }.nextFrame().observes( 'isInDocument' ),
-            addLinkOnEnter: function ( event ) {
-                event.stopPropagation();
-                if ( lookupKey( event ) === 'Enter' ) {
-                    this.addLink();
-                }
-            }.on( 'keyup' ),
-            addLink: function addLink () {
-                var url = this.get( 'value' ).trim(),
-                    email;
+        return new URLPickerView({
+            prompt: loc( 'Add a link to the following URL or email:' ),
+            placeholder: 'e.g. www.example.com',
+            confirm: loc( 'Add Link' ),
+            add: function add () {
+                var url = this.get( 'value' ).trim();
+                var email;
                 // Don't allow malicious links
                 if ( /^(?:javascript|data):/i.test( url ) ) {
                     return;
@@ -15309,7 +15593,6 @@ var RichTextView = Class({
                 }
                 richTextView.makeLink( url );
                 popOver.hide();
-                richTextView.focus();
             },
         });
     }.property(),
@@ -15321,16 +15604,52 @@ var RichTextView = Class({
             value = '';
         }
         view.set( 'value', value );
+        this.showOverlay( view, buttonView );
+    },
+
+    insertImageOverlayView: function () {
+        var richTextView = this;
+        return new URLPickerView({
+            prompt: loc( 'Insert an image from the following URL:' ),
+            placeholder: 'e.g. https://example.com/path/to/image.jpg',
+            confirm: loc( 'Insert Image' ),
+            add: function add () {
+                var url = this.get( 'value' ).trim();
+                if ( !/^https?:/i.test( url ) ) {
+                    // Must be http/https protocol
+                    if ( /^[a-z]:/i.test( url ) ) {
+                        return;
+                    }
+                    // If none, presume http
+                    url = 'http://' + url;
+                }
+                richTextView.insertImage( url );
+                popOver.hide();
+            },
+        });
+    }.property(),
+
+    showInsertImageOverlay: function showInsertImageOverlay ( buttonView ) {
+        var view = this.get( 'insertImageOverlayView' );
+        view.set( 'value', '' );
+        this.showOverlay( view, buttonView );
+    },
+
+    showOverlay: function showOverlay ( view, buttonView ) {
         // If we're in the overflow menu, align with the "More" button.
         if ( buttonView.getParent( MenuView ) ) {
             buttonView = this.get( 'toolbarView' ).getView( 'overflow' );
         }
+        var richTextView = this;
         popOver.show({
             view: view,
             alignWithView: buttonView,
             showCallout: true,
             offsetTop: 2,
             offsetLeft: -4,
+            onHide: function () {
+                richTextView.focus();
+            },
         });
     },
 
@@ -15386,6 +15705,9 @@ var RichTextView = Class({
 
     increaseListLevel: execCommand( 'increaseListLevel' ),
     decreaseListLevel: execCommand( 'decreaseListLevel' ),
+
+    code: execCommand( 'code' ),
+    removeCode: execCommand( 'removeCode' ),
 
     removeAllFormatting: execCommand( 'removeAllFormatting' ),
 
@@ -15466,6 +15788,14 @@ var RichTextView = Class({
     isUnderlined: queryCommandState( 'U' ),
     isStriked: queryCommandState( 'S' ),
     isLink: queryCommandState( 'A' ),
+    isCode: function () {
+        var regexp = new RegExp( '(?:^|>)(?:PRE|CODE)\\b' );
+        var editor = this.get( 'editor' );
+        var path = this.get( 'path' );
+        return path === '(selection)' ?
+            editor.hasFormat( 'PRE' ) || editor.hasFormat( 'CODE' ) :
+            regexp.test( path );
+    }.property( 'path' ),
 
     alignment: function () {
         var path = this.get( 'path' );
@@ -15542,6 +15872,18 @@ var RichTextView = Class({
         }
     }.on( 'keydown' ),
 
+    // Chrome (and Opera) as of 2018-09-24 have a bug where if an image is
+    // inside a link, clicking the image actually loads the link, even though
+    // it's inside a content editable area.
+    click: function ( event ) {
+        var target = event.target;
+        if ( !isClickModified( event ) &&
+                target.nodeName === 'IMG' &&
+                Element$1.nearest( target, 'A', this.get( 'layer' ) ) ) {
+            event.preventDefault();
+        }
+    }.on( 'click' ),
+
     // -- Drag and drop ---
 
     dropAcceptedDataTypes: {
@@ -15578,6 +15920,7 @@ RichTextView.isSupported = (
 );
 
 RichTextView.TOOLBAR_HIDDEN = TOOLBAR_HIDDEN;
+RichTextView.TOOLBAR_INLINE = TOOLBAR_INLINE;
 RichTextView.TOOLBAR_AT_SELECTION = TOOLBAR_AT_SELECTION;
 RichTextView.TOOLBAR_AT_TOP = TOOLBAR_AT_TOP;
 
@@ -15596,9 +15939,11 @@ var DISABLE_IN_INPUT = 2;
 var handleOnDown = {};
 
 var toPlatformKey = function ( key ) {
-    if ( key.startsWith( 'Cmd-' ) ) {
-        key = ( isMac$1 ? 'Meta-' : 'Ctrl-' ) + key.slice( 4 );
-        if ( !isMac$1 && key.contains( 'Shift-' ) ) {
+    if ( key.contains( 'Cmd-' ) ) {
+        key = key.replace( 'Cmd-', isMac$1 ? 'Meta-' : 'Ctrl-' );
+        if ( !isMac$1 &&
+                key.contains( 'Shift-' ) &&
+                key.charAt( key.length - 2 ) === '-' ) {
             // The shift modifier is applied to the key returned (so it is
             // uppercase) if the Ctrl key is pressed, but not if Meta is
             // pressed
@@ -16181,10 +16526,10 @@ var ThemeManager = Class({
             theme = this.get( 'theme' );
         }
 
-        var styles = this._styles[ theme ];
-        var data = styles[ id ] || this._styles.all[ id ];
+        var styles = this._styles[ theme ] || {};
         var images = this._images[ theme ] || {};
         var themeIndependentImages = this._images.all;
+        var data = styles[ id ] || this._styles.all[ id ] || '';
         var active = this._activeStylesheets;
 
         if ( data ) {
@@ -16200,9 +16545,12 @@ var ThemeManager = Class({
                 }
                 return 'url(' + ( imageData || src ) + ')';
             });
-            Stylesheet.create( theme + '-' + id, data );
-            active[ id ] = ( active[ id ] || 0 ) + 1;
         }
+
+        // Even if no data, create the stylesheet as we'll probably change it
+        // for a different theme that's currently loading.
+        Stylesheet.create( theme + '-' + id, data );
+        active[ id ] = ( active[ id ] || 0 ) + 1;
 
         return this;
     },
@@ -16319,12 +16667,13 @@ var WindowController = Class({
     */
 
     init: function init (/* ...mixins */) {
-        var this$1 = this;
-
         this.id = new Date().format( '%y%m%d%H%M%S' ) + Math.random();
         this.isMaster = false;
         this.isFocused = document.hasFocus ? document.hasFocus() : true;
+
         this._seenWCs = {};
+        this._checkTimeout = null;
+        this._pingTimeout = null;
 
         WindowController.parent.constructor.apply( this, arguments );
 
@@ -16333,33 +16682,48 @@ var WindowController = Class({
         window.addEventListener( 'focus', this, false );
         window.addEventListener( 'blur', this, false );
 
-        this.broadcast( 'wc:hello' );
-
-        var check = function () {
-            this$1.checkMaster();
-            this$1._checkTimeout = RunLoop$1.invokeAfterDelay( check, 9000 );
-        };
-        var ping = function () {
-            this$1.sendPing();
-            this$1._pingTimeout = RunLoop$1.invokeAfterDelay( ping, 17000 );
-        };
-        this._checkTimeout = RunLoop$1.invokeAfterDelay( check, 500 );
-        this._pingTimeout = RunLoop$1.invokeAfterDelay( ping, 17000 );
+        this.start();
     },
 
     destroy: function destroy () {
-        RunLoop$1.cancel( this._pingTimeout )
-               .cancel( this._checkTimeout );
+        this.end( this.get( 'broadcastKey' ) );
 
         window.removeEventListener( 'storage', this, false );
         window.removeEventListener( 'unload', this, false );
         window.removeEventListener( 'focus', this, false );
         window.removeEventListener( 'blur', this, false );
 
-        this.broadcast( 'wc:bye' );
-
         WindowController.parent.destroy.call( this );
     },
+
+    start: function start () {
+        var this$1 = this;
+
+        this.broadcast( 'wc:hello' );
+
+        var check = function () {
+            this$1.checkMaster();
+            this$1._checkTimeout = RunLoop.invokeAfterDelay( check, 9000 );
+        };
+        var ping = function () {
+            this$1.sendPing();
+            this$1._pingTimeout = RunLoop.invokeAfterDelay( ping, 17000 );
+        };
+        this._checkTimeout = RunLoop.invokeAfterDelay( check, 500 );
+        this._pingTimeout = RunLoop.invokeAfterDelay( ping, 17000 );
+    },
+
+    end: function end ( broadcastKey ) {
+        RunLoop.cancel( this._pingTimeout )
+               .cancel( this._checkTimeout );
+
+        this.broadcast( 'wc:bye', null, broadcastKey );
+    },
+
+    broadcastKeyDidChange: function ( _, __, oldBroadcastKey ) {
+        this.end( oldBroadcastKey );
+        this.start();
+    }.observes( 'broadcastKey' ),
 
     /**
         Method (protected): O.WindowController#handleEvent
@@ -16476,13 +16840,15 @@ var WindowController = Class({
         Broadcast an event with JSON-serialisable data to other tabs.
 
         Parameters:
-            type - {String} The name of the event being broadcast.
-            data - {Object} (optional). The data to broadcast.
+            type         - {String} The name of the event being broadcast.
+            data         - {Object} (optional). The data to broadcast.
+            broadcastKey - {String} (optional). The key to use; otherwise the
+                           key will be taken from the broadcastKey property.
     */
-    broadcast: function broadcast ( type, data ) {
+    broadcast: function broadcast ( type, data, broadcastKey ) {
         try {
             localStorage.setItem(
-                this.get( 'broadcastKey' ),
+                broadcastKey || this.get( 'broadcastKey' ),
                 JSON.stringify( Object.assign({
                     wcId: this.id,
                     type: type,
@@ -16565,8 +16931,7 @@ var RecordArray = Class({
     getObjectAt: function getObjectAt ( index ) {
         var storeKey = this.get( 'storeKeys' )[ index ];
         if ( storeKey ) {
-            return this.get( 'store' )
-                .materialiseRecord( storeKey, this.get( 'Type' ) );
+            return this.get( 'store' ).materialiseRecord( storeKey );
         }
     },
 });
@@ -16609,7 +16974,7 @@ var AUTO_REFRESH_ALWAYS = 2;
     object passed to the sourceDidFetchQuery callback must be identical to the
     current values in the query for the data to be accepted.
 
-    The server may also return a state string, which represents the current
+    The server may also return a queryState string, which represents the current
     state of the query. The source may then send this to the server if the query
     is refreshed; if there have been no changes, the server can then avoid
     sending back unneccessary data.
@@ -16648,7 +17013,7 @@ var Query = Class({
     */
 
     /**
-        Property: O.Query#state
+        Property: O.Query#queryState
         Type: String
 
         A state string from the server to allow the query to fetch updates and
@@ -16695,7 +17060,7 @@ var Query = Class({
         this.accountId = null;
         this.where = null;
         this.sort = null;
-        this.state = '';
+        this.queryState = '';
         this.status = EMPTY;
         this.length = null;
         this.lastAccess = Date.now();
@@ -16770,6 +17135,10 @@ var Query = Class({
             var metadata = meta( this );
             var observers = metadata.observers;
             var rangeObservers = metadata.rangeObservers;
+            // Refresh if any of:
+            // 1. Length is observed
+            // 2. Contents ([]) is observed
+            // 3. A range is observed
             if ( !observers.length && !observers[ '[]' ] &&
                     !( rangeObservers && rangeObservers.length ) ) {
                 break;
@@ -16827,8 +17196,8 @@ var Query = Class({
     /**
         Method: O.Query#reset
 
-        Resets the list, throwing away the id list, resetting the state string
-        and setting the status to EMPTY.
+        Resets the list, throwing away the id list, resetting the queryState
+        string and setting the status to EMPTY.
 
         Returns:
             {O.Query} Returns self.
@@ -16840,7 +17209,7 @@ var Query = Class({
         this._refresh = false;
 
         return this
-            .set( 'state', '' )
+            .set( 'queryState', '' )
             .set( 'status', EMPTY )
             .set( 'length', null )
             .rangeDidChange( 0, length )
@@ -17123,7 +17492,7 @@ var Query = Class({
         Returns:
             {Boolean} Does the list need refreshing or just fetching (the two
             cases may be the same, but can be handled separately if the server
-            has an efficient way of calculating changes from the state).
+            has an efficient way of calculating changes from the queryState).
     */
     sourceWillFetchQuery: function sourceWillFetchQuery () {
         var refresh = this._refresh;
@@ -17140,15 +17509,15 @@ var Query = Class({
         the query.
 
         Parameters:
-            storeKeys - {String[]} The store keys of the records represented by
-                        this query.
-            state     - {String} (optional) A string representing the state of
-                        the query on the server at the time of the fetch.
+            storeKeys  - {String[]} The store keys of the records represented by
+                         this query.
+            queryState - {String} (optional) A string representing the state of
+                         the query on the server at the time of the fetch.
 
         Returns:
             {Query} Returns self.
     */
-    sourceDidFetchQuery: function sourceDidFetchQuery ( storeKeys, state ) {
+    sourceDidFetchQuery: function sourceDidFetchQuery ( storeKeys, queryState ) {
         // Could use a proper diffing algorithm to calculate added/removed
         // arrays, but probably not worth it.
         var oldStoreKeys = this._storeKeys;
@@ -17208,7 +17577,7 @@ var Query = Class({
 
         this._storeKeys = storeKeys;
         this.beginPropertyChanges()
-            .set( 'state', state || '' )
+            .set( 'queryState', queryState || '' )
             .set( 'status', READY|( this.is( OBSOLETE ) ? OBSOLETE : 0 ) )
             .set( 'length', total );
         if ( firstChange < lastChangeNew ) {
@@ -17489,7 +17858,7 @@ var composeUpdates = function ( u1, u2 ) {
         truncateAtFirstGap:
             u1.truncateAtFirstGap || u2.truncateAtFirstGap,
         total: u2.total,
-        upto: u2.upto,
+        upToId: u2.upToId,
     };
 };
 
@@ -17673,18 +18042,11 @@ var WindowedQuery = Class({
         WindowedQuery.parent.reset.call( this );
     },
 
-    // We keep a local cache so that we can handle records changing ids.
-    // There may be old ids in the "removed" array, which need to alias to the
-    // current store key.
     _toStoreKey: function () {
         var store = this.get( 'store' );
         var accountId = this.get( 'accountId' );
         var Type = this.get( 'Type' );
-        var cache = {};
-        return function (id) { return (
-            cache[ id ] ||
-                ( cache[ id ] = store.getStoreKey( accountId, Type, id ) )
-        ); };
+        return function (id) { return store.getStoreKey( accountId, Type, id ); };
     }.property(),
 
     indexOfStoreKey: function indexOfStoreKey ( storeKey, from, callback ) {
@@ -17848,8 +18210,11 @@ var WindowedQuery = Class({
         var list = this._storeKeys;
         var i = index * windowSize;
         var l = Math.min( i + windowSize, this.get( 'length' ) );
+        var status;
         for ( ; i < l; i += 1 ) {
-            if ( store.getStatus( list[i] ) & (EMPTY|OBSOLETE) ) {
+            status = store.getStatus( list[i] );
+            if ( !( status & READY ) ||
+                    ( ( status & OBSOLETE ) && !( status & LOADING ) ) ) {
                 return false;
             }
         }
@@ -17927,12 +18292,12 @@ var WindowedQuery = Class({
 
     _normaliseUpdate: function _normaliseUpdate ( update ) {
         var list = this._storeKeys;
-        var removedStoreKeys = update.removed || [];
+        var removedStoreKeys = update.removed;
         var removedIndexes = mapIndexes( list, removedStoreKeys );
         var addedStoreKeys = [];
         var addedIndexes = [];
-        var added = update.added || [];
-        var i, j, l, item, index, storeKey;
+        var added = update.added;
+        var i, j, l;
 
         sortLinkedArrays( removedIndexes, removedStoreKeys );
         for ( i = 0; removedIndexes[i] === -1; i += 1 ) {
@@ -17946,14 +18311,12 @@ var WindowedQuery = Class({
             removedStoreKeys = removedStoreKeys.slice( i );
         }
         // But truncate at first gap.
-        update.truncateAtFirstGap = !!i;
-        update.removedIndexes = removedIndexes;
-        update.removedStoreKeys = removedStoreKeys;
+        var truncateAtFirstGap = !!i;
 
         for ( i = 0, l = added.length; i < l; i += 1 ) {
-            item = added[i];
-            index = item[0];
-            storeKey = item[1];
+            var ref = added[i];
+            var index = ref.index;
+            var storeKey = ref.storeKey;
             j = removedStoreKeys.indexOf( storeKey );
 
             if ( j > -1 &&
@@ -17965,15 +18328,20 @@ var WindowedQuery = Class({
                 addedStoreKeys.push( storeKey );
             }
         }
-        update.addedIndexes = addedIndexes;
-        update.addedStoreKeys = addedStoreKeys;
 
-        if ( !( 'total' in update ) ) {
-            update.total = this.get( 'length' ) -
-                removedIndexes.length + addedIndexes.length;
-        }
-
-        return update;
+        return {
+            removedIndexes: removedIndexes,
+            removedStoreKeys: removedStoreKeys,
+            addedIndexes: addedIndexes,
+            addedStoreKeys: addedStoreKeys,
+            truncateAtFirstGap: truncateAtFirstGap,
+            total: update.total !== undefined ?
+                update.total :
+                this.get( 'length' ) -
+                    removedIndexes.length +
+                    addedIndexes.length,
+            upToId: update.upToId,
+        };
     },
 
     _applyUpdate: function _applyUpdate ( args ) {
@@ -18036,14 +18404,14 @@ var WindowedQuery = Class({
             }
         }
 
-        // --- Check upto ---
+        // --- Check upToId ---
 
-        // upto is the last item id the updates are to. Anything after here
+        // upToId is the last item id the updates are to. Anything after here
         // may have changed, but won't be in the updates, so we need to truncate
         // the list to ensure it doesn't get into an inconsistent state.
         // If we can't find the id, we have to reset.
-        if ( args.upto ) {
-            l = list.lastIndexOf( args.upto ) + 1;
+        if ( args.upToId ) {
+            l = list.lastIndexOf( args.upToId ) + 1;
             if ( l ) {
                 if ( l !== listLength ) {
                     recalculateFetchedWindows = true;
@@ -18095,19 +18463,19 @@ var WindowedQuery = Class({
         var didDropPackets = false;
         var waitingPackets = this._waitingPackets;
         var l = waitingPackets.length;
-        var state = this.get( 'state' );
+        var queryState = this.get( 'queryState' );
         var packet;
 
         while ( l-- ) {
             packet = waitingPackets.shift();
             // If these values aren't now the same, the packet must
-            // be OLDER than our current state, so just discard.
-            if ( packet.state !== state ) {
+            // be OLDER than our current queryState, so just discard.
+            if ( packet.queryState !== queryState ) {
                 // But also fetch everything missing in observed range, to
                 // ensure we have the required data
                 didDropPackets = true;
             } else {
-                this$1.sourceDidFetchIdList( packet );
+                this$1.sourceDidFetchIds( packet );
             }
         }
         if ( didDropPackets ) {
@@ -18152,9 +18520,9 @@ var WindowedQuery = Class({
         happened next time an update arrives. If it turns out to be wrong the
         list will be reset, but in most cases it should appear more efficient.
 
-        removed - {String[]} (optional) The store keys of all records to delete.
-        added   - {[Number,String][]} (optional) A list of [ index, storeKey ]
-                  pairs, in ascending order of index, for all records to be
+        removed - {String[]} The store keys of all records to delete.
+        added   - {Object[]} A list of objects with index and storeKey
+                  properties, in ascending order of index, for all records to be
                   inserted.
 
         Parameters:
@@ -18164,13 +18532,13 @@ var WindowedQuery = Class({
             {O.WindowedQuery} Returns self.
     */
     clientDidGenerateUpdate: function clientDidGenerateUpdate ( update ) {
-        this._normaliseUpdate( update );
+        update = this._normaliseUpdate( update );
         // Ignore completely any ids we don't have.
         update.truncateAtFirstGap = false;
         this._applyUpdate( update );
         this._preemptiveUpdates.push( update );
         this.set( 'status', this.get( 'status' ) | DIRTY );
-        this.fetch( true );
+        this.setObsolete();
         return this;
     },
 
@@ -18180,15 +18548,17 @@ var WindowedQuery = Class({
         The source should call this when it fetches a delta update for the
         query. The args object should contain the following properties:
 
-        newState - {String} The state this delta updates the remote query to.
-        oldState - {String} The state this delta updates the remote query from.
+        newQueryState - {String} The state this delta updates the remote query
+                        to.
+        oldQueryState - {String} The state this delta updates the remote query
+                        from.
         removed  - {String[]} The ids of all records removed since
-                   oldState.
-        added    - {[Number,String][]} A list of [ index, id ] pairs, in
-                   ascending order of index, for all records added since
-                   oldState.
-        upto     - {String} (optional) As an optimisation, updates may only be
-                   for the first portion of a list, upto a certain id. This is
+                   oldQueryState.
+        added    - {{index: Number, id: String}[]} A list of { index, id }
+                   objects, in ascending order of index, for all records added
+                   since oldQueryState.
+        upToId   - {String} (optional) As an optimisation, updates may only be
+                   for the first portion of a list, up to a certain id. This is
                    the last id which is included in the range covered by the
                    updates; any information past this id must be discarded, and
                    if the id can't be found the list must be reset.
@@ -18201,7 +18571,7 @@ var WindowedQuery = Class({
             {O.WindowedQuery} Returns self.
     */
     sourceDidFetchUpdate: function sourceDidFetchUpdate ( update ) {
-        var state = this.get( 'state' );
+        var queryState = this.get( 'queryState' );
         var status = this.get( 'status' );
         var preemptives = this._preemptiveUpdates;
         var preemptivesLength = preemptives.length;
@@ -18211,7 +18581,7 @@ var WindowedQuery = Class({
         this.set( 'status', status & ~LOADING );
 
         // Check we've not already got this update.
-        if ( state === update.newState ) {
+        if ( queryState === update.newQueryState ) {
             if ( preemptivesLength && !( status & DIRTY ) ) {
                 allPreemptives = preemptives.reduce( composeUpdates );
                 this._applyUpdate( invertUpdate( allPreemptives ) );
@@ -18219,23 +18589,30 @@ var WindowedQuery = Class({
             }
             return this;
         }
-        // We can only update from our old state.
-        if ( state !== update.oldState ) {
+        // We can only update from our old query state.
+        if ( queryState !== update.oldQueryState ) {
             return this.setObsolete();
         }
-        // Set new state
-        this.set( 'state', update.newState );
+        // Set new query state
+        this.set( 'queryState', update.newQueryState );
 
         // Map ids to store keys
         var toStoreKey = this.get( '_toStoreKey' );
-        update.removed = update.removed.map( toStoreKey );
-        update.added.forEach( function (tuple) {
-            tuple[1] = toStoreKey( tuple[1] );
-        });
-        update.upto = update.upto && toStoreKey( update.upto );
+        var added = update.added.map( function (item) { return ({
+            index: item.index,
+            storeKey: toStoreKey( item.id ),
+        }); });
+        var removed = update.removed.map( toStoreKey );
+        var upToId = update.upToId && toStoreKey( update.upToId );
+        var total = update.total;
 
         if ( !preemptivesLength ) {
-            this._applyUpdate( this._normaliseUpdate( update ) );
+            this._applyUpdate( this._normaliseUpdate({
+                removed: removed,
+                added: added,
+                total: total,
+                upToId: upToId,
+            }));
         } else {
             // 1. Compose all preemptives:
             // [p1, p2, p3] -> [p1, p1 + p2, p1 + p2 + p3 ]
@@ -18247,24 +18624,27 @@ var WindowedQuery = Class({
 
             // 2. Normalise the update from the server. This is trickier
             // than normal, as we need to determine what the indexes of the
-            // removed store keys were in the previous state.
-            var normalisedUpdate = this._normaliseUpdate({
-                added: update.added,
-                total: update.total,
-                upto: update.upto,
-            });
+            // removed store keys were in the previous query state.
+            var normalisedUpdate = {
+                removedIndexes: [],
+                removedStoreKeys: [],
+                addedIndexes: added.map( function (item) { return item.index; } ),
+                addedStoreKeys: added.map( function (item) { return item.storeKey; } ),
+                truncateAtFirstGap: false,
+                total: total,
+                upToId: upToId,
+            };
 
             // Find the removedIndexes for our update. If they were removed
             // in the composed preemptive, we have the index. Otherwise, we
             // need to search for the store key in the current list then
             // compose the result with the preemptive in order to get the
             // original index.
-            var removed = update.removed;
+            var list = this._storeKeys;
+            var removedIndexes = normalisedUpdate.removedIndexes;
+            var removedStoreKeys = normalisedUpdate.removedStoreKeys;
             var _indexes = [];
             var _storeKeys = [];
-            var removedIndexes = [];
-            var removedStoreKeys = [];
-            var list = this._storeKeys;
             var wasSuccessfulPreemptive = false;
             var storeKey, index;
 
@@ -18293,15 +18673,8 @@ var WindowedQuery = Class({
                     addedIndexes: [],
                     addedStoreKeys: [],
                 });
-                _indexes = _storeKeys.reduce( function ( indexes, storeKey ) {
-                    // If the id was added in a preemptive add it won't be
-                    // in the list of removed ids.
-                    var i = x.removedStoreKeys.indexOf( storeKey );
-                    if ( i > -1 ) {
-                        indexes.push( x.removedIndexes[i] );
-                    }
-                    return indexes;
-                }, [] );
+                _indexes = x.removedIndexes;
+                _storeKeys = x.removedStoreKeys;
                 var ll = removedIndexes.length;
                 for ( var i$2 = 0, l$1 = _indexes.length; i$2 < l$1; i$2 += 1 ) {
                     removedIndexes[ ll ] = _indexes[i$2];
@@ -18309,11 +18682,7 @@ var WindowedQuery = Class({
                     ll += 1;
                 }
             }
-
             sortLinkedArrays( removedIndexes, removedStoreKeys );
-
-            normalisedUpdate.removedIndexes = removedIndexes;
-            normalisedUpdate.removedStoreKeys = removedStoreKeys;
 
             // Now remove any idempotent operations
             var addedIndexes = normalisedUpdate.addedIndexes;
@@ -18395,15 +18764,16 @@ var WindowedQuery = Class({
     },
 
     /**
-        Method: O.WindowedQuery#sourceDidFetchIdList
+        Method: O.WindowedQuery#sourceDidFetchIds
 
         The source should call this when it fetches a portion of the id list for
         this query. The args object should contain:
 
-        state    - {String} The state of the server when this slice was taken.
-        idList   - {String[]} The list of ids.
-        position - {Number} The index in the query of the first id in idList.
-        total    - {Number} The total number of records in the query.
+        queryState - {String} The queryState of the server when this slice was
+                     taken.
+        ids        - {String[]} The list of ids.
+        position   - {Number} The index in the query of the first id in ids.
+        total      - {Number} The total number of records in the query.
 
         Parameters:
             args - {Object} The portion of the overall id list. See above for
@@ -18412,14 +18782,14 @@ var WindowedQuery = Class({
         Returns:
             {O.WindowedQuery} Returns self.
     */
-    sourceDidFetchIdList: function sourceDidFetchIdList ( args ) {
-        var state = this.get( 'state' );
+    sourceDidFetchIds: function sourceDidFetchIds ( args ) {
+        var queryState = this.get( 'queryState' );
         var status = this.get( 'status' );
         var oldLength = this.get( 'length' ) || 0;
         var canGetDeltaUpdates = this.get( 'canGetDeltaUpdates' );
         var position = args.position;
         var total = args.total;
-        var ids = args.idList;
+        var ids = args.ids;
         var length = ids.length;
         var list = this._storeKeys;
         var windows = this._windows;
@@ -18427,9 +18797,9 @@ var WindowedQuery = Class({
         var informAllRangeObservers = false;
         var beginningOfWindowIsFetched = true;
 
-        // If the state does not match, the list has changed since we last
+        // If the query state does not match, the list has changed since we last
         // queried it, so we must get the intervening updates first.
-        if ( state && state !== args.state ) {
+        if ( queryState && queryState !== args.queryState ) {
             if ( canGetDeltaUpdates ) {
                 this._waitingPackets.push( args );
                 return this.setObsolete().fetch();
@@ -18438,7 +18808,7 @@ var WindowedQuery = Class({
                 informAllRangeObservers = true;
             }
         }
-        this.set( 'state', args.state );
+        this.set( 'queryState', args.queryState );
 
         // Map ids to store keys
         var toStoreKey = this.get( '_toStoreKey' );
@@ -18882,11 +19252,12 @@ var RecordAttribute = Class({
         Default: undefined
 
         If the attribute is not set on the underlying data object, the
-        defaultValue will be returned instead. This will also be used to add
-        this attribute to the data object if a new record is created and the
-        attribute is not set.
+        defaultValue will be used as the attribute instead. This will also be
+        used to add this attribute to the data object if a new record is
+        created and the attribute is not set.
 
-        The value should be of the type specified in <O.RecordAttribute#Type>.
+        The value should be the JSON encoding of the type specified in
+        <O.RecordAttribute#Type>.
     */
     defaultValue: undefined,
 
@@ -18942,10 +19313,14 @@ var RecordAttribute = Class({
         var store = record.get( 'store' );
         var storeKey = record.get( 'storeKey' );
         var data = storeKey ? store.getData( storeKey ) : record._data;
-        var attrKey, attrValue, currentAttrValue, update, Type;
+        var attrKey = this.key || propKey;
+        var Type = this.Type;
+        var currentAttrValue, attrValue, update;
         if ( data ) {
-            attrKey = this.key || propKey;
             currentAttrValue = data[ attrKey ];
+            if ( currentAttrValue === undefined ) {
+                currentAttrValue = this.defaultValue;
+            }
             if ( propValue !== undefined &&
                     this.willSet( propValue, propKey, record ) ) {
                 if ( this.toJSON ) {
@@ -18956,6 +19331,9 @@ var RecordAttribute = Class({
                     attrValue = propValue;
                 }
                 if ( !isEqual( attrValue, currentAttrValue ) ) {
+                    // May have changed if willSet moved the account this record
+                    // is in.
+                    storeKey = record.get( 'storeKey' );
                     if ( storeKey ) {
                         update = {};
                         update[ attrKey ] = attrValue;
@@ -18969,12 +19347,11 @@ var RecordAttribute = Class({
                 }
                 return propValue;
             }
-            Type = this.Type;
+        } else {
+            currentAttrValue = this.defaultValue;
         }
-        return currentAttrValue !== undefined ?
-            currentAttrValue !== null && Type && Type.fromJSON ?
-                Type.fromJSON( currentAttrValue ) : currentAttrValue :
-            this.defaultValue;
+        return currentAttrValue !== null && Type && Type.fromJSON ?
+            Type.fromJSON( currentAttrValue ) : currentAttrValue;
     },
 });
 
@@ -19109,6 +19486,10 @@ var ToOneAttribute = Class({
 
     Extends: RecordAttribute,
 
+    // Referenced record may be garbage collected independently of this record,
+    // so always ask store for the value.
+    isVolatile: true,
+
     willSet: function willSet ( propValue, propKey, record ) {
         if ( ToOneAttribute.parent.willSet.call(
                 this, propValue, propKey, record ) ) {
@@ -19159,7 +19540,7 @@ var Record = Class({
     init: function init ( store, storeKey ) {
         this._noSync = false;
         this._data = storeKey ? null : {
-            accountId: store.getDefaultAccountId(),
+            accountId: store.getDefaultAccountId( this.constructor ),
         };
         this.store = store;
         this.storeKey = storeKey;
@@ -19325,7 +19706,7 @@ var Record = Class({
         return storeKey ?
             this.get( 'store' ).getIdFromStoreKey( storeKey ) :
             this._data[ primaryKey ];
-    }.property(),
+    }.property( 'accountId' ),
 
     toJSON: function toJSON () {
         return this.get( 'storeKey' ) || this;
@@ -19335,21 +19716,26 @@ var Record = Class({
         return this.get( 'id' ) || ( '#' + this.get( 'storeKey' ) );
     },
 
-    accountId: function ( accountId ) {
+    accountId: function ( toAccountId ) {
         var storeKey = this.get( 'storeKey' );
         var store = this.get( 'store' );
-        if ( accountId === undefined ) {
-            accountId = storeKey ?
+        var accountId = storeKey ?
                 store.getAccountIdFromStoreKey( storeKey ) :
                 this._data.accountId;
-        } else {
-            if ( storeKey ) {
-                store.updateData( storeKey, {
-                    accountId: accountId,
-                }, true );
+        if ( toAccountId !== undefined && toAccountId !== accountId ) {
+            if ( this.get( 'status' ) === READY_NEW_DIRTY ) {
+                if ( storeKey ) {
+                    store.updateData( storeKey, {
+                        accountId: toAccountId,
+                    }, true );
+                } else {
+                    this._data.accountId = toAccountId;
+                }
             } else {
-                this._data.accountId = accountId;
+                store.moveRecord( storeKey, toAccountId );
             }
+            accountId = toAccountId;
+            store.fire( 'record:user:update', { record: this } );
         }
         return accountId;
     }.property(),
@@ -19392,8 +19778,7 @@ var Record = Class({
                 if ( !( attrKey in data ) ) {
                     var defaultValue = attribute.defaultValue;
                     if ( defaultValue !== undefined ) {
-                        data[ attrKey ] = defaultValue && defaultValue.toJSON ?
-                            defaultValue.toJSON() : clone( defaultValue );
+                        data[ attrKey ] = clone( defaultValue );
                     }
                 } else if ( ( attribute instanceof ToOneAttribute ) &&
                         ( data[ attrKey ] instanceof Record ) ) {
@@ -19404,11 +19789,15 @@ var Record = Class({
 
         // Save to store
         store.createRecord( storeKey, data )
-             .setRecordForStoreKey( storeKey, this )
-             .fire( 'record:user:create', { record: this } );
+             .setRecordForStoreKey( storeKey, this );
 
         // And save store reference on record instance.
-        return this.set( 'storeKey', storeKey );
+        this.set( 'storeKey', storeKey );
+
+        // Fire event
+        store.fire( 'record:user:create', { record: this } );
+
+        return this;
     },
 
     /**
@@ -19459,8 +19848,8 @@ var Record = Class({
         var storeKey = this.get( 'storeKey' );
         if ( storeKey && this.get( 'isEditable' ) ) {
             this.get( 'store' )
-                .fire( 'record:user:destroy', { record: this } )
-                .destroyRecord( storeKey );
+                .destroyRecord( storeKey )
+                .fire( 'record:user:destroy', { record: this } );
         }
     },
 
@@ -19478,8 +19867,7 @@ var Record = Class({
         if ( this.get( 'store' ) === store ) {
             return this;
         }
-        return store.materialiseRecord(
-            this.get( 'storeKey' ), this.constructor );
+        return store.materialiseRecord( this.get( 'storeKey' ) );
     },
 
     /**
@@ -19869,6 +20257,205 @@ Record.toMany = function ( mixin$$1 ) {
     return new ToManyAttribute( mixin$$1 );
 };
 
+// ---
+
+var HANDLE_ALL_ERRORS = Symbol( 'HANDLE_ALL_ERRORS' );
+var HANDLE_NO_ERRORS = [];
+
+/**
+    Class: O.RecordResult
+
+    This class allows you to observe the result of fetching or committing a
+    record.
+
+    This class if used directly deals in callbacks; you should probably only
+    ever instantiate it via <O.Record#ifSuccess> or <O.Record#getResult> which
+    provide Promise interfaces. See those two functions for usage examples.
+
+    The object waits for the record to transition into a READY, DESTROYED or
+    NON_EXISTENT state, then calls the callback.
+
+    When an error is “caught” (that is, error propagation is stopped), the
+    changes in the store are not reverted.
+*/
+var RecordResult = Class({
+
+    /**
+        Property: O.RecordResult#error
+        Type: {O.Event|null}
+
+        Set for any commit error that occurs (whether a handled error or not).
+    */
+
+    /**
+        Property: O.RecordResult#record
+        Type: {O.Record}
+
+        The record being observed
+    */
+
+    init: function init ( record, callback, mixin$$1 ) {
+        this._callback = callback;
+
+        this.record = record;
+        this.error = null;
+
+        record
+            .on( 'record:commit:error', this, 'onError' )
+            .addObserverForKey( 'status', this, 'statusDidChange' );
+
+        Object.assign( this, mixin$$1 );
+        this.statusDidChange( record, 'status', 0, record.get( 'status' ) );
+    },
+
+    done: function done () {
+        this.record
+            .removeObserverForKey( 'status', this, 'statusDidChange' )
+            .off( 'record:commit:error', this, 'onError' );
+        this._callback( this );
+    },
+
+    statusDidChange: function statusDidChange ( record, key, _, newStatus ) {
+        if ( !( newStatus & (EMPTY|NEW|DIRTY|COMMITTING) ) ) {
+            this.done();
+        }
+    },
+
+    onError: function onError ( event ) {
+        this.error = event;
+        if ( this.shouldStopErrorPropagation( event ) ) {
+            event.stopPropagation();
+        }
+        this.done();
+    },
+
+    /**
+        Property: O.RecordResult#handledErrorTypes
+        Type: {Array<string>|HANDLE_NO_ERRORS|HANDLE_ALL_ERRORS}
+        Default: HANDLE_NO_ERRORS
+
+        Either one of the two constants (available on the RecordResult
+        constructor), or an array of error types to handle, e.g.
+        `[ 'alreadyExists' ]`. (Where “handle” means “stop propagation on”.)
+    */
+    handledErrorTypes: HANDLE_NO_ERRORS,
+
+     /**
+        Method: O.RecordResult#shouldStopErrorPropagation
+
+        Parameters:
+            event - {O.Event} The commit error object.
+
+        When an error occurs, should its propagation be stopped? If propagation
+        is stopped, the changes will not be reverted in the store, and the
+        crafter of the RecordResult is responsible for resolving the state in
+        the store.
+
+        Instances should normally be able to set `handledErrorTypes`, but if
+        more complex requirements come up this method can also be overridden.
+
+        Returns:
+            {Boolean} Stop propagation of the event?
+    */
+    shouldStopErrorPropagation: function shouldStopErrorPropagation ( event ) {
+        var handledErrorTypes = this.handledErrorTypes;
+        return handledErrorTypes !== HANDLE_NO_ERRORS &&
+            ( handledErrorTypes === HANDLE_ALL_ERRORS ||
+                handledErrorTypes.indexOf( event.type ) !== -1 );
+    },
+});
+RecordResult.HANDLE_ALL_ERRORS = HANDLE_ALL_ERRORS;
+RecordResult.HANDLE_NO_ERRORS = HANDLE_NO_ERRORS;
+
+// ---
+
+Object.assign( Record.prototype, {
+    /*
+        Function: O.Record#getResult
+        Returns: {Promise<O.RecordResult>}
+
+        The promise it returns will resolve to a RecordResult which has two
+        notable properties, `record` and `error`.
+
+        Normally, <O.Record#ifSuccess> will be easier to use, but if you’re
+        working with batch processing of objects and Promise.all(), then you’ll
+        want to use getResult rather than ifSuccess, because Promise.all() will
+        reject with the first error it receives, whereas in such a situation
+        you’ll want instead to produce an array of errors.
+
+        Usage:
+
+            record
+                .set( … )  // Or anything that makes it commit changes.
+                .getResult({
+                    handledErrorTypes: [ 'somethingWrong' ],
+                })
+                .then( result => {
+                    if ( result.error ) {
+                        // Do something with the somethingWrong error
+                    }
+                });
+    */
+    getResult: function getResult ( mixin$$1 ) {
+        var this$1 = this;
+
+        return new Promise( function (resolve) { return new RecordResult( this$1, resolve, mixin$$1 ); }
+        );
+    },
+
+    /*
+        Function: O.Record#ifSuccess
+        Returns: {Promise<O.Record, O.RecordResult>}
+
+        The promise it returns will either resolve to the record, or be rejected
+        with a RecordResult, which is an object containing two properties to
+        care about, `record` and `error`.
+
+        (Why the name ifSuccess? Read it as “set this field; if success, then do
+        such-and-such, otherwise catch so-and-so.)
+
+        Usage for catching failed commits:
+
+            record
+                .set( … )  // Or anything that makes it commit changes.
+                .ifSuccess({
+                    handledErrorTypes: [ 'somethingWrong' ],
+                })
+                .then( record => {
+                    // Do something after the commit has finished
+                })
+                .catch( ({ record, error }) => {
+                    // Do something with the somethingWrong error
+                });
+
+        Or for loading a record that may or may not exist:
+
+            store
+                .getRecord( null, Foo, 'id' )
+                .ifSuccess()
+                    .then( record => {
+                        // record loaded
+                    })
+                    .catch( ({ record }) => {
+                        // record didn't load
+                    })
+
+    */
+    ifSuccess: function ifSuccess ( mixin$$1 ) {
+        var this$1 = this;
+
+        return new Promise( function ( resolve, reject ) { return new RecordResult( this$1, function (result) {
+                var record = result.record;
+                if ( result.error || record.is( NON_EXISTENT ) ) {
+                    reject( result );
+                } else {
+                    resolve( record );
+                }
+            }, mixin$$1 ); }
+        );
+    },
+});
+
 /**
     Class: O.ValidationError
 
@@ -20021,11 +20608,6 @@ var Source = Class({
                     ...
                 }
             });
-
-        Any types that are handled by the source are removed from the changes
-        object (`delete changes[ typeName ]`); any unhandled types are left
-        behind, so the object may be passed to several sources, with each
-        handling their own types.
 
         Parameters:
             changes  - {Object} The creates/updates/destroys to commit.
@@ -20218,7 +20800,7 @@ var MemoryManager = Class({
         this.isPaused = false;
         this.frequency = frequency || 30000;
 
-        RunLoop$1.invokeAfterDelay( this.cleanup, this.frequency, this );
+        RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
     },
 
     /**
@@ -20258,7 +20840,7 @@ var MemoryManager = Class({
         var deleted;
 
         if ( this.isPaused ) {
-            RunLoop$1.invokeAfterDelay( this.cleanup, this.frequency, this );
+            RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
             return;
         }
 
@@ -20280,9 +20862,9 @@ var MemoryManager = Class({
 
         // Yield between examining types so we don't hog the event queue.
         if ( index ) {
-            RunLoop$1.invokeInNextEventLoop( this.cleanup, this );
+            RunLoop.invokeInNextEventLoop( this.cleanup, this );
         } else {
-            RunLoop$1.invokeAfterDelay( this.cleanup, this.frequency, this );
+            RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
         }
     },
 
@@ -20344,7 +20926,7 @@ var MemoryManager = Class({
         });
         while ( numberToDelete > 0 && l-- ) {
             var query = queries[l];
-            if ( !query.hasObservers() ) {
+            if ( !query.hasObservers() && !query.hasRangeObservers() ) {
                 query.destroy();
                 deleted.push( query );
                 numberToDelete -= 1;
@@ -20386,7 +20968,7 @@ var generateStoreKey = function () {
 // ---
 
 var mayHaveChanges = function ( store ) {
-    RunLoop$1.queueFn( 'before', store.checkForChanges, store );
+    RunLoop.queueFn( 'before', store.checkForChanges, store );
     return store;
 };
 
@@ -20501,6 +21083,37 @@ var convertForeignKeysToId = function ( store, Type, data ) {
 
 // ---
 
+var getChanged = function ( Type, a, b ) {
+    var changed = {};
+    var clientSettable = Record.getClientSettableAttributes( Type );
+    var hasChanges = false;
+    for ( var key in a ) {
+        if ( clientSettable[ key ] && !isEqual( a[ key ], b[ key ] ) ) {
+            changed[ key ] = true;
+            hasChanges = true;
+        }
+    }
+    return hasChanges ? changed : null;
+};
+
+var getDelta = function ( Type, data, changed ) {
+    var proto = Type.prototype;
+    var attrs = meta( proto ).attrs;
+    var delta = {};
+    for ( var attrKey in changed ) {
+        if ( changed[ attrKey ] ) {
+            var value = data[ attrKey ];
+            if ( value === undefined ) {
+                value = proto[ attrs[ attrKey ] ].defaultValue;
+            }
+            delta[ attrKey ] = value;
+        }
+    }
+    return delta;
+};
+
+// ---
+
 /**
     Class: O.Store
 
@@ -20528,7 +21141,7 @@ var convertForeignKeysToId = function ( store, Type, data ) {
       - `NEW`: The record is not yet created on the source (and therefore has
          no source id).
       - `DIRTY`: The record has local changes not yet committing.
-      - `OBSOLETE`: The record may have changes on the server not yet requested.
+      - `OBSOLETE`: The record may have changes on the server not yet loaded.
 */
 var Store = Class({
 
@@ -20619,9 +21232,9 @@ var Store = Class({
         this._nestedStores = [];
 
         // Map accountId -> { status, clientState, serverState }
-        this._defaultAccountId = '';
+        // (An account MUST be added before attempting to use the store.)
+        this._defaultAccountId = null;
         this._accounts = {};
-        this.addAccount( '', { isDefault: true });
 
         Store.parent.constructor.apply( this, arguments );
 
@@ -20670,7 +21283,7 @@ var Store = Class({
 
     // === Accounts ============================================================
 
-    getDefaultAccountId: function getDefaultAccountId () {
+    getDefaultAccountId: function getDefaultAccountId (/* Type */) {
         return this._defaultAccountId;
     },
 
@@ -20683,10 +21296,15 @@ var Store = Class({
 
     addAccount: function addAccount ( accountId, data ) {
         var _accounts = this._accounts;
-        if ( !_accounts[ accountId ] ) {
-            _accounts[ accountId ] = {
+        var account = _accounts[ accountId ];
+        if ( !account ) {
+            account = {
                 isDefault: data.isDefault,
-                hasDataFor: data.hasDataFor || null,
+                // Transform [ ...uri ] into { ...uri: true } for fast access
+                hasDataFor: data.hasDataFor.reduce( function ( obj, uri ) {
+                    obj[ uri ] = true;
+                    return obj;
+                }, {} ),
                 // Type -> status
                 // READY      - Some records of type loaded
                 // LOADING    - Loading or refreshing ALL records of type
@@ -20699,19 +21317,22 @@ var Store = Class({
                 serverState: {},
                 // Type -> id -> store key
                 typeToIdToSK: {},
+                // Clients can set this to true while doing a batch of changes
+                // to avoid fetching updates to related types during the process
+                ignoreServerState: false,
             };
         }
-        if ( accountId && data.isDefault ) {
+        if ( data.isDefault ) {
             this._defaultAccountId = accountId;
             this._nestedStores.forEach( function (store) {
                 store._defaultAccountId = accountId;
             });
-            if ( _accounts[ '' ] ) {
-                _accounts[ accountId ].typeToIdToSK =
-                    _accounts[ '' ].typeToIdToSK;
+            if ( accountId && _accounts[ '' ] ) {
+                account.typeToIdToSK = _accounts[ '' ].typeToIdToSK;
                 delete _accounts[ '' ];
             }
         }
+        _accounts[ accountId ] = account;
 
         return this;
     },
@@ -20778,9 +21399,10 @@ var Store = Class({
             server assigns ids and the record has not yet been committed).
     */
     getIdFromStoreKey: function getIdFromStoreKey ( storeKey ) {
+        var status = this._skToStatus[ storeKey ];
         var Type = this._skToType[ storeKey ];
         var skToId = this._typeToSKToId[ guid( Type ) ];
-        return skToId && skToId[ storeKey ] || null;
+        return ( !( status & NEW ) && skToId && skToId[ storeKey ] ) || null;
     },
 
     /**
@@ -20873,7 +21495,7 @@ var Store = Class({
     */
     getOne: function getOne ( Type, filter ) {
         var storeKey = this.findOne( Type, filter );
-        return storeKey ? this.materialiseRecord( storeKey, Type ) : null;
+        return storeKey ? this.materialiseRecord( storeKey ) : null;
     },
 
     /**
@@ -20989,17 +21611,38 @@ var Store = Class({
         };
 
         for ( var storeKey in _created ) {
+            var isCopyOfStoreKey = _created[ storeKey ];
             var status = _skToStatus[ storeKey ];
             var Type = _skToType[ storeKey ];
             var data = _skToData[ storeKey ];
             var accountId = data.accountId;
+            var entry = getEntry( Type, accountId );
+            var previousAccountId = (void 0), create = (void 0), changed = (void 0);
 
-            data = Object.filter(
-                convertForeignKeysToId( this$1, Type, data ),
-                Record.getClientSettableAttributes( Type )
-            );
+            if ( isCopyOfStoreKey ) {
+                changed =
+                    getChanged( Type, data, _skToData[ isCopyOfStoreKey ] );
+                data = convertForeignKeysToId( this$1, Type, data );
+                previousAccountId =
+                    this$1.getAccountIdFromStoreKey( isCopyOfStoreKey );
+                create = entry.moveFromAccount[ previousAccountId ] ||
+                    ( entry.moveFromAccount[ previousAccountId ] = {
+                        copyFromIds: [],
+                        storeKeys: [],
+                        records: [],
+                        changes: [],
+                    });
+                create.copyFromIds.push(
+                    this$1.getIdFromStoreKey( isCopyOfStoreKey ) );
+                create.changes.push( changed );
+            } else {
+                data = Object.filter(
+                    convertForeignKeysToId( this$1, Type, data ),
+                    Record.getClientSettableAttributes( Type )
+                );
+                create = entry.create;
+            }
 
-            var create = getEntry( Type, accountId ).create;
             create.storeKeys.push( storeKey );
             create.records.push( data );
             this$1.setStatus( storeKey, ( status & ~DIRTY ) | COMMITTING );
@@ -21007,46 +21650,36 @@ var Store = Class({
         for ( var storeKey$1 in _skToChanged ) {
             var status$1 = _skToStatus[ storeKey$1 ];
             var Type$1 = _skToType[ storeKey$1 ];
-            var changed = _skToChanged[ storeKey$1 ];
+            var changed$1 = _skToChanged[ storeKey$1 ];
             var previous = _skToCommitted[ storeKey$1 ];
             var data$1 = _skToData[ storeKey$1 ];
             var accountId$1 = data$1.accountId;
-            var previousAccountId = previous.accountId;
-            var entry = getEntry( Type$1, accountId$1 );
-            var update = (void 0);
+            var update = getEntry( Type$1, accountId$1 ).update;
 
             _skToRollback[ storeKey$1 ] = previous;
             previous = convertForeignKeysToId( this$1, Type$1, previous );
             delete _skToCommitted[ storeKey$1 ];
             data$1 = convertForeignKeysToId( this$1, Type$1, data$1 );
 
-            if ( previousAccountId !== accountId$1 ) {
-                update = entry.moveFromAccount[ previousAccountId ] ||
-                    ( entry.moveFromAccount[ previousAccountId ] = {
-                        storeKeys: [],
-                        records: [],
-                        committed: [],
-                        changes: [],
-                    });
-            } else {
-                update = entry.update;
-            }
-
             update.storeKeys.push( storeKey$1 );
             update.records.push( data$1 );
             update.committed.push( previous );
-            update.changes.push( changed );
+            update.changes.push( changed$1 );
             this$1.setStatus( storeKey$1, ( status$1 & ~DIRTY ) | COMMITTING );
         }
         for ( var storeKey$2 in _destroyed ) {
             var status$2 = _skToStatus[ storeKey$2 ];
-            var Type$2 = _skToType[ storeKey$2 ];
-            var accountId$2 = _skToData[ storeKey$2 ].accountId;
-            var id = _typeToSKToId[ guid( Type$2 ) ][ storeKey$2 ];
-            var destroy = getEntry( Type$2, accountId$2 ).destroy;
+            var ifCopiedStoreKey = _destroyed[ storeKey$2 ];
+            // Check if already handled by moveFromAccount in create.
+            if ( !ifCopiedStoreKey || !_created[ ifCopiedStoreKey ] ) {
+                var Type$2 = _skToType[ storeKey$2 ];
+                var accountId$2 = _skToData[ storeKey$2 ].accountId;
+                var id = _typeToSKToId[ guid( Type$2 ) ][ storeKey$2 ];
+                var destroy = getEntry( Type$2, accountId$2 ).destroy;
 
-            destroy.storeKeys.push( storeKey$2 );
-            destroy.ids.push( id );
+                destroy.storeKeys.push( storeKey$2 );
+                destroy.ids.push( id );
+            }
             this$1.setStatus( storeKey$2, ( status$2 & ~DIRTY ) | COMMITTING );
         }
 
@@ -21062,7 +21695,7 @@ var Store = Class({
                     var typeId = entry.typeId;
                     var accountId = entry.accountId;
                     _accounts[ accountId ].status[ typeId ] &= ~COMMITTING;
-                    this$1._checkServerStatus( accountId, Type );
+                    this$1.checkServerState( accountId, Type );
                 }
                 this$1.set( 'isCommitting', false );
                 if ( this$1.get( 'autoCommit' ) &&
@@ -21116,6 +21749,8 @@ var Store = Class({
     },
 
     getInverseChanges: function getInverseChanges () {
+        var this$1 = this;
+
         var ref = this;
         var _created = ref._created;
         var _destroyed = ref._destroyed;
@@ -21127,27 +21762,46 @@ var Store = Class({
             create: [],
             update: [],
             destroy: [],
+            move: [],
         };
 
         for ( var storeKey in _created ) {
-            inverse.destroy.push( storeKey );
+            if ( !_created[ storeKey ] ) {
+                inverse.destroy.push( storeKey );
+            } else {
+                var previousStoreKey = _created[ storeKey ];
+                inverse.move.push([
+                    storeKey,
+                    this$1.getAccountIdFromStoreKey( previousStoreKey ),
+                    previousStoreKey ]);
+                inverse.update.push([
+                    previousStoreKey,
+                    getDelta(
+                        _skToType[ storeKey ],
+                        _skToData[ previousStoreKey ],
+                        getChanged(
+                            _skToType[ storeKey ],
+                            _skToData[ previousStoreKey ],
+                            _skToData[ storeKey ]
+                        )
+                    ) ]);
+            }
         }
         for ( var storeKey$1 in _skToChanged ) {
-            inverse.update.push([
-                storeKey$1,
-                Object.filter(
-                    _skToCommitted[ storeKey$1 ], _skToChanged[ storeKey$1 ]
-                ) ]);
+            var committed = _skToCommitted[ storeKey$1 ];
+            var changed = _skToChanged[ storeKey$1 ];
+            var Type = _skToType[ storeKey$1 ];
+            var update = getDelta( Type, committed, changed );
+            inverse.update.push([ storeKey$1, update ]);
         }
         for ( var storeKey$2 in _destroyed ) {
-            var Type = _skToType[ storeKey$2 ];
-            inverse.create.push([
-                storeKey$2,
-                Type,
-                Object.filter(
-                    _skToData[ storeKey$2 ],
-                    Record.getClientSettableAttributes( Type )
-                ) ]);
+            if ( !_destroyed[ storeKey$2 ] ) {
+                var Type$1 = _skToType[ storeKey$2 ];
+                inverse.create.push([
+                    storeKey$2,
+                    Type$1,
+                    clone( _skToData[ storeKey$2 ] ) ]);
+            }
         }
 
         return inverse;
@@ -21159,6 +21813,7 @@ var Store = Class({
         var create = changes.create;
         var update = changes.update;
         var destroy = changes.destroy;
+        var move = changes.move;
 
         for ( var i = 0, l = create.length; i < l; i += 1 ) {
             var createObj = create[i];
@@ -21167,15 +21822,22 @@ var Store = Class({
             var data = createObj[2];
             this$1.undestroyRecord( storeKey, Type, data );
         }
-        for ( var i$1 = 0, l$1 = update.length; i$1 < l$1; i$1 += 1 ) {
-            var updateObj = update[i$1];
-            var storeKey$1 = updateObj[0];
-            var data$1 = updateObj[1];
-            this$1.updateData( storeKey$1, data$1, true );
+        for ( var i$1 = 0, l$1 = move.length; i$1 < l$1; i$1 += 1 ) {
+            var moveObj = move[i$1];
+            var storeKey$1 = moveObj[0];
+            var toAccountId = moveObj[1];
+            var previousStoreKey = moveObj[2];
+            this$1.moveRecord( storeKey$1, toAccountId, previousStoreKey );
         }
-        for ( var i$2 = 0, l$2 = destroy.length; i$2 < l$2; i$2 += 1 ) {
-            var storeKey$2 = destroy[i$2];
-            this$1.destroyRecord( storeKey$2 );
+        for ( var i$2 = 0, l$2 = update.length; i$2 < l$2; i$2 += 1 ) {
+            var updateObj = update[i$2];
+            var storeKey$2 = updateObj[0];
+            var data$1 = updateObj[1];
+            this$1.updateData( storeKey$2, data$1, true );
+        }
+        for ( var i$3 = 0, l$3 = destroy.length; i$3 < l$3; i$3 += 1 ) {
+            var storeKey$3 = destroy[i$3];
+            this$1.destroyRecord( storeKey$3 );
         }
     },
 
@@ -21286,8 +21948,7 @@ var Store = Class({
             {O.Record} Returns the requested record.
     */
     getRecordFromStoreKey: function getRecordFromStoreKey ( storeKey, doNotFetch ) {
-        var Type = this._skToType[ storeKey ];
-        var record = this.materialiseRecord( storeKey, Type );
+        var record = this.materialiseRecord( storeKey );
         // If the caller is already handling the fetching, they can
         // set doNotFetch to true.
         if ( !doNotFetch && this.getStatus( storeKey ) === EMPTY ) {
@@ -21323,14 +21984,14 @@ var Store = Class({
 
         Parameters:
             storeKey - {String} The store key of the record.
-            Type     - {O.Class} The record type.
 
         Returns:
             {O.Record} Returns the requested record.
     */
-    materialiseRecord: function materialiseRecord ( storeKey, Type ) {
+    materialiseRecord: function materialiseRecord ( storeKey ) {
         return this._skToRecord[ storeKey ] ||
-            ( this._skToRecord[ storeKey ] = new Type( this, storeKey ) );
+            ( this._skToRecord[ storeKey ] =
+                new this._skToType[ storeKey ]( this, storeKey ) );
     },
 
     // ---
@@ -21353,7 +22014,7 @@ var Store = Class({
         var status = this.getStatus( storeKey );
         // Only unload unwatched clean, non-committing records.
         if ( ( status & (COMMITTING|NEW|DIRTY) ) ||
-                ( ( status & READY ) && record && record.hasObservers() ) ) {
+                ( record && record.hasObservers() ) ) {
             return false;
         }
         return this._nestedStores.every( function ( store ) {
@@ -21437,10 +22098,10 @@ var Store = Class({
         Returns:
             {O.Store} Returns self.
     */
-    createRecord: function createRecord ( storeKey, data ) {
+    createRecord: function createRecord ( storeKey, data, _isCopyOfStoreKey ) {
         var status = this.getStatus( storeKey );
         if ( status !== EMPTY && status !== DESTROYED ) {
-            RunLoop$1.didError({
+            RunLoop.didError({
                 name: CANNOT_CREATE_EXISTING_RECORD_ERROR,
                 message:
                     '\nStatus: ' +
@@ -21455,7 +22116,7 @@ var Store = Class({
         }
         data.accountId = this.getAccountIdFromStoreKey( storeKey );
 
-        this._created[ storeKey ] = 1;
+        this._created[ storeKey ] = _isCopyOfStoreKey || '';
         this._skToData[ storeKey ] = data;
 
         this.setStatus( storeKey, (READY|NEW|DIRTY) );
@@ -21465,6 +22126,53 @@ var Store = Class({
         }
 
         return this.set( 'hasChanges', true );
+    },
+
+    /**
+        Method: O.Store#moveRecord
+
+        Creates a copy of a record with the given store key in a different
+        account and destroys the original.
+
+        Parameters:
+            storeKey    - {String} The store key of the record to copy
+            toAccountId - {String} The id of the account to copy to
+
+        Returns:
+            {String} The store key of the copy.
+    */
+    moveRecord: function moveRecord ( storeKey, toAccountId, copyStoreKey ) {
+        var Type = this._skToType[ storeKey ];
+        var copyData = clone( this._skToData[ storeKey ] );
+        copyStoreKey = copyStoreKey || this._created[ storeKey ];
+        if ( copyStoreKey ) {
+            this.undestroyRecord( copyStoreKey, Type, copyData, storeKey );
+        } else {
+            copyStoreKey = this.getStoreKey( toAccountId, Type );
+            this.createRecord( copyStoreKey, copyData, storeKey );
+        }
+        // Swizzle the storeKey on records
+        this._changeRecordStoreKey( storeKey, copyStoreKey );
+        // Revert data, because the change is all in the copy now.
+        this.revertData( storeKey );
+        this.destroyRecord( storeKey, copyStoreKey );
+        return copyStoreKey;
+    },
+
+    _changeRecordStoreKey: function _changeRecordStoreKey ( oldStoreKey, newStoreKey ) {
+        var ref = this;
+        var _skToRecord = ref._skToRecord;
+        var record = _skToRecord[ oldStoreKey ];
+        if ( record ) {
+            delete _skToRecord[ oldStoreKey ];
+            _skToRecord[ newStoreKey ] = record;
+            record
+                .set( 'storeKey', newStoreKey )
+                .computedPropertyDidChange( 'accountId' );
+        }
+        this._nestedStores.forEach( function ( store ) {
+            store._changeRecordStoreKey( oldStoreKey, newStoreKey );
+        });
     },
 
     /**
@@ -21484,7 +22192,7 @@ var Store = Class({
         Returns:
             {O.Store} Returns self.
     */
-    destroyRecord: function destroyRecord ( storeKey ) {
+    destroyRecord: function destroyRecord ( storeKey, _ifCopiedStoreKey ) {
         var status = this.getStatus( storeKey );
         // If created -> just remove from created.
         if ( status === (READY|NEW|DIRTY) ) {
@@ -21501,7 +22209,7 @@ var Store = Class({
                     delete this._skToData[ storeKey ];
                 }
             }
-            this._destroyed[ storeKey ] = 1;
+            this._destroyed[ storeKey ] = _ifCopiedStoreKey || '';
             // Maintain COMMITTING flag so we know to wait for that to finish
             // before committing the destroy.
             // Maintain NEW flag as we have to wait for commit to finish (so we
@@ -21516,20 +22224,29 @@ var Store = Class({
         return mayHaveChanges( this );
     },
 
-    undestroyRecord: function undestroyRecord ( storeKey, Type, data ) {
+    undestroyRecord: function undestroyRecord ( storeKey, Type, data, _isCopyOfStoreKey ) {
         var status = this.getStatus( storeKey );
+        if ( data ) {
+            data = Object.filter(
+                data,
+                Record.getClientSettableAttributes( Type )
+            );
+        }
         if ( status === EMPTY || status === DESTROYED ) {
-            var idPropKey = Type.primaryKey || 'id';
-            var idAttrKey = Type.prototype[ idPropKey ].key || idPropKey;
-            delete data[ idAttrKey ];
-            this._skToType[ storeKey ] = Type;
-            this.createRecord( storeKey, data );
-        } else if ( ( status & ~(OBSOLETE|LOADING) ) ===
-                (DESTROYED|COMMITTING) ) {
-            this.setStatus( storeKey, READY|NEW|COMMITTING );
-        } else if ( status & DESTROYED ) {
-            delete this._destroyed[ storeKey ];
-            this.setStatus( storeKey, ( status & ~(DESTROYED|DIRTY) ) | READY );
+            this.createRecord( storeKey, data, _isCopyOfStoreKey );
+        } else {
+            if ( ( status & ~(OBSOLETE|LOADING) ) ===
+                    (DESTROYED|COMMITTING) ) {
+                this.setStatus( storeKey, READY|NEW|COMMITTING );
+                this._created[ storeKey ] = _isCopyOfStoreKey || '';
+            } else if ( status & DESTROYED ) {
+                this.setStatus( storeKey,
+                    ( status & ~(DESTROYED|DIRTY) ) | READY );
+                delete this._destroyed[ storeKey ];
+            }
+            if ( data ) {
+                this.updateData( storeKey, data, true );
+            }
         }
         return mayHaveChanges( this );
     },
@@ -21537,7 +22254,7 @@ var Store = Class({
     // ---
 
     /**
-        Method (private): O.Store#_checkServerStatus
+        Method: O.Store#checkServerState
 
         Called internally when a type finishes loading or committing, to check
         if there's a server state update to process.
@@ -21546,12 +22263,12 @@ var Store = Class({
             accountId - {String|null} The account id.
             Type      - {O.Class} The record type.
     */
-    _checkServerStatus: function _checkServerStatus ( accountId, Type ) {
+    checkServerState: function checkServerState ( accountId, Type ) {
         var typeToServerState = this.getAccount( accountId ).serverState;
         var typeId = guid( Type );
         var serverState = typeToServerState[ typeId ];
         if ( serverState ) {
-            delete typeToServerState[ typeId ];
+            typeToServerState[ typeId ] = '';
             this.sourceStateDidChange( accountId, Type, serverState );
         }
     },
@@ -21580,18 +22297,18 @@ var Store = Class({
             Type = accountId;
 
             var _accounts = this._accounts;
-            var hasDataFor;
-            for ( accountId in this$1._accounts ) {
-                hasDataFor = _accounts[ accountId ].hasDataFor;
+            for ( accountId in _accounts ) {
                 if ( accountId &&
-                        ( !hasDataFor ||
-                            hasDataFor[ Type.dataGroup || 'all' ] ) ) {
+                        _accounts[ accountId ].hasDataFor[ Type.dataGroup ] ) {
                     this$1.fetchAll( accountId, Type, force );
                 }
             }
             return this;
         }
 
+        if ( !accountId ) {
+            accountId = this._defaultAccountId;
+        }
         var account = this.getAccount( accountId );
         var typeId = guid( Type );
         var typeToStatus = account.status;
@@ -21601,7 +22318,7 @@ var Store = Class({
         if ( !( status & LOADING ) && ( !( status & READY ) || force ) ) {
             this.source.fetchAllRecords( accountId, Type, state, function () {
                 typeToStatus[ typeId ] &= ~LOADING;
-                this$1._checkServerStatus( accountId, Type );
+                this$1.checkServerState( accountId, Type );
             });
             typeToStatus[ typeId ] |= LOADING;
         }
@@ -21639,7 +22356,7 @@ var Store = Class({
             this.setStatus( storeKey, (EMPTY|LOADING) );
         } else {
             this.source.refreshRecord( accountId, Type, id );
-            this.setStatus( storeKey, ( status & ~OBSOLETE ) | LOADING );
+            this.setStatus( storeKey, status | LOADING );
         }
         return this;
     },
@@ -21714,7 +22431,7 @@ var Store = Class({
         var seenChange = false;
 
         if ( !current || ( changeIsDirty && !( status & READY ) ) ) {
-            RunLoop$1.didError({
+            RunLoop.didError({
                 name: CANNOT_WRITE_TO_UNREADY_RECORD_ERROR,
                 message:
                     '\nStatus: ' +
@@ -21782,30 +22499,19 @@ var Store = Class({
             }
         }
 
-        // If in main store, or record is new (so not in other stores),
-        // update the accountId associated with the id.
+        // If the record is new (so not in other stores), update the accountId
+        // associated with the record.
         var accountId = data.accountId;
-        if ( ( !isNested || status === (READY|NEW|DIRTY) ) && accountId ) {
-            var typeId = guid( this._skToType[ storeKey ] );
+        if ( status === (READY|NEW|DIRTY) && accountId ) {
             var oldAccount = this.getAccount(
                 this._skToAccountId[ storeKey ] || this._defaultAccountId
             );
             var newAccount = this.getAccount( accountId );
-            var id = this.getIdFromStoreKey( storeKey );
-
             if ( !oldAccount.isDefault ) {
                 delete this._skToAccountId[ storeKey ];
             }
             if ( !newAccount.isDefault ) {
                 this._skToAccountId[ storeKey ] = accountId;
-            }
-            if ( id ) {
-                var oldIdToSk = oldAccount.typeToIdToSK[ typeId ];
-                var newTypeToIdToSK = newAccount.typeToIdToSK;
-                var newIdToSk = newTypeToIdToSK[ typeId ] ||
-                    ( newTypeToIdToSK[ typeId ] = {} );
-                delete oldIdToSk[ id ];
-                newIdToSk[ id ] = storeKey;
             }
         }
 
@@ -21829,10 +22535,26 @@ var Store = Class({
             {O.Store} Returns self.
     */
     revertData: function revertData ( storeKey ) {
+        var Type = this._skToType[ storeKey ];
         var committed = this._skToCommitted[ storeKey ];
+        var changed = this._skToChanged[ storeKey ];
+
         if ( committed ) {
+            var proto = Type.prototype;
+            var attrs = meta( proto ).attrs;
+            var defaultValue;
+            for ( var attrKey in changed ) {
+                if ( committed[ attrKey ] === undefined ) {
+                    defaultValue = proto[ attrs[ attrKey ] ].defaultValue;
+                    if ( defaultValue === undefined ) {
+                        defaultValue = null;
+                    }
+                    committed[ attrKey ] = defaultValue;
+                }
+            }
             this.updateData( storeKey, committed, true );
         }
+
         return this;
     },
 
@@ -21896,7 +22618,7 @@ var Store = Class({
     _recordDidChange: function _recordDidChange ( storeKey ) {
         var typeId = guid( this._skToType[ storeKey ] );
         this._changedTypes[ typeId ] = true;
-        RunLoop$1.queueFn( 'middle', this._fireTypeChanges, this );
+        RunLoop.queueFn( 'middle', this._fireTypeChanges, this );
     },
 
     /**
@@ -22106,17 +22828,28 @@ var Store = Class({
         var typeId = guid( Type );
         var clientState = account.clientState[ typeId ];
 
-        if ( clientState && newState !== clientState ) {
-            if ( !( account.status[ typeId ] & (LOADING|COMMITTING) ) ) {
-                this.fire( typeId + ':server:' + accountId );
-                this.fetchAll( accountId, Type, true );
-            } else {
-                account.serverState[ typeId ] = newState;
-            }
-        } else if ( !clientState ) {
-            // We have a query but not matches yet; we still need to refresh the
-            // queries in case there are now matches.
+        if ( account.serverState[ typeId ] === newState ) {
+            // Do nothing, we're already in this state.
+        } else if ( clientState && newState !== clientState &&
+                !account.ignoreServerState &&
+                !( account.status[ typeId ] & (LOADING|COMMITTING) ) ) {
+            // Set this to clientState to avoid potential infinite loop. We
+            // don't know for sure if our serverState is older or newer due to
+            // concurrency. As we're now requesting updates, we can reset it to
+            // be clientState and then it will be updated to the real new server
+            // automatically if has changed in the sourceDidFetchUpdates
+            // handler. If a push comes in while fetching the updates, this
+            // won't match and we'll fetch again.
+            account.serverState[ typeId ] = clientState;
             this.fire( typeId + ':server:' + accountId );
+            this.fetchAll( accountId, Type, true );
+        } else {
+            account.serverState[ typeId ] = newState;
+            if ( !clientState ) {
+                // We have a query but not matches yet; we still need to
+                // refresh the queries in case there are now matches.
+                this.fire( typeId + ':server:' + accountId );
+            }
         }
 
         return this;
@@ -22219,20 +22952,24 @@ var Store = Class({
         this.sourceDidFetchPartialRecords( accountId, Type, updates, true );
 
         if ( state ) {
-            var oldState = account.clientState[ typeId ];
+            var oldClientState = account.clientState[ typeId ];
+            var oldServerState = account.serverState[ typeId ];
             // If the state has changed, we need to fetch updates, but we can
             // still load these records
-            if ( !isAll && oldState && oldState !== state ) {
+            if ( !isAll && oldClientState && oldClientState !== state ) {
                 this.sourceStateDidChange( accountId, Type, state );
             } else {
                 account.clientState[ typeId ] = state;
+                if ( !oldClientState || !oldServerState ) {
+                    account.serverState[ typeId ] = state;
+                }
             }
         }
         account.status[ typeId ] |= READY;
 
         // Notify LocalQuery we're now ready even if no records loaded.
         this._changedTypes[ typeId ] = true;
-        RunLoop$1.queueFn( 'middle', this._fireTypeChanges, this );
+        RunLoop.queueFn( 'middle', this._fireTypeChanges, this );
 
         return this;
     },
@@ -22282,13 +23019,9 @@ var Store = Class({
                 continue;
             }
 
-            // If OBSOLETE, the record may have changed since the fetch was
-            // initiated. Since we don't want to overwrite any preemptive
-            // changes, ignore this data and fetch it again.
-            // Similarly if the record is committing, we don't know for sure
-            // what state the update was applied on top of, so fetch again
-            // to be sure.
-            if ( status & (COMMITTING|OBSOLETE) ) {
+            // If the record is committing, we don't know for sure what state
+            // the update was applied on top of, so fetch again to be sure.
+            if ( status & COMMITTING ) {
                 this$1.setStatus( storeKey, status & ~LOADING );
                 this$1.fetchData( storeKey );
                 continue;
@@ -22337,8 +23070,9 @@ var Store = Class({
 
             var newId = update[ idAttrKey ];
             if ( newId && newId !== id ) {
+                // Don't delete the old idToSk mapping, as references to the
+                // old id may still appear in queryChanges responses
                 _skToId[ storeKey ] = newId;
-                delete _idToSk[ id ];
                 _idToSk[ newId ] = storeKey;
             }
 
@@ -22358,22 +23092,22 @@ var Store = Class({
         Parameters:
             accountId - {String} The account id.
             Type      - {O.Class} The record type.
-            idList    - {String[]} The list of ids of non-existent requested
+            ids       - {String[]} The list of ids of non-existent requested
                         records.
 
         Returns:
             {O.Store} Returns self.
     */
-    sourceCouldNotFindRecords: function sourceCouldNotFindRecords ( accountId, Type, idList ) {
+    sourceCouldNotFindRecords: function sourceCouldNotFindRecords ( accountId, Type, ids ) {
         var this$1 = this;
 
-        var l = idList.length;
+        var l = ids.length;
         var ref = this;
         var _skToCommitted = ref._skToCommitted;
         var _skToChanged = ref._skToChanged;
 
         while ( l-- ) {
-            var storeKey = this$1.getStoreKey( accountId, Type, idList[l] );
+            var storeKey = this$1.getStoreKey( accountId, Type, ids[l] );
             var status = this$1.getStatus( storeKey );
             if ( status & EMPTY ) {
                 this$1.setStatus( storeKey, NON_EXISTENT );
@@ -22417,13 +23151,23 @@ var Store = Class({
         var account = this.getAccount( accountId );
         var typeId = guid( Type );
         if ( oldState === account.clientState[ typeId ] ) {
-            if ( changed ) {
+            // Invalidate changed records
+            if ( changed && changed.length ) {
                 this.sourceDidModifyRecords( accountId, Type, changed );
             }
-            if ( destroyed ) {
+            if ( destroyed && destroyed.length ) {
                 this.sourceDidDestroyRecords( accountId, Type, destroyed );
             }
+            // Invalidate remote queries on the type, unless this was done
+            // before.
+            if ( oldState !== newState &&
+                    newState !== account.serverState[ typeId ] ) {
+                this.fire( typeId + ':server:' + accountId );
+            }
             account.clientState[ typeId ] = newState;
+            if ( account.serverState[ typeId ] === oldState ) {
+                account.serverState[ typeId ] = newState;
+            }
         } else {
             this.sourceStateDidChange( accountId, Type, newState );
         }
@@ -22439,18 +23183,18 @@ var Store = Class({
         Parameters:
             accountId - {String} The account id.
             Type      - {O.Class} The record type.
-            idList    - {String[]} The list of ids of records which have
+            ids       - {String[]} The list of ids of records which have
                         updates available on the server.
 
         Returns:
             {O.Store} Returns self.
     */
-    sourceDidModifyRecords: function sourceDidModifyRecords ( accountId, Type, idList ) {
+    sourceDidModifyRecords: function sourceDidModifyRecords ( accountId, Type, ids ) {
         var this$1 = this;
 
-        var l = idList.length;
+        var l = ids.length;
         while ( l-- ) {
-            var storeKey = this$1.getStoreKey( accountId, Type, idList[l] );
+            var storeKey = this$1.getStoreKey( accountId, Type, ids[l] );
             var status = this$1.getStatus( storeKey );
             if ( status & READY ) {
                 this$1.setStatus( storeKey, status | OBSOLETE );
@@ -22469,18 +23213,18 @@ var Store = Class({
         Parameters:
             accountId - {String} The account id.
             Type      - {O.Class} The record type.
-            idList    - {String[]} The list of ids of records which have been
+            ids       - {String[]} The list of ids of records which have been
                         destroyed.
 
         Returns:
             {O.Store} Returns self.
     */
-    sourceDidDestroyRecords: function sourceDidDestroyRecords ( accountId, Type, idList ) {
+    sourceDidDestroyRecords: function sourceDidDestroyRecords ( accountId, Type, ids ) {
         var this$1 = this;
 
-        var l = idList.length;
+        var l = ids.length;
         while ( l-- ) {
-            var storeKey = this$1.getStoreKey( accountId, Type, idList[l] );
+            var storeKey = this$1.getStoreKey( accountId, Type, ids[l] );
             this$1.setStatus( storeKey, DESTROYED );
             this$1.unloadRecord( storeKey );
         }
@@ -22511,8 +23255,10 @@ var Store = Class({
 
         if ( account.clientState[ typeId ] === oldState ) {
             account.clientState[ typeId ] = newState;
+            if ( account.serverState[ typeId ] === oldState ) {
+                account.serverState[ typeId ] = newState;
+            }
         } else {
-            delete account.serverState[ typeId ];
             this.sourceStateDidChange( accountId, Type, newState );
         }
 
@@ -22574,7 +23320,7 @@ var Store = Class({
                 this$1.updateData( storeKey, data, false );
                 this$1.setStatus( storeKey, status & ~(COMMITTING|NEW) );
             } else {
-                RunLoop$1.didError({
+                RunLoop.didError({
                     name: SOURCE_COMMIT_CREATE_MISMATCH_ERROR,
                 });
             }
@@ -22641,9 +23387,9 @@ var Store = Class({
                     delete _skToChanged[ storeKey ];
                 }
                 this$1.setStatus( storeKey, (READY|NEW|DIRTY) );
-                _created[ storeKey ] = 1;
-                if ( isPermanent && errors &&
-                        !this$1._notifyRecordOfError( storeKey, errors[l] ) ) {
+                _created[ storeKey ] = '';
+                if ( isPermanent && ( !errors ||
+                        !this$1._notifyRecordOfError( storeKey, errors[l] ) ) ) {
                     this$1.destroyRecord( storeKey );
                 }
             }
@@ -22732,6 +23478,7 @@ var Store = Class({
         var _skToChanged = ref._skToChanged;
         var _skToCommitted = ref._skToCommitted;
         var _skToRollback = ref._skToRollback;
+        var _skToType = ref._skToType;
 
         while ( l-- ) {
             var storeKey = storeKeys[l];
@@ -22753,22 +23500,18 @@ var Store = Class({
             var committed = _skToCommitted[ storeKey ] =
                 _skToRollback[ storeKey ];
             delete _skToRollback[ storeKey ];
-            var changed = {};
             var current = _skToData[ storeKey ];
             delete _skToChanged[ storeKey ];
-            for ( var key in current ) {
-                if ( !isEqual( current[ key ], committed[ key ] ) ) {
-                    changed[ key ] = true;
-                    _skToChanged[ storeKey ] = changed;
-                }
-            }
-            if ( _skToChanged[ storeKey ] ) {
+            var changed =
+                getChanged( _skToType[ storeKey ], current, committed );
+            if ( changed ) {
+                _skToChanged[ storeKey ] = changed;
                 this$1.setStatus( storeKey, ( status & ~COMMITTING )|DIRTY );
             } else {
                 this$1.setStatus( storeKey, ( status & ~COMMITTING ) );
             }
-            if ( isPermanent && errors &&
-                    !this$1._notifyRecordOfError( storeKey, errors[l] ) ) {
+            if ( isPermanent && ( !errors ||
+                    !this$1._notifyRecordOfError( storeKey, errors[l] ) ) ) {
                 this$1.revertData( storeKey );
             }
         }
@@ -22795,11 +23538,12 @@ var Store = Class({
     sourceDidCommitDestroy: function sourceDidCommitDestroy ( storeKeys ) {
         var this$1 = this;
 
-        var l = storeKeys.length,
-            storeKey, status;
+        var l = storeKeys.length;
+        var storeKey, status;
         while ( l-- ) {
             storeKey = storeKeys[l];
             status = this$1.getStatus( storeKey );
+
             // If the record has been undestroyed while being committed
             // it will no longer be in the destroyed state, but instead be
             // READY|NEW|COMMITTING.
@@ -22809,12 +23553,11 @@ var Store = Class({
                     delete this$1._skToChanged[ storeKey ];
                 }
                 this$1.setStatus( storeKey, (READY|NEW|DIRTY) );
-                this$1._created[ storeKey ] = 1;
             } else if ( status & DESTROYED ) {
                 this$1.setStatus( storeKey, DESTROYED );
                 this$1.unloadRecord( storeKey );
             } else {
-                RunLoop$1.didError({
+                RunLoop.didError({
                     name: SOURCE_COMMIT_DESTROY_MISMATCH_ERROR,
                 });
             }
@@ -22866,6 +23609,7 @@ var Store = Class({
 
         var l = storeKeys.length;
         var ref = this;
+        var _created = ref._created;
         var _destroyed = ref._destroyed;
 
         while ( l-- ) {
@@ -22873,15 +23617,16 @@ var Store = Class({
             var status = this$1.getStatus( storeKey );
             if ( ( status & ~DIRTY ) === (READY|NEW|COMMITTING) ) {
                 this$1.setStatus( storeKey, status & ~(COMMITTING|NEW) );
+                delete _created[ storeKey ];
             } else if ( status & DESTROYED ) {
                 this$1.setStatus( storeKey, ( status & ~COMMITTING )|DIRTY );
-                _destroyed[ storeKey ] = 1;
-                if ( isPermanent && errors &&
-                        !this$1._notifyRecordOfError( storeKey, errors[l] ) ) {
+                _destroyed[ storeKey ] = '';
+                if ( isPermanent && ( !errors ||
+                        !this$1._notifyRecordOfError( storeKey, errors[l] ) ) ) {
                     this$1.undestroyRecord( storeKey );
                 }
             } else {
-                RunLoop$1.didError({
+                RunLoop.didError({
                     name: SOURCE_COMMIT_DESTROY_MISMATCH_ERROR,
                 });
             }
@@ -22981,6 +23726,8 @@ var NestedStore = Class({
             {O.NestedStore} Returns self.
     */
     commitChanges: function commitChanges () {
+        var this$1 = this;
+
         this.fire( 'willCommit' );
         var ref = this;
         var _created = ref._created;
@@ -22990,27 +23737,41 @@ var NestedStore = Class({
         var parent = this._parentStore;
 
         for ( var storeKey in _created ) {
-            var status = parent.getStatus( storeKey );
-            var data = _skToData[ storeKey ];
-            if ( status === EMPTY || status === DESTROYED ) {
-                parent.createRecord( storeKey, data );
-            } else if ( ( status & ~(OBSOLETE|LOADING) ) ===
-                    (DESTROYED|COMMITTING) ) {
-                parent._skToData[ storeKey ] = data;
-                parent.setStatus( storeKey, READY|NEW|COMMITTING );
-            } else if ( status & DESTROYED ) {
-                delete parent._destroyed[ storeKey ];
-                parent._skToData[ storeKey ] = data;
-                parent.setStatus( storeKey,
-                    ( status & ~(DESTROYED|DIRTY) ) | READY );
+            var isCopyOfStoreKey = _created[ storeKey ];
+            if ( isCopyOfStoreKey ) {
+                var data = _skToData[ storeKey ];
+                parent.moveRecord( isCopyOfStoreKey,
+                    this$1.getAccountIdFromStoreKey( storeKey ), storeKey );
+                delete _skToData[ storeKey ];
+                parent.updateData( storeKey, data, true );
+            } else {
+                var status = parent.getStatus( storeKey );
+                var data$1 = _skToData[ storeKey ];
+                if ( status === EMPTY || status === DESTROYED ) {
+                    parent.createRecord( storeKey, data$1 );
+                } else if ( ( status & ~(OBSOLETE|LOADING) ) ===
+                        (DESTROYED|COMMITTING) ) {
+                    parent._skToData[ storeKey ] = data$1;
+                    parent.setStatus( storeKey, READY|NEW|COMMITTING );
+                } else if ( status & DESTROYED ) {
+                    delete parent._destroyed[ storeKey ];
+                    parent._skToData[ storeKey ] = data$1;
+                    parent.setStatus( storeKey,
+                        ( status & ~(DESTROYED|DIRTY) ) | READY );
+                }
             }
         }
         for ( var storeKey$1 in _skToChanged ) {
-            parent.updateData( storeKey$1, Object.filter(
-                _skToData[ storeKey$1 ], _skToChanged[ storeKey$1 ] ), true );
+            var changed = _skToChanged[ storeKey$1 ];
+            var data$2 = _skToData[ storeKey$1 ];
+            parent.updateData( storeKey$1, Object.filter( data$2, changed ), true );
         }
         for ( var storeKey$2 in _destroyed ) {
-            parent.destroyRecord( storeKey$2 );
+            var ifCopiedStoreKey = _destroyed[ storeKey$2 ];
+            // Check if already handled by moveFromAccount in create.
+            if ( !ifCopiedStoreKey || !_created[ ifCopiedStoreKey ] ) {
+                parent.destroyRecord( storeKey$2 );
+            }
         }
 
         this._skToData = Object.create( parent._skToData );
@@ -23095,7 +23856,9 @@ var NestedStore = Class({
                 // Ready clean/Destroyed dirty -> destroyed clean.
                 delete this._skToData[ storeKey ];
                 delete _skToStatus[ storeKey ];
-            } else {
+            } else if ( !( previous & NEW ) ) {
+                // If NEW, parent status means it's been committed, which means
+                // we're going to clear _skToStatus so we're already correct
                 _skToStatus[ storeKey ] = status =
                     previous|( status & (OBSOLETE|LOADING) );
             }
@@ -23149,16 +23912,16 @@ var NestedStore = Class({
             changedKeys - {Object} A list of keys which have changed.
     */
     parentDidUpdateData: function parentDidUpdateData ( storeKey, changedKeys ) {
-        if ( this._skToData.hasOwnProperty( storeKey ) ) {
-            var ref = this;
-            var _skToData = ref._skToData;
-            var _skToChanged = ref._skToChanged;
-            var _skToCommitted = ref._skToCommitted;
+        var ref = this;
+        var _skToData = ref._skToData;
+        var _skToChanged = ref._skToChanged;
+        var _skToCommitted = ref._skToCommitted;
+        var oldChanged = _skToChanged[ storeKey ];
+        if ( oldChanged && _skToData.hasOwnProperty( storeKey ) ) {
             var parent = this._parentStore;
             var rebase = this.rebaseConflicts;
             var newBase = parent.getData( storeKey );
             var oldData = _skToData[ storeKey ];
-            var oldChanged = _skToChanged[ storeKey ];
             var newData = {};
             var newChanged = {};
             var clean = true;
@@ -23199,7 +23962,7 @@ var NestedStore = Class({
             store.parentDidUpdateData( storeKey, changedKeys );
         });
         this._recordDidChange( storeKey );
-        RunLoop$1.queueFn( 'before', this.checkForChanges, this );
+        RunLoop.queueFn( 'before', this.checkForChanges, this );
     },
 
     // === A nested store is not directly connected to a source ================
@@ -23256,7 +24019,6 @@ var UndoManager = Class({
 
     dataDidChange: function dataDidChange () {
         this._isInUndoState = false;
-        this._redoStack.length = 0;
         return this
             .set( 'canRedo', false )
             .set( 'canUndo', true )
@@ -23268,10 +24030,11 @@ var UndoManager = Class({
             var data = this.getUndoData();
             if ( data !== null ) {
                 this._pushState( this._undoStack, data );
-            } else {
-                this._isInUndoState = true;
-                this.set( 'canUndo', !!this._undoStack.length );
             }
+            this._isInUndoState = true;
+            this._redoStack.length = 0;
+            this.set( 'canUndo', !!this._undoStack.length )
+                .set( 'canRedo', false );
         }
         return this;
     },
@@ -23334,6 +24097,16 @@ var StoreUndoManager = Class({
         StoreUndoManager.parent.destroy.call( this );
     },
 
+    dataDidChange: function () {
+        var noChanges =
+            !this.get( 'store' ).checkForChanges().get( 'hasChanges' );
+        this._isInUndoState = noChanges;
+        return this
+            .set( 'canRedo', noChanges && !!this._redoStack.length )
+            .set( 'canUndo', noChanges && !!this._undoStack.length )
+            .fire( 'input' );
+    },
+
     getUndoData: function getUndoData () {
         var store = this.get( 'store' );
         return store.checkForChanges().get( 'hasChanges' ) ?
@@ -23346,13 +24119,6 @@ var StoreUndoManager = Class({
         var inverse = store.getInverseChanges();
         store.commitChanges();
         return inverse;
-    },
-
-    undo: function undo () {
-        if ( this._isInUndoState || !this.get( 'store' ).get( 'hasChanges' ) ) {
-            StoreUndoManager.parent.undo.call( this );
-        }
-        return this;
     },
 });
 
@@ -23458,12 +24224,12 @@ var DragController = new Obj({
     _touchId: null,
 
     /**
-        Property (private): O.DragController._drag
+        Property: O.DragController.drag
         Type: O.Drag|null
 
         If a drag is in progress, this holds the current <O.Drag> instance.
     */
-    _drag: null,
+    drag: null,
 
     /**
         Method: O.DragController.register
@@ -23476,10 +24242,11 @@ var DragController = new Obj({
             drag - {O.Drag} The new drag instance.
     */
     register: function register ( drag ) {
-        if ( this._drag ) {
-            this._drag.endDrag();
+        var oldDrag = this.drag;
+        if ( oldDrag ) {
+            oldDrag.endDrag();
         }
-        this._drag = drag;
+        this.set( 'drag', drag );
     },
 
     /**
@@ -23492,8 +24259,8 @@ var DragController = new Obj({
             drag - {O.Drag} The finished drag instance.
     */
     deregister: function deregister ( drag ) {
-        if ( this._drag === drag ) {
-            this._drag = null;
+        if ( this.drag === drag ) {
+            this.set( 'drag', null );
             this._touchId = null;
         }
     },
@@ -23575,7 +24342,7 @@ var DragController = new Obj({
             event - {Event} The mousemove event.
     */
     _onMousemove: function ( event ) {
-        var drag = this._drag;
+        var drag = this.drag;
         if ( drag && this._touchId === null ) {
             // Mousemove should only be fired if not native DnD, but sometimes
             // is fired even when there's a native drag
@@ -23618,7 +24385,7 @@ var DragController = new Obj({
         this._ignore = true;
         this._targetView = null;
         // Mouseup will not fire if native DnD
-        var drag = this._drag;
+        var drag = this.drag;
         if ( drag && this._touchId === null ) {
             drag.drop( event ).endDrag();
         }
@@ -23637,10 +24404,10 @@ var DragController = new Obj({
         var touchEvent = new TouchDragEvent( touch );
         var view = this.getNearestDragView( touchEvent.targetView );
         if ( view && !isControl[ touchEvent.target.nodeName ] ) {
-            this._drag = new Drag({
+            this.set( 'drag', new Drag({
                 dragSource: view,
                 event: touchEvent,
-            });
+            }));
             this._touchId = touch.identifier;
         }
     }.on( 'hold' ),
@@ -23657,7 +24424,7 @@ var DragController = new Obj({
         if ( this._touchId !== null ) {
             var touch = getTouch( event.touches, this._touchId );
             if ( !touch ) {
-                this._drag.endDrag();
+                this.drag.endDrag();
             }
         }
     }.on( 'touchstart' ),
@@ -23671,7 +24438,7 @@ var DragController = new Obj({
     _onTouchmove: function ( event ) {
         var touch = getTouch( event.changedTouches, this._touchId );
         if ( touch ) {
-            this._drag.move( new TouchDragEvent( touch ) );
+            this.drag.move( new TouchDragEvent( touch ) );
             // Don't propagate to views and don't trigger scroll.
             event.preventDefault();
             event.stopPropagation();
@@ -23687,7 +24454,7 @@ var DragController = new Obj({
     _onTouchend: function ( event ) {
         var touch = getTouch( event.changedTouches, this._touchId );
         if ( touch ) {
-            this._drag.drop( new TouchDragEvent( touch ) ).endDrag();
+            this.drag.drop( new TouchDragEvent( touch ) ).endDrag();
         }
     }.on( 'touchend' ),
 
@@ -23700,7 +24467,7 @@ var DragController = new Obj({
     _onTouchcancel: function ( event ) {
         var touch = getTouch( event.changedTouches, this._touchId );
         if ( touch ) {
-            this._drag.endDrag();
+            this.drag.endDrag();
         }
     }.on( 'touchcancel' ),
 
@@ -23738,7 +24505,7 @@ var DragController = new Obj({
             event - {Event} The dragover event.
     */
     _onDragover: function ( event ) {
-        var drag = this._drag;
+        var drag = this.drag;
         var dataTransfer = event.dataTransfer;
         var notify = true;
         // Probably hasn't come via root view controller, so doesn't have target
@@ -23821,7 +24588,7 @@ var DragController = new Obj({
             event - {Event} The dragleave event.
     */
     _onDragleave: function (/* event */) {
-        var drag = this._drag;
+        var drag = this.drag;
         if ( !( this._nativeRefCount -= 1 ) && drag ) {
             drag.endDrag();
         }
@@ -23836,7 +24603,7 @@ var DragController = new Obj({
             event - {Event} The drop event.
     */
     _onDrop: function ( event ) {
-        var drag = this._drag;
+        var drag = this.drag;
         if ( drag ) {
             if ( drag.get( 'dropEffect' ) !== DEFAULT$1 ) {
                 event.preventDefault();
@@ -23856,7 +24623,7 @@ var DragController = new Obj({
             event - {Event} The dragend event.
     */
     _onDragend: function (/* event */) {
-        var drag = this._drag;
+        var drag = this.drag;
         if ( drag ) {
             drag.endDrag();
         }
@@ -23874,7 +24641,7 @@ var DragController = new Obj({
             event - {Event} The keydown event.
     */
     _escCancel: function ( event ) {
-        var drag = this._drag;
+        var drag = this.drag;
         if ( drag && lookupKey( event ) === 'Escape' ) {
             drag.endDrag();
         }
@@ -23896,7 +24663,7 @@ to be dragged not just within the window but also between windows and other
 applications/the OS itself. However, by default, all drags initiated within the
 application will bypass this system and use a custom implementation, as the
 native implementation (and indeed the spec) is extremely buggy. Problems (as of
-13.05.11) include:
+2011-05-13) include:
 
 1. If an element is draggable, you cannot select text in any text input area
    underneath it.
@@ -24176,8 +24943,11 @@ var Drag = Class({
             var items = dataTransfer && dataTransfer.items;
             var types = [];
             var hasFiles = false;
-            if ( items ) {
-                var l = items.length;
+            // Safari 11.1 supports the current dataTransfer.items interface,
+            // but does not return anything until drop, so appears to have no
+            // types. Old interface must be used instead.
+            var l = items ? items.length : 0;
+            if ( l ) {
                 while ( l-- ) {
                     var item = items[l];
                     var itemType = item.type;
@@ -24232,7 +25002,7 @@ var Drag = Class({
         if ( dataTransfer ) {
             var items;
             if ( ( items = dataTransfer.items ) ) {
-                // Current HTML5 DnD interface
+                // Current HTML5 DnD interface (Chrome, Firefox 50+, Edge)
                 var l = items.length;
                 for ( var i = 0; i < l; i += 1 ) {
                     var item = items[i];
@@ -24255,7 +25025,7 @@ var Drag = Class({
                     }
                 }
             } else if ( ( items = dataTransfer.files ) ) {
-                // Deprecated HTML5 DnD interface (FF etc.)
+                // Deprecated HTML5 DnD interface (Firefox <50, IE)
                 var l$1 = items.length;
                 for ( var i$1 = 0; i$1 < l$1; i$1 += 1 ) {
                     var item$1 = items[i$1];
@@ -24276,7 +25046,8 @@ var Drag = Class({
         Method: O.Drag#getFileSystemEntries
 
         Returns:
-            {FileSystemEntry[]|null} An array of all file system entries represented by the drag.
+            {FileSystemEntry[]|null} An array of all file system entries
+            represented by the drag.
     */
     getFileSystemEntries: function getFileSystemEntries () {
         var items = this.getFromPath( 'event.dataTransfer.items' );
@@ -24291,8 +25062,7 @@ var Drag = Class({
                             entries = [];
                         }
                         entries.push( item.getAsEntry() );
-                    }
-                    else if ( item.webkitGetAsEntry ) {
+                    } else if ( item.webkitGetAsEntry ) {
                         if ( !entries ) {
                             entries = [];
                         }
@@ -24441,7 +25211,7 @@ var Drag = Class({
             this._dragCursor = null;
         }
         if ( this._scrollInterval ) {
-            RunLoop$1.cancel( this._scrollInterval );
+            RunLoop.cancel( this._scrollInterval );
             this._scrollInterval = null;
         }
         this._setCursor( false );
@@ -24579,7 +25349,7 @@ var Drag = Class({
         }
         // Clear the timer if we used to be in a hotspot.
         if ( this._scrollInterval ) {
-            RunLoop$1.cancel( this._scrollInterval );
+            RunLoop.cancel( this._scrollInterval );
             this._scrollInterval = null;
         }
         // And set a new timer if we are currently in a hotspot.
@@ -24589,7 +25359,7 @@ var Drag = Class({
             if ( deltaX$1 || deltaY$1 ) {
                 this._scrollBy = { x: deltaX$1, y: deltaY$1 };
                 this._scrollInterval =
-                    RunLoop$1.invokePeriodically( this._scroll, 100, this );
+                    RunLoop.invokePeriodically( this._scroll, 100, this );
             }
         }
     },
@@ -25267,7 +26037,7 @@ var EventSource = NativeEventSource ? Class({
         } else {
             this._then = now;
             this._tick =
-                RunLoop$1.invokeAfterDelay( this._check, 60000, this );
+                RunLoop.invokeAfterDelay( this._check, 60000, this );
             // Chrome occasionally closes the event source without firing an
             // event. Resync readyState here to work around.
             this.set( 'readyState', this._eventSource.readyState );
@@ -25287,7 +26057,7 @@ var EventSource = NativeEventSource ? Class({
             }
         } else {
             if ( tick ) {
-                RunLoop$1.cancel( tick );
+                RunLoop.cancel( tick );
                 this._tick = null;
             }
         }
@@ -25432,7 +26202,7 @@ var EventSource = NativeEventSource ? Class({
     },
 
     _reconnect: function _reconnect () {
-        RunLoop$1.invokeAfterDelay(
+        RunLoop.invokeAfterDelay(
             this.open, this._reconnectAfter, this );
     },
 
@@ -25645,7 +26415,7 @@ var HttpRequest = Class({
         var timeout = this.get( 'timeout' );
         if ( timeout ) {
             this._lastActivity = Date.now();
-            this._timer = RunLoop$1.invokeAfterDelay(
+            this._timer = RunLoop.invokeAfterDelay(
                 this.didTimeout, timeout, this );
         }
     }.on( 'io:begin' ),
@@ -25657,7 +26427,7 @@ var HttpRequest = Class({
     clearTimeout: function () {
         var timer = this._timer;
         if ( timer ) {
-            RunLoop$1.cancel( timer );
+            RunLoop.cancel( timer );
         }
     }.on( 'io:end' ),
 
@@ -25671,7 +26441,7 @@ var HttpRequest = Class({
             this.fire( 'io:timeout' )
                 .abort();
         } else {
-            this._timer = RunLoop$1.invokeAfterDelay(
+            this._timer = RunLoop.invokeAfterDelay(
                 this.didTimeout, timeToTimeout, this );
         }
     },
@@ -26068,9 +26838,8 @@ Date.prototype.relativeTo = function ( date, approx, mustNotBeFuture ) {
     }
     if ( !duration || ( isFuture && mustNotBeFuture ) ) {
         return loc( 'just now' );
-    }
     // Less than a day
-    else if ( duration < 1000 * 60 * 60 * 24 ) {
+    } else if ( duration < 1000 * 60 * 60 * 24 ) {
         time = formatDuration( duration, approx );
     // Less than 6 weeks
     } else if ( duration < 1000 * 60 * 60 * 24 * 7 * 6 ) {
@@ -26257,6 +27026,7 @@ var generateLocalisedDateParser = function ( locale, mode ) {
     var whitespace = define( 'whitespace', (/^(?:[\s"']+|$)/) );
 
     var hours = define( 'hour', /^(?:2[0-3]|[01]?\d)/ );
+    var shorthours = define( 'hour', /^[12]/ );
     var minutes = define( 'minute', /^[0-5][0-9]/ );
     var seconds = define( 'second', /^[0-5][0-9]/ );
     var meridian = firstMatch([
@@ -26267,25 +27037,35 @@ var generateLocalisedDateParser = function ( locale, mode ) {
         meridian ]);
     var timeDelimiter = define( 'timeDelimiter', ( /^[:.]/ ) );
     var timeContext = define( 'timeContext', datePatterns.timeContext );
-    var time = sequence([
-        hours,
-        optional( sequence([
-            timeDelimiter,
-            minutes,
+    var time = firstMatch([
+        sequence([
+            hours,
             optional( sequence([
                 timeDelimiter,
-                seconds ])) ])),
-        optional(
-            timeSuffix
-        ),
-        whitespace ]);
+                minutes,
+                optional( sequence([
+                    timeDelimiter,
+                    seconds ])) ])),
+            optional(
+                timeSuffix
+            ),
+            whitespace ]),
+        sequence([
+            firstMatch([
+                sequence([
+                    hours,
+                    minutes ]),
+                sequence([
+                    shorthours,
+                    minutes ]) ]),
+            optional(
+                timeSuffix
+            ),
+            whitespace ]) ]);
 
     if ( mode === JUST_TIME ) {
         return firstMatch([
             time,
-            sequence([
-                hours,
-                minutes ]),
             whitespace ]);
     }
 
@@ -26321,9 +27101,13 @@ var generateLocalisedDateParser = function ( locale, mode ) {
 
     var adjustSign = define( 'adjustSign', /^[+-]/ );
     var adjustUnit = define( 'adjustUnit',
-            /^[dwmy]|(?:day|week|month|year)/i );
+            /^(?:day|week|month|year)|[dwmy]/i );
     var adjustNumber = define( 'adjustNumber', /^\d+/ );
-    var adjust = sequence([ adjustSign, adjustNumber, adjustUnit ]);
+    var adjust = sequence([
+        optional( adjustSign ),
+        adjustNumber,
+        optional( whitespace ),
+        adjustUnit ]);
 
     var standardDate = sequence(
             locale.dateFormats.date.split( /%-?([dmbY])/ ).map(
@@ -26419,22 +27203,22 @@ var generateLocalisedDateParser = function ( locale, mode ) {
             weekday,
             fullyear,
             monthname,
-            day,
             relativeDate,
             adjust,
+            day,
             searchMethod,
             whitespace ]);
     }
 
     return firstMatch([
         date,
-        time,
         weekday,
         fullyear,
         monthname,
-        day,
         relativeDate,
         adjust,
+        day,
+        time,
         searchMethod,
         whitespace ]);
 };
@@ -26751,6 +27535,9 @@ var interpreter = {
         date.adjust.push([ sign === '+' ? 1 : -1, 'day' ]);
     },
     adjustNumber: function adjustNumber ( date, number ) {
+        if ( !date.adjust ) {
+            date.adjust = [[ -1, 'day' ]];
+        }
         date.adjust.last()[0] *= number;
     },
     adjustUnit: function adjustUnit ( date, unit ) {
@@ -26767,7 +27554,7 @@ var unknown = Parse.define( 'unknown', /^[^\s]+/ );
 var dateParsers = {};
 var parseDateTime = function ( string, locale, mode ) {
     if ( !locale ) {
-        locale = LocaleController$1.getLocale();
+        locale = LocaleController.getLocale();
     }
     string = string.trim().replace(/[０-９]/g,
         function (wideNum) { return String.fromCharCode( wideNum.charCodeAt( 0 ) - 65248 ); }
@@ -27059,18 +27846,16 @@ var SingleSelectionController = Class({
         var this$1 = this;
 
         if ( !this._ignore ) {
-            var record = this.get( 'record' );
-            var list = this.get( 'content' );
             // If both content and record are bound, content *must* be synced
             // first in order to look for the new record in the new list.
-            // If changed, return as the new record will be handled by the
-            // setRecordInNewContent fn.
             var binding = meta( this ).bindings.content;
             if ( binding ) {
                 this._ignore = true;
                 binding.sync();
                 this._ignore = false;
             }
+            var record = this.get( 'record' );
+            var list = this.get( 'content' );
             if ( record && list ) {
                 this.set( 'isFetchingIndex', true );
                 list.indexOfStoreKey(
@@ -27167,7 +27952,7 @@ var SingleSelectionController = Class({
             list.removeObserverForKey( key, this, 'contentBecameReady' );
             // Queue so that all data from the server will have been loaded
             // into the list.
-            RunLoop$1.queueFn( 'before',
+            RunLoop.queueFn( 'before',
                 this.setRecordInNewContent.bind( this, list ) );
         }
     },
@@ -27513,12 +28298,13 @@ TimeZone.load = function ( json ) {
         addTimeZone( new TimeZone( id, zones[ id ] ) );
     }
     for ( var id$1 in link ) {
-        addTimeZone( new TimeZone( id$1, zones[ link[ id$1 ] ] ) );
+        addTimeZone( new TimeZone(
+            id$1,
+            zones[ link[ id$1 ] ] || TimeZone[ link[ id$1 ] ].periods
+        ));
     }
     for ( var id$2 in alias ) {
-        if ( !TimeZone[ id$2 ] ) {
-            TimeZone[ id$2 ] = TimeZone[ alias[ id$2 ] ];
-        }
+        TimeZone[ id$2 ] = TimeZone[ alias[ id$2 ] ];
     }
     Object.assign( TimeZone.rules, json.rules );
 };
@@ -27547,7 +28333,7 @@ var TrackedTouch$1 = function ( touch ) {
     this.y = touch.screenY;
     this.target = touch.target;
     this._ignore = false;
-    RunLoop$1.invokeAfterDelay( fireHoldEvent, 750, this );
+    RunLoop.invokeAfterDelay( fireHoldEvent, 750, this );
 };
 
 TrackedTouch$1.prototype.done = function () {
@@ -27671,22 +28457,25 @@ var ListKBFocusView = Class({
 
     positioning: 'absolute',
 
-    layout: function () {
-        var itemHeight = this.get( 'itemHeight' );
+    layoutIndex: function () {
         var index = this.get( 'index' );
-        var singleSelection = this.get( 'singleSelection' );
-        var list = singleSelection.get( 'content' );
+        var list = this.get( 'singleSelection' ).get( 'content' );
         if ( index > -1 && list &&
                 list.getObjectAt( index ) !== this.get( 'record' ) ) {
-            index = -1;
+            return -1;
         }
+        return index;
+    }.property( 'index', 'record' ),
+
+    layout: function () {
+        var itemHeight = this.get( 'itemHeight' );
+        var index = this.get( 'layoutIndex' );
         return {
+            visibility: index < 0 ? 'hidden' : 'visible',
             top: index < 0 ? 0 : itemHeight * index,
-            left: index < 0 ? 'auto' : '0',
-            right: index < 0 ? '100%' : 'auto',
             height: itemHeight,
         };
-    }.property( 'itemHeight', 'index', 'record' ),
+    }.property( 'itemHeight', 'layoutIndex' ),
 
     didEnterDocument: function didEnterDocument () {
         var this$1 = this;
@@ -27712,21 +28501,23 @@ var ListKBFocusView = Class({
 
     // Scroll to centre widget on screen with no animation
     checkInitialScroll: function () {
-        if ( this.get( 'index' ) > -1 && this.get( 'distanceFromVisRect' ) ) {
+        if ( this.get( 'distanceFromVisRect' ) ) {
             this.scrollIntoView( 0, false );
         }
-    }.nextFrame(),
+    }.queue( 'after' ),
 
     checkScroll: function () {
         var distance = this.get( 'distanceFromVisRect' );
         if ( distance ) {
             this.scrollIntoView( distance < 0 ? -0.6 : 0.6, true );
         }
-    }.nextFrame().observes( 'index' ),
+    }.queue( 'after' ).observes( 'record' ),
 
     distanceFromVisRect: function () {
+        var layoutIndex = this.get( 'layoutIndex' );
         var scrollView = this.getParent( ScrollView );
-        if ( scrollView && this.get( 'isInDocument' ) ) {
+        if ( scrollView && layoutIndex > -1 &&
+                this.get( 'isInDocument' ) && !this._needsRedraw ) {
             var scrollTop = scrollView.get( 'scrollTop' );
             var position = this.getPositionRelativeTo( scrollView );
             var top = position.top;
@@ -27915,6 +28706,9 @@ var ProgressiveListView = Class({
     },
 
     _simulateScroll: function ( _, __, oldLength, length ) {
+        if ( !this.get( 'isInDocument' ) ) {
+            return;
+        }
         // Convert null/undefined length to 0.
         if ( !length ) {
             length = 0;
@@ -27924,7 +28718,7 @@ var ProgressiveListView = Class({
         // to the new maximum scrollTop, no scroll event is fired. Therefore we
         // have to simulate this firing in the next event loop.
         if ( length < oldLength ) {
-            RunLoop$1.invokeInNextEventLoop(
+            RunLoop.invokeInNextEventLoop(
                 this.fire.bind( this, 'scroll', null, null )
             );
         }
@@ -27991,6 +28785,8 @@ var SwitchView = Class({
 
     Extends: View,
 
+    syncOnlyInDocument: false,
+
     init: function init (/* ...mixins */) {
         this._oldView = null;
         // -1 => Not added views to parent
@@ -28018,8 +28814,8 @@ var SwitchView = Class({
     },
 
     destroy: function destroy () {
-        var views = this.get( 'views' ),
-            l = views.length;
+        var views = this.get( 'views' );
+        var l = views.length;
         while ( l-- ) {
             forEachView( views[l], 'destroy' );
         }
@@ -28038,7 +28834,7 @@ var SwitchView = Class({
     }.property(),
 
     willEnterDocument: function willEnterDocument () {
-        this.resumeBindings();
+        this.resume();
         this.redraw();
         return this;
     },
@@ -28056,7 +28852,7 @@ var SwitchView = Class({
     },
 
     didLeaveDocument: function didLeaveDocument () {
-        return this.suspendBindings();
+        return this.suspend();
     },
 
     // ---
@@ -28067,17 +28863,26 @@ var SwitchView = Class({
         // If not yet added to parent, nothing to redraw; _add will be called
         // automatically soon.
         if ( !this.isDestroyed && oldIndex > -1 && oldIndex !== newIndex ) {
-            var parentView = this.get( 'parentView' );
-            if ( parentView ) {
-                this._remove( parentView );
-                this._add();
+            if ( this._suspendRedraw ) {
+                this._needsRedraw = [];
+            } else {
+                this._needsRedraw = null;
+                var parentView = this.get( 'parentView' );
+                if ( parentView ) {
+                    this._remove( parentView );
+                    this._add();
+                }
             }
         }
     },
 
     switchNeedsRedraw: function () {
         if ( this.get( 'isInDocument' ) ) {
-            RunLoop$1.queueFn( 'render', this.redraw, this );
+            if ( this._suspendRedraw ) {
+                this._needsRedraw = [];
+            } else {
+                RunLoop.queueFn( 'render', this.redraw, this );
+            }
         }
     }.observes( 'index' ),
 
@@ -28587,6 +29392,8 @@ var CheckboxView = Class({
 
     type: '',
 
+    isIndeterminate: false,
+
     /**
         Property: O.CheckboxView#className
         Type: String
@@ -28613,6 +29420,7 @@ var CheckboxView = Class({
                 className: 'v-Checkbox-input',
                 type: 'checkbox',
                 checked: this.get( 'value' ),
+                indeterminate: this.get( 'isIndeterminate' ),
             }),
             CheckboxView.parent.draw.call( this, layer, Element, el ) ];
     },
@@ -28627,7 +29435,7 @@ var CheckboxView = Class({
     */
     checkboxNeedsRedraw: function ( self, property, oldValue ) {
         return this.propertyNeedsRedraw( self, property, oldValue );
-    }.observes( 'value' ),
+    }.observes( 'value', 'isIndeterminate' ),
 
     /**
         Method: O.CheckboxView#redrawValue
@@ -28637,6 +29445,10 @@ var CheckboxView = Class({
     */
     redrawValue: function redrawValue () {
         this._domControl.checked = this.get( 'value' );
+    },
+
+    redrawIsIndeterminate: function redrawIsIndeterminate () {
+        this._domControl.indeterminate = this.get( 'isIndeterminate' );
     },
 
     // --- Activate ---
@@ -29070,7 +29882,7 @@ exports.Object = Obj;
 exports.ObservableArray = ObservableArray;
 exports.ObservableProps = ObservableProps;
 exports.ObservableRange = ObservableRange;
-exports.RunLoop = RunLoop$1;
+exports.RunLoop = RunLoop;
 exports.Transform = Transform;
 exports.AnimatableView = AnimatableView;
 exports.Animation = Animation;
@@ -29090,6 +29902,7 @@ exports.Record = Record;
 exports.RecordAttribute = RecordAttribute;
 exports.ToManyAttribute = ToManyAttribute;
 exports.ToOneAttribute = ToOneAttribute;
+exports.RecordResult = RecordResult;
 exports.ValidationError = ValidationError;
 exports.AggregateSource = AggregateSource;
 exports.Source = Source;
@@ -29166,8 +29979,8 @@ exports.Class = Class;
 exports.Binding = Binding;
 exports.bind = bind;
 exports.bindTwoWay = bindTwoWay;
-exports.LocaleController = LocaleController$1;
-exports.i18n = LocaleController$1;
+exports.LocaleController = LocaleController;
+exports.i18n = LocaleController;
 exports.loc = loc;
 
 }((this.O = this.O || {})));
