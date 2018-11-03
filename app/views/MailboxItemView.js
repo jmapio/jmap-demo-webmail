@@ -14,22 +14,10 @@ var filterIsSentOrDraft = function ( filter ) {
     if ( filter.operator ) {
         return filter.conditions.every( filterIsSentOrDraft );
     }
-    var inMailbox = filter.inMailbox;
-    var role = inMailbox &&
+    var mailboxId = filter.inMailbox;
+    var role = mailboxId &&
             JMAP.store.getRecord( null, JMAP.Mailbox, mailboxId ).get( 'role' );
     return role === 'sent' || role === 'draft';
-};
-var filterIsText = function ( filter ) {
-    if ( filter.operator ) {
-        return filter.conditions.some( filterIsText );
-    }
-    for ( var prop in filter ) {
-        if ( typeof filter[ prop ] === 'string' && filter[ prop ] &&
-                prop !== 'inMailbox' ) {
-            return true;
-        }
-    }
-    return false;
 };
 
 var READY = O.Status.READY;

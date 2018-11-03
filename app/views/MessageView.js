@@ -192,8 +192,8 @@ var MessageView = O.Class({
 
     _drawBody: function () {
         var message = this.get( 'content' );
-        var textBody = message.get( 'textBody' );
-        var htmlBody = message.get( 'htmlBody' );
+        var bodyParts = message.get( 'bodyParts' );
+        var bodyValues = message.get( 'bodyValues' );
         var el = O.Element.create;
 
         if ( this.get( 'isUnread' ) ) {
@@ -203,13 +203,34 @@ var MessageView = O.Class({
 
         this._hasDrawnBody = true;
         this.checkSize();
-        return this._body = el( 'div.v-Message-body', [
-            htmlBody ?
-                App.drawHTML( htmlBody ) :
-                el( 'pre', [
-                    textBody
-                ])
+        var render = el( 'div.v-Message-body', [
+            bodyParts.html.map( function ( part ) {
+                var partRender = null;
+                var partValue = bodyValues[ part.partId ].value;
+                switch ( part.type.slice( 0, part.type.indexOf( '/' ) ) ) {
+                case 'text':
+                    if ( part.type === 'text/plain' ) {
+                        partRender = el( 'pre', [
+                            partValue,
+                        ]);
+                    } else {
+                        partRender = App.drawHTML( partValue );
+                    }
+                    break;
+                case 'image':
+                    partRender = el( 'div.u-alignCentre', [
+                        el( 'img.v-Message-image', {
+                            src: JMAP.auth.getUrlForBlob(
+                                null, part.blobId, part.type, part.name ),
+                        }),
+                    ]);
+                    break;
+                }
+                return partRender;
+            }),
         ]);
+        this._body = render;
+        return render;
     },
 
     redrawIsExpanded: function () {

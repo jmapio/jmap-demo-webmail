@@ -14,13 +14,17 @@
   "accessToken": "password",
   "accounts": {
     "foo": {
-      "isPrimary": true,
       "hasDataFor": [
-        "mail",
-        "contacts",
-        "calendars"
+        "urn:ietf:params:jmap:mail",
+        "urn:ietf:params:jmap:contacts",
+        "urn:ietf:params:jmap:calendars"
       ]
     }
+  },
+  "primaryAccounts": {
+    "urn:ietf:params:jmap:mail": "foo",
+    "urn:ietf:params:jmap:contacts": "foo",
+    "urn:ietf:params:jmap:calendars": "foo"
   },
   "apiUrl": "/jmap",
   "eventSourceUrl": "/events",

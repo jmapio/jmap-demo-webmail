@@ -10,6 +10,7 @@
 
 O.RunLoop.invoke( function () {
 
+var i18n = O.i18n;
 var Status = O.Status;
 var LOADING = Status.LOADING;
 var EMPTY_OR_OBSOLETE = Status.EMPTY | Status.OBSOLETE;
@@ -58,8 +59,18 @@ var byMailSourceOrder = function ( a, b ) {
             }
         }
     }
+    var aRole = a.get( 'role' );
+    var bRole = b.get( 'role' );
     return ( a.get( 'sortOrder' ) - b.get( 'sortOrder' ) ) ||
-        O.i18n.compare( a.get( 'displayName' ), b.get( 'displayName' ) ) ||
+        ( aRole === 'inbox' ?
+            -1 :
+          bRole === 'inbox' ?
+            1 :
+        aRole && !bRole ?
+            -1 :
+        bRole && !aRole ?
+            1 : 0 ) ||
+        i18n.compare( a.get( 'name' ), b.get( 'name' ) ) ||
         ( a.get( 'id' ) < b.get( 'id' ) ? -1 : 1 );
 };
 
@@ -68,7 +79,7 @@ var rootMailboxes = store.getQuery( 'rootMailboxes', O.LocalQuery, {
     filter: function ( data ) {
         return !data.parentId;
     },
-    sort: [ 'sortOrder', 'name' ]
+    sort: Mailbox.bySortOrderRoleOrName,
 });
 
 var allMailboxes = new O.ObservableArray( null, {
@@ -94,10 +105,10 @@ App.state = new O.Router({
         // Selected conversation
         {
             url: /^(.+)$/,
-            handle: function ( _, messageId ) {
+            handle: function ( _, emailId ) {
                 this.selection.selectNone();
                 this.beginPropertyChanges()
-                    .set( 'messageId', messageId )
+                    .set( 'emailId', emailId )
                     .endPropertyChanges();
             }
         },
@@ -107,21 +118,21 @@ App.state = new O.Router({
             handle: function () {
                 this.selection.selectNone();
                 this.beginPropertyChanges()
-                    .set( 'messageId', '' )
+                    .set( 'emailId', '' )
                     .endPropertyChanges();
             }
         }
     ],
 
     encodedState: function () {
-        return this.get( 'messageId' );
-    }.property( 'messageId' ),
+        return this.get( 'emailId' );
+    }.property( 'emailId' ),
 
     // ---
 
     mailbox: null,
     thread: null,
-    messageId: '',
+    emailId: '',
 
     mailboxMessageList: function () {
         var mailboxId = this.getFromPath( 'mailbox.id' );
@@ -243,7 +254,7 @@ rootMailboxes.addObserverForKey( '[]', {
 
 App.state.selectedMessage = new O.SingleSelectionController({
     content: O.bind( App.state, 'mailboxMessageList' ),
-    record: O.bindTwoWay( App.state, 'messageId',
+    record: O.bindTwoWay( App.state, 'emailId',
     function ( value, syncForward ) {
         return syncForward ?
             value ?

@@ -49,7 +49,6 @@ html {
     padding: 0 15px;
     line-height: 2.1;
     font-size: 17px;
-    font-weight: 300;
     cursor: pointer;
     user-select: none;
 }
@@ -80,7 +79,6 @@ html {
     padding: 0 15px;
     line-height: 49px;
     font-size: 24px;
-    font-weight: 300;
 }
 
 .v-MailboxTitle-name {
@@ -115,7 +113,6 @@ html {
     border: none;
     padding: 15px;
     font-size: 17px;
-    font-weight: 300;
     cursor: pointer;
 }
 .v-Toolbar .v-Button:hover,
@@ -199,7 +196,6 @@ html {
     top: 11px;
     left: auto;
     width: 85px;
-    font-weight: 300;
     text-align: right;
 }
 
@@ -223,7 +219,6 @@ html {
     bottom: 11px;
     height: 34px;
     color: #a1a8aa;
-    font-weight: 300;
 }
 .v-MailboxItem-total + .v-MailboxItem-preview {
     right: 42px;
@@ -241,7 +236,7 @@ html {
     cursor: pointer;
 }
 .v-MailboxItem-flagButton:hover {
-    -webkit-text-stroke-color: #999;
+    -webkit-text-stroke-color: rgba(0,0,0,0.25);
 }
 .v-MailboxItem.is-flagged .v-MailboxItem-flagButton {
     color: #fde16b;
@@ -266,7 +261,6 @@ html {
 .v-Thread-title {
     padding: 18px 0;
     font-size: 32px;
-    font-weight: 300;
 }
 
 .v-Message {
@@ -315,7 +309,6 @@ html {
 
 .v-Message-time {
     color: #a1a8aa;
-    font-weight: 300;
 }
 
 .v-Message-preview,
@@ -344,7 +337,7 @@ html {
     user-select: none;
 }
 .v-Message-flagButton:hover {
-    -webkit-text-stroke-color: #999;
+    -webkit-text-stroke-color: rgba(0,0,0,0.25);
 }
 .v-Message-flagButton.is-flagged {
     color: #fde16b;

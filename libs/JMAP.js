@@ -8463,9 +8463,6 @@ Object.assign( connection, {
         var undoManager = this.undoManager;
         var addMailboxOnlyIfNone = false;
         var toCopy = {};
-        // #if FASTMAIL
-        var now = new Date().toJSON() + 'Z';
-        // #end
         var accountId, fromAccountId, mailboxIds;
 
         if ( !addMailbox ) {
@@ -8600,16 +8597,6 @@ Object.assign( connection, {
                 willRemove ? willRemove.length : 0,
                 willAdd
             );
-            // #if FASTMAIL
-            if ( willRemove ) {
-                message.set( 'removedDates',
-                    willRemove.reduce( function ( removedDates, mailbox ) {
-                        removedDates[ mailbox.get( 'id' ) ] = now;
-                        return removedDates;
-                    }, clone( message.get( 'removedDates' ) ) )
-                );
-            }
-            // #end
 
             if ( alreadyHasMailbox ) {
                 willAdd = null;
