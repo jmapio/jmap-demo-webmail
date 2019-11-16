@@ -479,6 +479,19 @@ html {
     margin-bottom: 14px;
 }
 
+.v-Login .v-Button {
+    border: none;
+    border-radius: 3px;
+    padding: 7px 14px;
+    background: #e74c3c;
+    color: #fff;
+}
+.v-Login .v-Button:active {
+    background: #d12c1a;
+}
+
+/* --- */
+
 .v-Text {
     border: none;
     border-bottom: 1px solid #ccc;
@@ -492,15 +505,4 @@ html {
     border: 0;
     padding: 7px;
     background: none;
-}
-
-.v-Button {
-    border: none;
-    border-radius: 3px;
-    padding: 7px 14px;
-    background: #e74c3c;
-    color: #fff;
-}
-.v-Button:active {
-    background: #d12c1a;
 }
