@@ -10,6 +10,10 @@
 
 ( function () {
 
+const el = O.Element.create;
+
+// ---
+
 var MailboxSourceView = O.Class({
 
     Extends: O.View,
@@ -26,7 +30,7 @@ var MailboxSourceView = O.Class({
             ( this.get( 'hasDragOver' ) ? ' is-underDrag' : '' );
     }.property( 'isSelected', 'hasDragOver' ),
 
-    draw: function ( layer, Element, el ) {
+    draw: function ( layer ) {
         var mailbox = this.get( 'content' ),
             role = mailbox.get( 'role' ),
             badgeProperty = ( role === 'drafts' ) ? 'totalMessages' :

@@ -10,6 +10,10 @@
 
 ( function () {
 
+const el = O.Element.create;
+
+// ---
+
 var drawNames = function ( people ) {
     return people.reduce( function ( result, person, i ) {
         if ( i ) {
@@ -118,7 +122,7 @@ var MessageView = O.Class({
 
     // Render =================================
 
-    draw: function ( layer, Element, el ) {
+    draw: function ( layer ) {
         var message = this.get( 'content' ),
             detailsAreLoaded = message.get( 'detailsStatus' ) === READY,
             email = message.get( 'fromEmail' ),

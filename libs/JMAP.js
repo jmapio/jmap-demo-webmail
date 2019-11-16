@@ -17,7 +17,7 @@ const toJSON = function ( date ) {
     const minute = date.getUTCMinutes();
     const second = date.getUTCSeconds();
 
-    return (
+    return date ? (
         ( year < 1000 ?
             '0' + ( year < 100 ? '0' + ( year < 10 ? '0' : '' ) : '' ) + year :
             '' + year ) + '-' +
@@ -26,19 +26,20 @@ const toJSON = function ( date ) {
         ( hour < 10 ? '0' + hour : '' + hour ) + ':' +
         ( minute < 10 ? '0' + minute : '' + minute ) + ':' +
         ( second < 10 ? '0' + second : '' + second )
-    );
+    ) : null;
 };
 
 const toUTCJSON = function ( date ) {
-    return toJSON( date ) + 'Z';
+    return date ? toJSON( date ) + 'Z' : null;
 };
 
 const toTimezoneOffsetJSON = function ( date ) {
     var offset = date.getTimezoneOffset();
-    return offset ?
+    return date ? offset ?
         toJSON( new Date( date ).add( -offset, 'minute' ) ) +
             date.format( '%z' ) :
-        toUTCJSON( date );
+        toUTCJSON( date ) :
+        null;
 };
 
 // --- Export
@@ -99,20 +100,13 @@ const auth = new Obj({
             maxConcurrentUpload: 10,
             maxSizeRequest: 5000000,
             maxConcurrentRequests: 8,
-            maxCallsInRequest: 32,
+            maxCallsInRequest: 64,
             maxObjectsInGet: 1024,
             maxObjectsInSet: 1024,
             collationAlgorithms: [
                 'i;ascii-numeric',
                 'i;ascii-casemap',
             ],
-        },
-        'urn:ietf:params:jmap:mail': {
-            maxSizeAttachmentsPerEmail: 50000000,
-            maxMailboxesPerEmail: 1024,
-            maxDelayedSend: 0,
-            emailListSortOptions: [ 'receivedAt' ],
-            submissionExtensions: [],
         },
     },
     state: '',
@@ -135,7 +129,7 @@ const auth = new Obj({
         var id;
         for ( id in accounts ) {
             if ( id !== primaryAccountId &&
-                    accounts[ id ].hasDataFor.contains( dataGroup ) ) {
+                    accounts[ id ].accountCapabilities[ dataGroup ] ) {
                 return id;
             }
         }
@@ -187,6 +181,13 @@ const auth = new Obj({
         }
         this._isFetchingSession = true;
 
+        if ( !authenticationUrl ) {
+            authenticationUrl = this.get( 'authenticationUrl' );
+        }
+        if ( !accessToken ) {
+            accessToken = this.get( 'accessToken' );
+        }
+
         new HttpRequest({
             method: 'GET',
             url: authenticationUrl,
@@ -198,7 +199,8 @@ const auth = new Obj({
             responseType: 'json',
 
             onSuccess: function ( event ) {
-                auth.set( 'accessToken', accessToken );
+                auth.set( 'authenticationUrl', authenticationUrl )
+                    .set( 'accessToken', accessToken );
                 auth.didAuthenticate( event.data );
             }.on( 'io:success' ),
         }).send();
@@ -236,18 +238,13 @@ const auth = new Obj({
 
     retryIn: function ( timeToWait ) {
         // If we're not already ticking down...
-        if ( !this.get( 'timeToReconnect' ) ) {
-            // Is this a reconnection attempt already? Exponentially back off.
-            timeToWait = this.get( 'isDisconnected' ) ?
-                Math.min( this._timeToWait * 2, 300 ) :
-                timeToWait || 1;
-
+        if ( !this._timer ) {
+            if ( !timeToWait ) {
+                timeToWait = this._timeToWait;
+            }
             this.set( 'isDisconnected', true )
-                .set( 'timeToReconnect', timeToWait + 1 );
-
-            this._timeToWait = timeToWait;
+                .set( 'timeToReconnect', timeToWait );
             this._timer = RunLoop.invokePeriodically( this._tick, 1000, this );
-            this._tick();
         }
     },
 
@@ -255,16 +252,19 @@ const auth = new Obj({
         var timeToReconnect = this.get( 'timeToReconnect' ) - 1;
         this.set( 'timeToReconnect', timeToReconnect );
         if ( !timeToReconnect ) {
-            this.retryConnections();
+            this.retryConnections( true );
         }
     },
 
-    retryConnections: function () {
+    retryConnections: function ( backoffOnFail ) {
         var failedConnections = this._failedConnections;
         RunLoop.cancel( this._timer );
         this.set( 'timeToReconnect', 0 );
         this._timer = null;
         this._failedConnections = [];
+        if ( backoffOnFail ) {
+            this._timeToWait = Math.min( this._timeToWait * 2, 300 );
+        }
         failedConnections.forEach( function ( connection ) {
             connection.send();
         });
@@ -284,11 +284,11 @@ JMAP.auth = auth;
 // Requires: Auth.js                                                          \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP, JSON, console, alert */
+/*global O, JMAP, console, alert */
 
 'use strict';
 
-( function ( JMAP, performance, undefined ) {
+( function ( JMAP, undefined ) {
 
 const isEqual = O.isEqual;
 const loc = O.loc;
@@ -297,10 +297,16 @@ const Class = O.Class;
 const RunLoop = O.RunLoop;
 const HttpRequest = O.HttpRequest;
 const Source = O.Source;
+const LOADING = O.Status.LOADING;
 
 const auth = JMAP.auth;
 
 // ---
+
+const serverUnavailable = function ( methodResponse ) {
+    return methodResponse[0] === 'error' &&
+        methodResponse[1].type === 'serverUnavailable';
+};
 
 const applyPatch = function ( object, path, patch ) {
     var slash, key;
@@ -330,17 +336,19 @@ const applyPatch = function ( object, path, patch ) {
     }
 };
 
-const makePatches = function ( path, patches, original, current ) {
+const makePatches = function ( path, patches, original, current, mayPatch ) {
     var key;
     var didPatch = false;
     if ( original && current &&
-            typeof current === 'object' && !( current instanceof Array ) ) {
+            typeof current === 'object' && !( current instanceof Array ) &&
+            ( !mayPatch || mayPatch( path, original, current ) ) ) {
         for ( key in current ) {
             didPatch = makePatches(
                 path + '/' + key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
                 patches,
                 original[ key ],
-                current[ key ]
+                current[ key ],
+                mayPatch
             ) || didPatch;
         }
         for ( key in original ) {
@@ -350,7 +358,8 @@ const makePatches = function ( path, patches, original, current ) {
                         key.replace( /~/g, '~0' ).replace( /\//g, '~1' ),
                     patches,
                     original[ key ],
-                    null
+                    null,
+                    mayPatch
                 ) || didPatch;
             }
         }
@@ -361,7 +370,7 @@ const makePatches = function ( path, patches, original, current ) {
     return didPatch;
 };
 
-const makeUpdate = function ( primaryKey, update, noPatch, isCopy ) {
+const makeUpdate = function ( primaryKey, update, mayPatch, isCopy ) {
     const storeKeys = update.storeKeys;
     const records = update.records;
     const changes = update.changes;
@@ -372,15 +381,18 @@ const makeUpdate = function ( primaryKey, update, noPatch, isCopy ) {
     for ( i = 0, l = records.length; i < l; i +=1 ) {
         record = records[i];
         change = changes[i];
-        previous = noPatch ? null : committed[i];
+        previous = mayPatch ? committed[i] : null;
         patches = {};
 
         for ( key in change ) {
             if ( change[ key ] && key !== 'accountId' ) {
-                if ( noPatch ) {
-                    patches[ key ] = record[ key ];
+                if ( mayPatch ) {
+                    makePatches(
+                        key, patches, previous[ key ], record[ key ],
+                        typeof mayPatch === 'function' ? mayPatch : null,
+                    );
                 } else {
-                    makePatches( key, patches, previous[ key ], record[ key ] );
+                    patches[ key ] = record[ key ];
                 }
             }
         }
@@ -393,14 +405,14 @@ const makeUpdate = function ( primaryKey, update, noPatch, isCopy ) {
     return Object.keys( updates ).length ? updates : undefined;
 };
 
-const makeSetRequest = function ( change, noPatch ) {
+const makeSetRequest = function ( change, mayPatch ) {
     var create = change.create;
     var update = change.update;
     var destroy = change.destroy;
     var toCreate = create.storeKeys.length ?
         Object.zip( create.storeKeys, create.records ) :
         undefined;
-    var toUpdate = makeUpdate( change.primaryKey, update, noPatch, false );
+    var toUpdate = makeUpdate( change.primaryKey, update, mayPatch, false );
     var toDestroy = destroy.ids.length ?
         destroy.ids :
         undefined;
@@ -410,6 +422,15 @@ const makeSetRequest = function ( change, noPatch ) {
         update: toUpdate,
         destroy: toDestroy,
     } : null;
+};
+
+const hasResultReference = function ( methodCall ) {
+    for ( var key in methodCall[1] ) {
+        if ( key.charAt( 0 ) === '#' ) {
+            return true;
+        }
+    }
+    return false;
 };
 
 const handleProps = {
@@ -481,8 +502,11 @@ const Connection = Class({
         this._typesToFetch = {};
         // Map of accountId -> guid( Type ) -> Id -> true
         this._recordsToFetch = {};
+        // Map of guid( Type ) -> Type
+        this._typeIdToType = {};
 
-        this._timing = undefined;
+        // { createdIds: {...}, doneCount, sentCount }
+        this._inFlightContext = null;
 
         this.inFlightRemoteCalls = null;
         this.inFlightCallbacks = null;
@@ -492,15 +516,6 @@ const Connection = Class({
     },
 
     prettyPrint: false,
-
-    /**
-        Property: JMAP.Connection#sendTiming
-        Type: Object|null
-
-        If an object, these properties (from the performance API) for the
-        previous request will be sent with the next request
-    */
-    sendTiming: false,
 
     /**
         Property: JMAP.Connection#willRetry
@@ -520,6 +535,17 @@ const Connection = Class({
     timeout: 30000,
 
     /**
+        Property: JMAP.Connection#timeout
+        Type: Number
+
+        Time in milliseconds at which to time out the request once it has
+        finished uploading to the server; this is set higher than the initial
+        timeout so if the OS is buffering the upload we don't timeout on slow
+        connections.
+    */
+    timeoutAfterUpload: 120000,
+
+    /**
         Property: JMAP.Connection#inFlightRequest
         Type: (O.HttpRequest|null)
 
@@ -527,11 +553,18 @@ const Connection = Class({
     */
     inFlightRequest: null,
 
+    ioDidProgressUpload: function ( event ) {
+        if ( event.loaded === event.total ) {
+            this.get( 'inFlightRequest' )
+                .set( 'timeout', this.get( 'timeoutAfterUpload' ) );
+        }
+    }.on( 'io:uploadProgress' ),
+
     /**
         Method: JMAP.Connection#ioDidSucceed
 
         Callback when the IO succeeds. Parses the JSON and passes it on to
-        <JMAP.Connection#receive>.
+        <JMAP.Connection#handleResponses>.
 
         Parameters:
             event - {IOEvent}
@@ -540,44 +573,56 @@ const Connection = Class({
         var data = event.data;
         var methodResponses = data && data.methodResponses;
         var sessionState = data && data.sessionState;
-        var sendTiming = this.get( 'sendTiming' );
-        var timing, entry, key;
-        if ( !methodResponses ) {
-            RunLoop.didError({
-                name: 'JMAP.Connection#ioDidSucceed',
-                message: 'No method responses received.',
-                details: 'Request:\n' +
-                    JSON.stringify( this.get( 'inFlightRemoteCalls' ), null, 2 )
-            });
-            methodResponses = [];
+        var inFlightRemoteCalls = this.get( 'inFlightRemoteCalls' );
+        if ( !methodResponses || methodResponses.some( serverUnavailable ) ) {
+            // Successful response code but no method responses happens
+            // occasionally; I don't know why, some kind of broken proxy
+            // changing the status code perhaps? Treat as a connection failure.
+            //
+            // serverUnavailable error is a tricky one. Technically we should
+            // just be retrying those method calls and not the whole lot but
+            // this is easier to do for now and in practice it's very unusual
+            // for one to return this error and not everything. Most requests
+            // are idempotent too, so this behaviour is not ridiculous.
+            if ( this.get( 'willRetry' ) ) {
+                auth.connectionFailed( this );
+                return;
+            } else if ( !methodResponses ) {
+                methodResponses = [];
+            }
         }
 
         auth.connectionSucceeded( this );
-
-        this.receive(
-            methodResponses,
-            this.get( 'inFlightCallbacks' ),
-            this.get( 'inFlightRemoteCalls' )
-        );
-
-        if ( sendTiming && performance && performance.getEntriesByName ) {
-            entry = performance
-                .getEntriesByName( event.target.get( 'url' ) ).last();
-            if ( entry ) {
-                timing = { id: event.headers[ 'x-request-id' ] };
-                for ( key in entry ) {
-                    if ( sendTiming[ key ] ) {
-                        timing[ key ] = entry[ key ];
-                    }
-                }
-            }
-        }
-        this._timing = timing;
 
         if ( sessionState && sessionState !== auth.get( 'state' ) ) {
             auth.fetchSession();
         }
 
+        this.handleResponses(
+            methodResponses,
+            inFlightRemoteCalls,
+            event
+        );
+
+
+        // Need to send the next page if there were too many method calls to
+        // send at once.
+        var inFlightContext = this._inFlightContext;
+        if ( inFlightContext &&
+                inFlightContext.doneCount + inFlightContext.sentCount <
+                inFlightRemoteCalls.length ) {
+            inFlightContext.doneCount += inFlightContext.sentCount;
+            inFlightContext.createdIds = data.createdIds;
+            return;
+        }
+
+        this.processCallbacks(
+            this.get( 'inFlightCallbacks' ),
+            methodResponses,
+            inFlightRemoteCalls
+        );
+
+        this._inFlightContext = null;
         this.set( 'inFlightRemoteCalls', null )
             .set( 'inFlightCallbacks', null );
     }.on( 'io:success' ),
@@ -647,9 +692,9 @@ const Connection = Class({
         }
 
         if ( discardRequest ) {
-            this.receive(
-                [],
+            this.processCallbacks(
                 this.get( 'inFlightCallbacks' ),
+                [],
                 this.get( 'inFlightRemoteCalls' )
             );
 
@@ -742,8 +787,8 @@ const Connection = Class({
         return this;
     },
 
-    commitType: function ( typeId, changes ) {
-        var setRequest = makeSetRequest( changes, false );
+    commitType: function ( typeId, changes, mayPatch ) {
+        var setRequest = makeSetRequest( changes, mayPatch );
         var moveFromAccount, fromAccountId, accountId;
         if ( setRequest ) {
             this.callMethod( typeId + '/set', setRequest );
@@ -757,7 +802,7 @@ const Connection = Class({
                     create: makeUpdate(
                         changes.primaryKey,
                         moveFromAccount[ fromAccountId ],
-                        true,
+                        null,
                         true
                     ),
                     onSuccessDestroyOriginal: true,
@@ -788,11 +833,16 @@ const Connection = Class({
         return false;
     },
 
+    willSendRequest: function ( request/*, headers*/ ) {
+        return JSON.stringify( request, null,
+            this.get( 'prettyPrint' ) ? 2 : 0 );
+    },
+
     headers: function () {
         return {
             'Content-type': 'application/json',
             'Accept': 'application/json',
-            'Authorization': 'Bearer ' + auth.get( 'accessToken' )
+            'Authorization': auth.get( 'accessToken' ),
         };
     }.property().nocache(),
 
@@ -812,9 +862,44 @@ const Connection = Class({
         if ( !remoteCalls ) {
             request = this.makeRequest();
             remoteCalls = request[0];
-            if ( !remoteCalls.length ) { return; }
+            if ( !remoteCalls.length ) {
+                return;
+            }
             this.set( 'inFlightRemoteCalls', remoteCalls );
             this.set( 'inFlightCallbacks', request[1] );
+        }
+        var headers = this.get( 'headers' );
+        var capabilities = auth.get( 'capabilities' );
+        var maxCallsInRequest =
+            capabilities[ 'urn:ietf:params:jmap:core' ].maxCallsInRequest;
+        var inFlightContext = this._inFlightContext;
+        var createdIds = undefined;
+
+        if ( !inFlightContext && remoteCalls.length > maxCallsInRequest ) {
+            inFlightContext = {
+                createdIds: {},
+                doneCount: 0,
+                sentCount: 0,
+            };
+            this._inFlightContext = inFlightContext;
+        }
+        if ( inFlightContext ) {
+            var start = inFlightContext.doneCount;
+            var end = start + maxCallsInRequest;
+            if ( end < remoteCalls.length ) {
+                while ( end > start + 1 ) {
+                    // We presume any back references are always to the previous
+                    // method call and never "jump". If we start doing something
+                    // different we'll have to add more logic.
+                    if ( !hasResultReference( remoteCalls[ end ] ) ) {
+                        break;
+                    }
+                    end -= 1;
+                }
+            }
+            remoteCalls = remoteCalls.slice( start, end );
+            inFlightContext.sentCount = remoteCalls.length;
+            createdIds = inFlightContext.createdIds;
         }
 
         this.set( 'inFlightRequest',
@@ -823,20 +908,19 @@ const Connection = Class({
                 timeout: this.get( 'timeout' ),
                 method: 'POST',
                 url: auth.get( 'apiUrl' ),
-                headers: this.get( 'headers' ),
-                withCredentials: true,
+                headers: headers,
                 responseType: 'json',
-                data: JSON.stringify({
-                    using: Object.keys( auth.get( 'capabilities' ) ),
-                    timing: this._timing,
+                data: this.willSendRequest({
+                    using: Object.keys( capabilities ),
                     methodCalls: remoteCalls,
-                }, null, this.get( 'prettyPrint' ) ? 2 : 0 ),
+                    createdIds: createdIds,
+                }, headers ),
             }).send()
         );
     }.queue( 'after' ),
 
     /**
-        Method: JMAP.Connection#receive
+        Method: JMAP.Connection#handleResponses
 
         After completing a request, this method is called to process the
         response returned by the server.
@@ -844,15 +928,12 @@ const Connection = Class({
         Parameters:
             data        - {Array} The array of method calls to execute in
                           response to the request.
-            callbacks   - {Array} The array of callbacks to execute after the
-                          data has been processed.
             remoteCalls - {Array} The array of method calls that was executed on
                           the server.
     */
-    receive: function ( data, callbacks, remoteCalls ) {
+    handleResponses: function ( data, remoteCalls/*, event*/ ) {
         var handlers = this.response;
-        var i, l, response, handler, tuple, id, callback, request;
-        var matchingResponse;
+        var i, l, response, handler, id, request;
         for ( i = 0, l = data.length; i < l; i += 1 ) {
             response = data[i];
             handler = handlers[ response[0] ];
@@ -866,6 +947,21 @@ const Connection = Class({
                 }
             }
         }
+    },
+
+    /**
+        Method: JMAP.Connection#processCallbacks
+
+        After completing a request, this method is called to process the
+        callbackss
+
+        Parameters:
+            callbacks   - {Array} The array of callbacks.
+            data        - {Array} The array of method call responses.
+            remoteCalls - {Array} The array of method call requests
+    */
+    processCallbacks: function ( callbacks, methodResponses, methodCalls ) {
+        var i, l, matchingResponse, id, request, response, tuple, callback;
         // Invoke after bindings to ensure all data has propagated through.
         if (( l = callbacks.length )) {
             matchingResponse = function ( call ) {
@@ -876,8 +972,10 @@ const Connection = Class({
                 id = tuple[0];
                 callback = tuple[1];
                 if ( id ) {
-                    request = remoteCalls[+id];
-                    response = data.find( matchingResponse ) || NO_RESPONSE;
+                    request = methodCalls[+id];
+                    response =
+                        methodResponses.find( matchingResponse ) ||
+                        NO_RESPONSE;
                     callback = callback.bind( null,
                         response[1], response[0], request[1] );
                 }
@@ -889,7 +987,8 @@ const Connection = Class({
     /**
         Method: JMAP.Connection#makeRequest
 
-        This will make calls to JMAP.Connection#(record|query)(Fetchers|Refreshers)
+        This will make calls to
+        JMAP.Connection#(record|query)(Fetchers|Refreshers)
         to add any final API calls to the send queue, then return a tuple of the
         queue of method calls and the list of callbacks.
 
@@ -1041,8 +1140,8 @@ const Connection = Class({
         Method: JMAP.Connection#refreshRecord
 
         Fetches any new data for a record since the last fetch if a handler for
-        the type is defined in <JMAP.Connection#recordRefreshers>, or refetches the
-        whole record if not.
+        the type is defined in <JMAP.Connection#recordRefreshers>, or refetches
+        the whole record if not.
 
         Parameters:
             Type     - {O.Class} The record type.
@@ -1191,7 +1290,7 @@ const Connection = Class({
             handler = this.recordCommitters[ change.typeId ];
             if ( handler ) {
                 if ( typeof handler === 'string' ) {
-                    this.commitType( handler, change );
+                    this.commitType( handler, change, true );
                 } else {
                     handler.call( this, change );
                 }
@@ -1271,6 +1370,7 @@ const Connection = Class({
         }
         if ( Type ) {
             Type.source = this;
+            this._typeIdToType[ typeId ] = Type;
         }
         return this;
     },
@@ -1465,18 +1565,17 @@ const Connection = Class({
 
         'error_/get': function ( args, requestName, requestArgs ) {
             var ids = requestArgs.ids;
-            var accountId = requestArgs.accountId;
-            if ( !ids ) {
-                return;
+            if ( ids ) {
+                var store = this.get( 'store' );
+                var accountId = requestArgs.accountId;
+                var typeId = requestName.slice( 0, requestName.indexOf( '/' ) );
+                var Type = this._typeIdToType[ typeId ];
+                ids.forEach( function ( id ) {
+                    var storeKey = store.getStoreKey( accountId, Type, id );
+                    var status = store.getStatus( storeKey );
+                    store.setStatus( storeKey, status & ~LOADING );
+                });
             }
-            var fakeArgs = {
-                accountId: accountId,
-                list: null,
-                notFound: ids,
-                state: null,
-            };
-            this.response[ requestName ].call( this,
-                fakeArgs, requestName, requestArgs );
         },
 
         'error_/set': function ( args, requestName, requestArgs ) {
@@ -1501,8 +1600,10 @@ const Connection = Class({
                         return notDestroyed;
                     }, {} ) : null,
             };
-            this.response[ requestName ].call( this,
-                fakeArgs, requestName, requestArgs );
+            var handler = this.response[ requestName ];
+            if ( handler ) {
+                handler.call( this, fakeArgs, requestName, requestArgs );
+            }
         },
 
 
@@ -1516,34 +1617,49 @@ const Connection = Class({
                         return notCreated;
                     }, {} ) : null,
             };
-            this.response[ requestName ].call( this,
-                fakeArgs, requestName, requestArgs );
+            var handler = this.response[ requestName ];
+            if ( handler ) {
+                handler.call( this, fakeArgs, requestName, requestArgs );
+            }
         },
 
         // ---
 
+        // eslint-disable-next-line camelcase
         error_accountNotFound: function (/* args, requestName, requestArgs */) {
             auth.fetchSession();
         },
+
+        // eslint-disable-next-line camelcase
         error_accountReadOnly: function (/* args, requestName, requestArgs */) {
             auth.fetchSession();
         },
-        error_accountNotSupportedByMethod: function (/* args, requestName, requestArgs */) {
+
+        // eslint-disable-next-line camelcase
+        error_accountNotSupportedByMethod:
+                function (/* args, requestName, requestArgs */) {
             auth.fetchSession();
         },
 
+        // eslint-disable-next-line camelcase
         error_serverFail: function ( args/*, requestName, requestArgs*/ ) {
             console.log( 'Server error: ' + JSON.stringify( args, null, 2 ) );
         },
+
+        // eslint-disable-next-line camelcase
         error_unknownMethod: function ( args, requestName/*, requestArgs*/ ) {
             // eslint-disable-next-line no-console
             console.log( 'Unknown API call made: ' + requestName );
         },
+
+        // eslint-disable-next-line camelcase
         error_invalidArguments: function ( args, requestName, requestArgs ) {
             // eslint-disable-next-line no-console
             console.log( 'API call to ' + requestName +
                 ' made with invalid arguments: ', requestArgs );
         },
+
+        // eslint-disable-next-line camelcase
         error_requestTooLarge: function ( args, requestName, requestArgs ) {
             // eslint-disable-next-line no-console
             console.log( 'API call to ' + requestName +
@@ -1559,7 +1675,7 @@ Connection.applyPatch = applyPatch;
 
 JMAP.Connection = Connection;
 
-}( JMAP, window.performance || null ) );
+}( JMAP ) );
 
 
 // -------------------------------------------------------------------------- \\
@@ -1577,7 +1693,6 @@ JMAP.Connection = Connection;
 const IOQueue = O.IOQueue;
 const AggregateSource = O.AggregateSource;
 const Store = O.Store;
-const NestedStore = O.NestedStore;
 
 const Connection = JMAP.Connection;
 const auth = JMAP.auth;
@@ -1616,11 +1731,10 @@ const source = new AggregateSource({
     },
 });
 
-const getDefaultAccountId = function ( Type ) {
+// (Overriding from Overture, at a designated extension point.)
+Store.prototype.getPrimaryAccountIdForType = function ( Type ) {
     return auth.get( 'primaryAccounts' )[ Type.dataGroup ];
 };
-Store.implement({ getDefaultAccountId: getDefaultAccountId }, true );
-NestedStore.implement({ getDefaultAccountId: getDefaultAccountId }, true );
 
 const store = new Store({
     source: source,
@@ -1632,8 +1746,9 @@ const store = new Store({
         for ( accountId in accounts ) {
             account = accounts[ accountId ];
             this.addAccount( accountId, {
-                isDefault: accountId === primaryMailAccountId,
-                hasDataFor: account.hasDataFor,
+                replaceAccountId: accountId === primaryMailAccountId ?
+                    'PLACEHOLDER MAIL ACCOUNT ID' : undefined,
+                accountCapabilities: account.accountCapabilities,
             });
         }
     },
@@ -1665,6 +1780,7 @@ JMAP.store = store;
 
 ( function ( JMAP ) {
 
+const isDestroyed = O.isDestroyed;
 const Class = O.Class;
 const Obj = O.Object;
 const RunLoop = O.RunLoop;
@@ -1698,9 +1814,12 @@ const LocalFile = Class({
         }
         // If the OS doesn't have a MIME type for a file (e.g. .ini files)
         // it will give an empty string for type. Attaching .mhtml files may
-        // give a bogus "multipart/related" MIME type.
+        // give a bogus "multipart/related" MIME type. The OS may have a bogus
+        // content type (e.g. sketchup was (is?) settings "SKP" as the content
+        // type on Windows); if there's no slash, ignore the type.
         var type = file.type;
-        if ( !type || type.startsWith( 'multipart/' ) ) {
+        if ( !type || type.startsWith( 'multipart/' ) ||
+                !type.contains( '/' ) ) {
             type = 'application/octet-stream';
         }
         this.name = name ||
@@ -1732,7 +1851,7 @@ const LocalFile = Class({
         if ( obj && key ) {
             obj.removeObserverForKey( key, this, 'upload' );
         }
-        if ( !this.isDestroyed ) {
+        if ( !isDestroyed( this ) ) {
             upload.send(
                 this._request = new HttpRequest({
                     nextEventTarget: this,
@@ -1740,9 +1859,8 @@ const LocalFile = Class({
                     url: auth.get( 'uploadUrl' ).replace(
                         '{accountId}', encodeURIComponent( this.accountId ) ),
                     headers: {
-                        'Authorization': 'Bearer ' + auth.get( 'accessToken' ),
+                        'Authorization': auth.get( 'accessToken' ),
                     },
-                    withCredentials: true,
                     responseType: 'json',
                     data: this.file,
                 })
@@ -1771,7 +1889,7 @@ const LocalFile = Class({
 
         // Was there an error?
         if ( !response ) {
-            return this.onFailure( event );
+            return this.uploadDidFail();
         }
 
         this.beginPropertyChanges()
@@ -1918,7 +2036,7 @@ JMAP.Sequence = Sequence;
 // Requires: namespace.js                                                     \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP, JSON */
+/*global O, JMAP */
 
 'use strict';
 
@@ -2135,7 +2253,7 @@ Calendar.dataGroup = 'urn:ietf:params:jmap:calendars';
 
 JMAP.calendar.handle( Calendar, {
 
-    precedence: 1,
+    precedence: 2,
 
     fetch: 'Calendar',
     refresh: 'Calendar',
@@ -2179,33 +2297,36 @@ JMAP.Calendar = Calendar;
 // Module: CalendarModel                                                      \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, JMAP */
+/*global JMAP */
 
 'use strict';
 
 ( function ( JMAP ) {
 
-const Class = O.Class;
-
 // ---
 
-const durationFormat = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+const durationFormat = /^([+-]?)P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.\d+)?S)?)?$/;
 
 const A_DAY = 24 * 60 * 60 * 1000;
 
-const Duration = Class({
-    init: function ( durationInMS ) {
+class Duration {
+    constructor ( durationInMS ) {
         this._durationInMS = durationInMS;
-    },
+    }
 
-    valueOf: function () {
+    valueOf () {
         return this._durationInMS;
-    },
+    }
 
-    toJSON: function () {
+    toJSON () {
         var output = 'P';
         var durationInMS = this._durationInMS;
         var quantity;
+
+        if ( durationInMS < 0 ) {
+            durationInMS = -durationInMS;
+            output = '-P';
+        }
 
         // According to RFC3339 we can't mix weeks with other durations.
         // We could mix days, but presume that anything that's not an exact
@@ -2250,24 +2371,27 @@ const Duration = Class({
 
         return output;
     }
-});
 
-Duration.isEqual = function ( a, b ) {
-    return a._durationInMS === b._durationInMS;
-};
-
-Duration.fromJSON = function ( value ) {
-    var results = value ? durationFormat.exec( value ) : null;
-    var durationInMS = 0;
-    if ( results ) {
-        durationInMS += ( +results[1] || 0 ) * 7 * 24 * 60 * 60 * 1000;
-        durationInMS += ( +results[2] || 0 )     * 24 * 60 * 60 * 1000;
-        durationInMS += ( +results[3] || 0 )          * 60 * 60 * 1000;
-        durationInMS += ( +results[4] || 0 )               * 60 * 1000;
-        durationInMS += ( +results[5] || 0 )                    * 1000;
+    static isEqual ( a, b ) {
+        return a._durationInMS === b._durationInMS;
     }
-    return new Duration( durationInMS );
-};
+
+    static fromJSON ( value ) {
+        var results = value ? durationFormat.exec( value ) : null;
+        var durationInMS = 0;
+        if ( results ) {
+            durationInMS += ( +results[2] || 0 ) * 7 * 24 * 60 * 60 * 1000;
+            durationInMS += ( +results[3] || 0 )     * 24 * 60 * 60 * 1000;
+            durationInMS += ( +results[4] || 0 )          * 60 * 60 * 1000;
+            durationInMS += ( +results[5] || 0 )               * 60 * 1000;
+            durationInMS += ( +results[6] || 0 )                    * 1000;
+            if ( results[1] === '-' ) {
+                durationInMS = -durationInMS;
+            }
+        }
+        return new Duration( durationInMS );
+    }
+}
 
 Duration.ZERO = new Duration( 0 );
 Duration.AN_HOUR = new Duration( 60 * 60 * 1000 );
@@ -2292,7 +2416,6 @@ JMAP.Duration = Duration;
 ( function ( JMAP ) {
 
 const toBoolean = O.Transform.toBoolean;
-const Class = O.Class;
 
 // ---
 
@@ -2628,9 +2751,9 @@ const iterate = function ( fromDate,
 
 // ---
 
-const RecurrenceRule = Class({
+class RecurrenceRule {
 
-    init: function ( json ) {
+    constructor ( json ) {
         this.frequency = frequencyNumbers[ json.frequency ] || DAILY;
         this.interval = json.interval || 1;
 
@@ -2656,11 +2779,18 @@ const RecurrenceRule = Class({
         this.bySetPosition = json.bySetPosition || null;
 
         this.until = json.until ? Date.fromJSON( json.until ) : null;
-        this.count = json.count || null;
-    },
+        // Arbitrary limit of 2^14 – after that ignore the count and treat as
+        // infinite; we presume we can list all occurrences if there is a
+        // count without being too expensive. Don't die trying to compute them
+        // if someone accidentally or on purpose puts a pathologically large
+        // count.
+        this.count = json.count <= 16384 && json.count || null;
+    }
 
-    toJSON: function () {
-        var result = {};
+    toJSON () {
+        var result = {
+            '@type': 'RecurrenceRule',
+        };
         var key, value;
         for ( key in this ) {
             if ( key.charAt( 0 ) === '_' || !this.hasOwnProperty( key ) ) {
@@ -2709,12 +2839,12 @@ const RecurrenceRule = Class({
             result[ key ] = value;
         }
         return result;
-    },
+    }
 
     // start = Date recurrence starts (should be first occurrence)
     // begin = Beginning of time period to return occurrences within
     // end = End of time period to return occurrences within
-    getOccurrences: function ( start, begin, end ) {
+    getOccurrences ( start, begin, end ) {
         var frequency = this.frequency;
         var count = this.count || 0;
         var until = this.until;
@@ -2745,6 +2875,10 @@ const RecurrenceRule = Class({
         }
         if ( !end && !until && !count ) {
             count = 2;
+        }
+        if ( until && until <= start ) {
+            until = null;
+            count = 1;
         }
         if ( until && ( !end || end > until ) ) {
             end = new Date( +until + 1000 );
@@ -2934,13 +3068,17 @@ const RecurrenceRule = Class({
         }
 
         return results;
-    },
+    }
 
-    matches: function ( start, date ) {
+    matches ( start, date ) {
         return !!this.getOccurrences( start, date, new Date( +date + 1000 ) )
                      .length;
-    },
-});
+    }
+
+    static fromJSON ( recurrenceRuleJSON ) {
+        return new RecurrenceRule( recurrenceRuleJSON );
+    }
+}
 
 RecurrenceRule.dayToNumber = dayToNumber;
 RecurrenceRule.numberToDay = numberToDay;
@@ -2952,10 +3090,6 @@ RecurrenceRule.DAILY = DAILY;
 RecurrenceRule.HOURLY = HOURLY;
 RecurrenceRule.MINUTELY = MINUTELY;
 RecurrenceRule.SECONDLY = SECONDLY;
-
-RecurrenceRule.fromJSON = function ( recurrenceRuleJSON ) {
-    return new RecurrenceRule( recurrenceRuleJSON );
-};
 
 // --- Export
 
@@ -2998,16 +3132,37 @@ const numerically = function ( a, b ) {
 };
 
 const toNameAndEmail = function ( participant ) {
-    var name = participant.name.replace( /"/g, '' );
+    var name = participant.name;
     var email = participant.email;
-    return name ?
-        ( /[,;<>@()]/.test( name ) ? '"' + name + '"' : name ) +
-        ' <' + email + '>' :
-        email;
+    // Need to quote unless only using atext characters
+    // https://tools.ietf.org/html/rfc5322#section-3.2.3
+    if ( !/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]*$/.test( name ) ) {
+        name = JSON.stringify( name );
+    }
+    return name ? name + ' <' + email + '>' : email;
 };
 
 const isOwner = function ( participant ) {
     return !!participant.roles.owner;
+};
+
+const isValidPatch = function ( object, path ) {
+    var slash, key;
+    while ( true ) {
+        // Invalid patch; path does not exist
+        if ( !object ) {
+            return false;
+        }
+        slash = path.indexOf( '/' );
+        // We have all the parts of the path before the last; valid patch
+        if ( slash === -1 ) {
+            return true;
+        }
+        key = path.slice( 0, slash );
+        path = path.slice( slash + 1 );
+        key = key.replace( /~1/g, '/' ).replace( /~0/g, '~' );
+        object = object[ key ];
+    }
 };
 
 const CalendarEvent = Class({
@@ -3051,6 +3206,10 @@ const CalendarEvent = Class({
             record.set( 'accountId', propValue.get( 'accountId' ) );
             return true;
         },
+        // By default, to-one attributes are marked volatile in case the
+        // referenced record is garbage collected. We don't garbage collect
+        // calendars so we can safely cache the attribute value.
+        isVolatile: false,
     }),
 
     // --- Metadata
@@ -3100,12 +3259,17 @@ const CalendarEvent = Class({
 
     locations: attr( Object, {
         defaultValue: null,
+        willSet: function ( propValue, propKey, record ) {
+            record._removeInvalidPatches();
+            return true;
+        },
     }),
 
     location: function ( value ) {
         if ( value !== undefined ) {
             this.set( 'locations', value ? {
                 '1': {
+                    '@type': 'Location',
                     name: value
                 }
             } : null );
@@ -3127,7 +3291,7 @@ const CalendarEvent = Class({
         if ( timeZone ) {
             for ( id in locations ) {
                 location = locations[ id ];
-                if ( location.rel === 'start' ) {
+                if ( location.relativeTo === 'start' ) {
                     if ( location.timeZone ) {
                         timeZone = TimeZone.fromJSON( location.timeZone );
                     }
@@ -3145,7 +3309,7 @@ const CalendarEvent = Class({
         if ( timeZone ) {
             for ( id in locations ) {
                 location = locations[ id ];
-                if ( location.rel === 'end' ) {
+                if ( location.relativeTo === 'end' ) {
                     if ( location.timeZone ) {
                         timeZone = TimeZone.fromJSON( location.timeZone );
                     }
@@ -3160,6 +3324,10 @@ const CalendarEvent = Class({
 
     links: attr( Object, {
         defaultValue: null,
+        willSet: function ( propValue, propKey, record ) {
+            record._removeInvalidPatches();
+            return true;
+        },
     }),
 
     // ---
@@ -3174,6 +3342,7 @@ const CalendarEvent = Class({
     // --- When
 
     isAllDay: attr( Boolean, {
+        key: 'showWithoutTime',
         defaultValue: false,
     }),
 
@@ -3188,12 +3357,14 @@ const CalendarEvent = Class({
     }),
 
     duration: attr( Duration, {
-        defaultValue: Duration.ZERO,
+        defaultValue: 0,
     }),
 
     timeZone: attr( TimeZone, {
         defaultValue: null,
     }),
+
+    recurrenceId: attr( String ),
 
     recurrenceRule: attr( RecurrenceRule, {
         defaultValue: null,
@@ -3317,6 +3488,30 @@ const CalendarEvent = Class({
         }
     },
 
+    _removeInvalidPatches: function () {
+        var recurrenceOverrides = this.get( 'recurrenceOverrides' );
+        var hasChanges = false;
+        var data, recurrenceId, patches, path;
+        if ( recurrenceOverrides ) {
+            data = this.getData();
+            for ( recurrenceId in recurrenceOverrides ) {
+                patches = recurrenceOverrides[ recurrenceId ];
+                for ( path in patches ) {
+                    if ( !isValidPatch( data, path ) ) {
+                        if ( !hasChanges ) {
+                            hasChanges = true;
+                            recurrenceOverrides = clone( recurrenceOverrides );
+                        }
+                        delete recurrenceOverrides[ recurrenceId ][ path ];
+                    }
+                }
+            }
+            if ( hasChanges ) {
+                this.set( 'recurrenceOverrides', recurrenceOverrides );
+            }
+        }
+    }.queue( 'before' ),
+
     removedDates: function () {
         var recurrenceOverrides = this.get( 'recurrenceOverrides' );
         var dates = null;
@@ -3335,7 +3530,7 @@ const CalendarEvent = Class({
         return dates;
     }.property( 'recurrenceOverrides' ),
 
-    _getOccurrenceForRecurrenceId: function ( id ) {
+    getOccurrenceForRecurrenceId: function ( id ) {
         var cache = this._ocache || ( this._ocache = {} );
         return cache[ id ] || ( cache[ id ] =
             new JMAP.CalendarEventOccurrence( this, id )
@@ -3350,7 +3545,8 @@ const CalendarEvent = Class({
         var eventTimeZone = this.get( 'timeZone' );
         var recurrenceRule = this.get( 'recurrenceRule' );
         var recurrenceOverrides = this.get( 'recurrenceOverrides' );
-        var duration, earliestStart;
+        var duration = this.get( 'duration' ).valueOf();
+        var earliestStart;
         var occurrences, occurrencesSet, id, occurrence, date;
         var occurrenceIds, recurrences;
 
@@ -3366,7 +3562,6 @@ const CalendarEvent = Class({
         // To prevent pathological cases, we limit duration to
         // the frequency of the recurrence.
         if ( recurrenceRule ) {
-            duration = this.get( 'duration' ).valueOf();
             switch ( recurrenceRule.frequency ) {
             case YEARLY:
                 duration = Math.min( duration, 366 * 24 * 60 * 60 * 1000 );
@@ -3381,15 +3576,15 @@ const CalendarEvent = Class({
                 duration = Math.min( duration,       24 * 60 * 60 * 1000 );
                 break;
             }
-            earliestStart = new Date( start - duration + 1000 );
         }
+        earliestStart = new Date( start - duration + 1000 );
 
         // Precompute count, as it's expensive to do each time.
         if ( recurrenceRule && recurrenceRule.count ) {
             occurrences = this.get( 'allStartDates' );
             recurrences = occurrences.length ?
                 occurrences.map( function ( date ) {
-                    return this._getOccurrenceForRecurrenceId( date.toJSON() );
+                    return this.getOccurrenceForRecurrenceId( date.toJSON() );
                 }, this ) :
                 null;
         } else {
@@ -3435,7 +3630,7 @@ const CalendarEvent = Class({
             }
             // Get event occurrence objects
             recurrences = occurrenceIds.length ?
-                occurrenceIds.map( this._getOccurrenceForRecurrenceId, this ) :
+                occurrenceIds.map( this.getOccurrenceForRecurrenceId, this ) :
                 null;
         }
 
@@ -3536,6 +3731,10 @@ const CalendarEvent = Class({
 
     participants: attr( Object, {
         defaultValue: null,
+        willSet: function ( propValue, propKey, record ) {
+            record._removeInvalidPatches();
+            return true;
+        },
     }),
 
     participantNameAndEmails: function () {
@@ -3603,6 +3802,10 @@ const CalendarEvent = Class({
 
     alerts: attr( Object, {
         defaultValue: null,
+        willSet: function ( propValue, propKey, record ) {
+            record._removeInvalidPatches();
+            return true;
+        },
     }),
 });
 CalendarEvent.__guid__ = 'CalendarEvent';
@@ -3662,14 +3865,25 @@ const normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
     }
 };
 
+const mayPatchKey = function ( path, original, current ) {
+    if ( path.startsWith( 'recurrenceOverrides/' ) &&
+            ( original.excluded || current.excluded ) ) {
+        return false;
+    }
+    return true;
+};
+
 calendar.replaceEvents = {};
 calendar.handle( CalendarEvent, {
 
-    precedence: 2,
+    precedence: 3,
 
     fetch: 'CalendarEvent',
     refresh: 'CalendarEvent',
-    commit: 'CalendarEvent',
+
+    commit: function ( change ) {
+        this.commitType( 'CalendarEvent', change, mayPatchKey );
+    },
 
     // ---
 
@@ -3743,6 +3957,7 @@ const Obj = O.Object;
 const applyPatch = JMAP.Connection.applyPatch;
 const makePatches = JMAP.Connection.makePatches;
 const CalendarEvent = JMAP.CalendarEvent;
+const Duration = JMAP.Duration;
 
 // ---
 
@@ -3834,7 +4049,7 @@ const proxyOverrideAttibute = function ( Type, key, attrKey ) {
             }
         }
         return value;
-    }.property( 'overrides', 'original.' + key );
+    }.property( 'overrides', 'original.' + key ).doNotNotify();
 };
 
 const proxyAttribute = function ( _, key ) {
@@ -3886,7 +4101,7 @@ const CalendarEventOccurrence = Class({
             return this;
         }
         return original.getDoppelganger( store )
-                       ._getOccurrenceForRecurrenceId( this.id );
+                       .getOccurrenceForRecurrenceId( this.id );
     },
 
     clone: function ( store ) {
@@ -3960,10 +4175,10 @@ const CalendarEventOccurrence = Class({
 
     // ---
 
-    isAllDay: proxyAttribute,
+    isAllDay: proxyOverrideAttibute( Boolean, 'isAllDay' ),
 
     start: proxyOverrideAttibute( Date, 'start' ),
-    duration: proxyOverrideAttibute( JMAP.Duration, 'duration' ),
+    duration: proxyOverrideAttibute( Duration, 'duration' ),
     timeZone: proxyOverrideAttibute( TimeZone, 'timeZone' ),
     recurrenceRule: proxyAttribute,
     recurrenceOverrides: null,
@@ -4170,7 +4385,7 @@ const CALENDARS_DATA = auth.CALENDARS_DATA;
 
 // ---
 
-const TIMED_OR_ALL_DAY = 0
+const TIMED_OR_ALL_DAY = 0;
 const ONLY_ALL_DAY = 1;
 const ONLY_TIMED = -1;
 
@@ -4463,10 +4678,12 @@ mixin( calendar, {
 
         futureRelatedTo = {};
         futureRelatedTo[ uidOfFirst ] = {
+            '@type': 'Relation',
             relation: { first: true },
         };
         pastRelatedTo = pastRelatedTo ? clone( pastRelatedTo ) : {};
         pastRelatedTo[ toEditEvent.get( 'uid' ) ] = {
+            '@type': 'Relation',
             relation: { next: true },
         };
         toEditEvent.set( 'relatedTo', futureRelatedTo );
@@ -4478,20 +4695,20 @@ mixin( calendar, {
                 event.set( 'recurrenceRule', null );
             } else {
                 event.set( 'recurrenceRule',
-                    RecurrenceRule.fromJSON( O.extend(
+                    RecurrenceRule.fromJSON( Object.assign( {}, recurrenceJSON,
                     recurrenceJSON.until ? {
                         until: allStartDates[ occurrenceIndex - 1 ].toJSON()
                     } : {
                         count: occurrenceIndex
-                    }, recurrenceJSON, true ))
+                    }))
                 );
             }
         } else if ( recurrenceRule ) {
             event.set( 'recurrenceRule',
-                RecurrenceRule.fromJSON( O.extend({
+                RecurrenceRule.fromJSON( Object.assign( {}, recurrenceJSON, {
                     count: null,
                     until: new Date( start - ( 24 * 60 * 60 * 1000 ) ).toJSON()
-                }, recurrenceJSON, true ))
+                }))
             );
         }
 
@@ -4499,7 +4716,7 @@ mixin( calendar, {
         if ( !isLast && recurrenceRule ) {
             if ( recurrenceJSON.count ) {
                 toEditEvent.set( 'recurrenceRule',
-                    RecurrenceRule.fromJSON( O.extend(
+                    RecurrenceRule.fromJSON( Object.assign( {}, recurrenceJSON,
                     // If there are RDATEs beyond the final normal
                     // occurrence this may result in extra events being added
                     // by the split. Left as a known issue for now.
@@ -4509,7 +4726,7 @@ mixin( calendar, {
                     } : {
                         count: occurrenceTotal - occurrenceIndex,
                         until: null
-                    }, recurrenceJSON, true ))
+                    }))
                 );
             } else {
                 toEditEvent.set( 'recurrenceRule', recurrenceRule );
@@ -4586,10 +4803,9 @@ mixin( calendar, {
 
     fetchEventsInRange: function ( after, before, callback ) {
         var accounts = auth.get( 'accounts' );
-        var accountId, hasDataFor;
+        var accountId;
         for ( accountId in accounts ) {
-            hasDataFor = accounts[ accountId ].hasDataFor;
-            if ( hasDataFor.contains( CALENDARS_DATA ) ) {
+            if ( accounts[ accountId ].accountCapabilities[ CALENDARS_DATA ] ) {
                 this.fetchEventsInRangeForAccount( accountId, after, before );
             }
         }
@@ -4849,187 +5065,6 @@ JMAP.NonEmptyDateSource = NonEmptyDateSource;
 
 
 // -------------------------------------------------------------------------- \\
-// File: calendarEventUploads.js                                              \\
-// Module: CalendarModel                                                      \\
-// Requires: API                                                              \\
-// -------------------------------------------------------------------------- \\
-
-/*global O, JMAP */
-
-'use strict';
-
-( function ( JMAP ) {
-
-const clone = O.clone;
-const Class = O.Class;
-
-const store = JMAP.store;
-const calendar = JMAP.calendar;
-const LocalFile = JMAP.LocalFile;
-
-// ---
-
-const eventUploads = {
-
-    inProgress: {},
-    awaitingSave: {},
-
-    get: function ( event ) {
-        var id = event.get( 'storeKey' ),
-            isEdit = event.get( 'store' ).isNested,
-            files = this.inProgress[ id ];
-
-        return files ? files.filter( function ( file ) {
-            return isEdit ? file.inEdit : file.inServer;
-        }) : [];
-    },
-
-    add: function ( event, file ) {
-        var id = event.get( 'storeKey' ),
-            files = this.inProgress[ id ] || ( this.inProgress[ id ] = [] );
-        files.push( file );
-        event.computedPropertyDidChange( 'files' );
-    },
-
-    remove: function ( event, file ) {
-        var id = event.get( 'storeKey' ),
-            isEdit = event.get( 'store' ).isNested,
-            files = this.inProgress[ id ];
-
-        if ( isEdit && file.inServer ) {
-            file.inEdit = false;
-        } else {
-            files.erase( file );
-            if ( !files.length ) {
-                delete this.inProgress[ id ];
-            }
-            file.destroy();
-        }
-        event.computedPropertyDidChange( 'files' );
-    },
-
-    finishEdit: function ( event, source, destination ) {
-        var id = event.get( 'storeKey' ),
-            files = this.inProgress[ id ],
-            l, file;
-        if ( files ) {
-            l = files.length;
-            while ( l-- ) {
-                file = files[l];
-                if ( !file[ source ] ) {
-                    files.splice( l, 1 );
-                    file.destroy();
-                } else {
-                    file[ destination ] = true;
-                }
-            }
-            if ( !files.length ) {
-                delete this.inProgress[ id ];
-            }
-        }
-        delete this.awaitingSave[ id ];
-    },
-
-    save: function ( event ) {
-        var awaitingSave = this.awaitingSave[ event.get( 'storeKey' ) ],
-            i, l;
-        if ( awaitingSave ) {
-            for ( i = 0, l = awaitingSave.length; i < l; i += 1 ) {
-                this.keepFile( awaitingSave[i][0], awaitingSave[i][1] );
-            }
-        }
-        this.finishEdit( event, 'inEdit', 'inServer' );
-        event.getDoppelganger( store )
-                 .computedPropertyDidChange( 'files' );
-    },
-
-    discard: function ( event ) {
-        this.finishEdit( event, 'inServer', 'inEdit' );
-        event.getDoppelganger( calendar.editStore )
-                .computedPropertyDidChange( 'files' );
-    },
-
-    didUpload: function ( file ) {
-        var inEdit = file.inEdit,
-            inServer = file.inServer,
-            link = {
-                href: file.get( 'url' ),
-                rel: 'enclosure',
-                title: file.get( 'name' ),
-                type: file.get( 'type' ),
-                size: file.get( 'size' )
-            },
-            editEvent = file.editEvent,
-            editLinks = clone( editEvent.get( 'links' ) ) || {},
-            id, awaitingSave,
-            serverEvent, serverLinks;
-
-        if ( !inServer ) {
-            id = editEvent.get( 'storeKey' );
-            awaitingSave = this.awaitingSave;
-            ( awaitingSave[ id ] ||
-                ( awaitingSave[ id ] = [] ) ).push([
-                    file.get( 'path' ), file.get( 'name' ) ]);
-            editLinks[ link.href ] = link;
-            editEvent.set( 'links', editLinks );
-            this.remove( editEvent, file );
-        } else {
-            this.keepFile( file.get( 'path' ), file.get( 'name' ) );
-            // Save new attachment to server
-            serverEvent = editEvent.getDoppelganger( store );
-            serverLinks = clone( serverEvent.get( 'links' ) ) || {};
-            serverLinks[ link.href ] = link;
-            serverEvent.set( 'links', serverLinks );
-            // If in edit, push to edit record as well.
-            if ( inEdit ) {
-                editLinks[ link.href ] = link;
-            }
-            editEvent.set( 'links', editLinks );
-            this.remove( serverEvent, file );
-        }
-    },
-
-    didFail: function ( file ) {
-        var event = file.editEvent;
-        file.inServer = false;
-        this.remove( event, file );
-        event.getDoppelganger( store )
-             .computedPropertyDidChange( 'files' );
-    },
-
-    keepFile: function ( path, name ) {
-        // TODO: Create Storage Node in Calendar Event Attachments folder.
-    },
-};
-
-const CalendarAttachment = Class({
-
-    Extends: LocalFile,
-
-    init: function ( file, event ) {
-        this.editEvent = event;
-        this.inServer = false;
-        this.inEdit = true;
-        CalendarAttachment.parent.constructor.call( this, file );
-    },
-
-    uploadDidSucceed: function () {
-        eventUploads.didUpload( this );
-    },
-    uploadDidFail: function () {
-        eventUploads.didFail( this );
-    }
-});
-
-// --- Export
-
-JMAP.CalendarAttachment = CalendarAttachment;
-JMAP.calendar.eventUploads = eventUploads;
-
-}( JMAP ) );
-
-
-// -------------------------------------------------------------------------- \\
 // File: AmbiguousDate.js                                                     \\
 // Module: ContactsModel                                                      \\
 // -------------------------------------------------------------------------- \\
@@ -5129,9 +5164,7 @@ const Contact = Class({
 
     Extends: Record,
 
-    isFlagged: attr( Boolean, {
-        defaultValue: false,
-    }),
+    uid: attr( String ),
 
     avatar: attr( Object, {
         defaultValue: null,
@@ -5250,9 +5283,11 @@ const Contact = Class({
     }.property( 'firstName', 'lastName', 'company' ),
 
     emailName: function () {
-        var name = this.get( 'name' ).replace( /["\\]/g, '' );
-        if ( /[,;<>@()]/.test( name ) ) {
-            name = '"' + name + '"';
+        var name = this.get( 'name' );
+        // Need to quote unless only using atext characters
+        // https://tools.ietf.org/html/rfc5322#section-3.2.3
+        if ( !/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]*$/.test( name ) ) {
+            name = JSON.stringify( name );
         }
         return name;
     }.property( 'name' ),
@@ -5364,6 +5399,8 @@ const ContactGroup = Class({
             !auth.get( 'accounts' )[ accountId ].isReadOnly;
     }.property( 'accountId' ),
 
+    uid: attr( String ),
+
     name: attr( String, {
         defaultValue: '',
         validate: function ( propValue/*, propKey, record*/ ) {
@@ -5395,8 +5432,12 @@ const ContactGroup = Class({
         return index;
     }.property( 'contacts' ),
 
+    containsStoreKey: function ( storeKey ) {
+        return !!this.get( 'contactIndex' )[ storeKey ];
+    },
+
     contains: function ( contact ) {
-        return !!this.get( 'contactIndex' )[ contact.get( 'storeKey' ) ];
+        return this.containsStoreKey( contact.get( 'storeKey' ) );
     },
 
     addContact: function ( contact ) {
@@ -5464,11 +5505,15 @@ JMAP.ContactGroup = ContactGroup;
 
 ( function ( JMAP ) {
 
+const loc = O.loc;
+const mixin = O.mixin;
+const READY = O.Status.READY;
 const Obj = O.Object;
 const NestedStore = O.NestedStore;
 const StoreUndoManager = O.StoreUndoManager;
 
 const Contact = JMAP.Contact;
+const ContactGroup = JMAP.ContactGroup;
 const store = JMAP.store;
 const contacts = JMAP.contacts;
 
@@ -5482,13 +5527,13 @@ const contactsIndex = new Obj({
     buildIndex: function () {
         var index = this.index = {};
         var storeKeys = store.findAll( Contact );
-        var i, l, contact, emails, ll;
+        var i, l, storeKey, emails, ll;
         for ( i = 0, l = storeKeys.length; i < l; i += 1 ) {
-            contact = store.materialiseRecord( storeKeys[i] );
-            emails = contact.get( 'emails' );
-            ll = emails.length;
+            storeKey = storeKeys[i];
+            emails = store.getData( storeKey ).emails;
+            ll = emails ? emails.length : 0;
             while ( ll-- ) {
-                index[ emails[ll].value.toLowerCase() ] = contact;
+                index[ emails[ll].value.toLowerCase() ] = storeKey;
             }
         }
         return index;
@@ -5498,6 +5543,127 @@ const contactsIndex = new Obj({
     },
 });
 store.on( Contact, contactsIndex, 'clearIndex' );
+
+// --- VIPs
+
+const UNCACHED = 0;
+const REVALIDATE = 1;
+const CACHED = 2;
+
+const vips = new Obj({
+    _groupCacheState: UNCACHED,
+    _group: null,
+    _vipSKs: null,
+
+    recalculate: function () {
+        this._groupCacheState = REVALIDATE;
+        var group = this.getGroup( store, false );
+        var newStoreKeys = group ? group.get( 'contactIndex' ) : {};
+        var oldStoreKeys = this._vipSKs || {};
+        var changed = [];
+        var storeKey;
+        for ( storeKey in oldStoreKeys ) {
+            if ( !( storeKey in newStoreKeys ) ) {
+                changed.push( storeKey );
+            }
+        }
+        for ( storeKey in newStoreKeys ) {
+            if ( !( storeKey in oldStoreKeys ) ) {
+                changed.push( storeKey );
+            }
+        }
+        this._vipSKs = newStoreKeys;
+        if ( changed.length ) {
+            changed.forEach( storeKey => {
+                // The group may contain non-existent contacts if the contact
+                // is shared and deleted by another user. This is actually a
+                // feature as if it's undeleted (e.g. the other user made a
+                // mistake), all of the other users get it back in their VIPs
+                // and don't lose data. However, we shouldn't materialise or
+                // fetch it – if it's not in memory we know it's not on the
+                // server right now.
+                if ( store.getStatus( storeKey ) & READY ) {
+                    store.getRecordFromStoreKey( storeKey )
+                        .computedPropertyDidChange( 'isVIP' );
+
+                }
+            });
+            this.fire( 'change' );
+        }
+    },
+
+    // ---
+
+    getGroup: function ( storeForContact, createIfNotFound ) {
+        var group = this._group;
+        var groupCacheState = this._groupCacheState;
+        if ( groupCacheState === CACHED && ( group || !createIfNotFound ) ) {
+            // Nothing to do
+        } else if ( groupCacheState === REVALIDATE &&
+                group && group.is( READY ) ) {
+            this._groupCacheState = CACHED;
+        } else {
+            group = store.getOne( ContactGroup, data => data.uid === 'vips' );
+            if ( !group && createIfNotFound ) {
+                group = new ContactGroup( store )
+                    .set( 'name', loc( 'VIPS' ) )
+                    .set( 'uid', 'vips' )
+                    .saveToStore();
+            }
+            this._group = group;
+            this._groupCacheState = CACHED;
+        }
+        return group && group.getDoppelganger( storeForContact );
+    },
+
+    add: function ( contact ) {
+        var group = this.getGroup( contact.get( 'store' ), true );
+        group.addContact( contact );
+        return this;
+    },
+
+    remove: function ( contact ) {
+        var group = this.getGroup( contact.get( 'store' ), false );
+        if ( group ) {
+            group.removeContact( contact );
+        }
+        return this;
+    },
+
+    containsStoreKey: function ( store, storeKey ) {
+        var group = this.getGroup( store, false );
+        if ( group ) {
+            return group.get( 'contactIndex' )[ storeKey ] || false;
+        }
+        return false;
+    },
+
+    contains: function ( contact ) {
+        return this.containsStoreKey(
+            contact.get( 'store' ),
+            contact.get( 'storeKey' )
+        );
+    },
+});
+store.on( ContactGroup, vips, 'recalculate' );
+
+mixin( Contact.prototype, {
+    isVIP: function ( isVIP ) {
+        if ( !this.get( 'storeKey' ) ) {
+            return false;
+        }
+        if ( isVIP !== undefined ) {
+            if ( isVIP ) {
+                vips.add( this );
+            } else {
+                vips.remove( this );
+            }
+        } else {
+            isVIP = vips.contains( this );
+        }
+        return isVIP;
+    }.property(),
+});
 
 // ---
 
@@ -5511,9 +5677,12 @@ Object.assign( contacts, {
         maxUndoCount: 10,
     }),
 
+    vips: vips,
+
     getContactFromEmail: function ( email ) {
         var index = contactsIndex.getIndex();
-        return index[ email.toLowerCase() ] || null;
+        var storeKey = index[ email.toLowerCase() ];
+        return storeKey ? store.getRecordFromStoreKey( storeKey ) : null;
     },
 });
 
@@ -5574,8 +5743,10 @@ const Identity = Class({
         var name = this.get( 'name' ).replace( /["\\]/g, '' );
         var email = this.get( 'email' );
         if ( name ) {
-            if ( /[,;<>@()]/.test( name ) ) {
-                name = '"' + name + '"';
+            // Need to quote unless only using atext characters
+            // https://tools.ietf.org/html/rfc5322#section-3.2.3
+            if ( !/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]*$/.test( name ) ) {
+                name = JSON.stringify( name );
             }
             return name + ' <' + email + '>';
         }
@@ -5713,6 +5884,10 @@ const Mailbox = Class({
 
     // ---
 
+    isSubscribed: attr( Boolean, {
+        defaultValue: true,
+    }),
+
     myRights: attr( Object, {
         defaultValue: {
             mayReadItems: true,
@@ -5728,6 +5903,11 @@ const Mailbox = Class({
         },
         noSync: true
     }),
+
+    mayAddItems: function () {
+        return this.get( 'myRights' ).mayAddItems &&
+            this.get( 'role' ) !== 'snoozed';
+    }.property( 'role', 'myRights' ),
 
     // ---
 
@@ -5843,6 +6023,12 @@ Mailbox.dataGroup = 'urn:ietf:params:jmap:mail';
 
 Mailbox.prototype.parent.Type = Mailbox;
 
+Mailbox.noChildRole = {
+    snoozed: true,
+    junk: true,
+    trash: true,
+};
+
 // ---
 
 connection.ignoreCountsForMailboxIds = null;
@@ -5862,12 +6048,7 @@ connection.handle( Mailbox, {
 
     precedence: 0,
 
-    fetch: function ( accountId, ids ) {
-        this.callMethod( 'Mailbox/get', {
-            accountId: accountId,
-            ids: ids || null,
-        });
-    },
+    fetch: 'Mailbox',
 
     refresh: function ( accountId, ids, state ) {
         var get = 'Mailbox/get';
@@ -5912,8 +6093,8 @@ connection.handle( Mailbox, {
     },
 
     commit: function ( change ) {
-        var args = makeSetRequest( change, true );
-        args.onDestroyRemoveMessages = true;
+        var args = makeSetRequest( change, false );
+        args.onDestroyRemoveEmails = true;
         this.callMethod( 'Mailbox/set', args );
     },
 
@@ -5978,7 +6159,6 @@ JMAP.Mailbox = Mailbox;
 
 const isEqual = O.isEqual;
 const clone = O.clone;
-const guid = O.guid;
 const i18n = O.i18n;
 const Class = O.Class;
 const Status = O.Status;
@@ -5989,11 +6169,17 @@ const NEW = Status.NEW;
 const Record = O.Record;
 const attr = Record.attr;
 
-const applyPatch = JMAP.Connection.applyPatch;
 const Mailbox = JMAP.Mailbox;
 const mail = JMAP.mail;
 
 // ---
+
+const bodyType = {
+    'text/plain': 'text',
+    'text/enriched': 'text',
+    'text/richtext': 'text',
+    'text/html': 'html',
+};
 
 const parseStructure = function  ( parts, multipartType, inAlternative,
         htmlParts, textParts, fileParts ) {
@@ -6011,7 +6197,7 @@ const parseStructure = function  ( parts, multipartType, inAlternative,
         var isImage = false;
         var isInline, subMultiType;
 
-        if ( type === 'text/plain' || type === 'text/html' ) {
+        if ( bodyType[ type ] ) {
             isTextOrHTML = true;
         } else if ( type.startsWith( 'multipart/' ) ) {
             isMultipart = true;
@@ -6038,11 +6224,11 @@ const parseStructure = function  ( parts, multipartType, inAlternative,
                 htmlParts, textParts, fileParts );
         } else if ( isInline ) {
             if ( multipartType === 'alternative' ) {
-                switch ( type ) {
-                case 'text/plain':
+                switch ( bodyType[ type ] ) {
+                case 'text':
                     textParts.push( part );
                     break;
-                case 'text/html':
+                case 'html':
                     htmlParts.push( part );
                     break;
                 default:
@@ -6051,11 +6237,13 @@ const parseStructure = function  ( parts, multipartType, inAlternative,
                 }
                 continue;
             } else if ( inAlternative ) {
-                if ( type === 'text/plain' ) {
+                switch ( bodyType[ type ] ) {
+                case 'text':
                     htmlParts = null;
-                }
-                if ( type === 'text/html' ) {
+                    break;
+                case 'html':
                     textParts = null;
+                    break;
                 }
             }
             if ( textParts ) {
@@ -6152,8 +6340,8 @@ const Message = Class({
 
     getThreadIfReady: function () {
         var store = this.get( 'store' );
-        var threadSK = this.getData().threadId;
-        if ( store.getStatus( threadSK ) & READY ) {
+        var data = this.getData();
+        if ( data && ( store.getStatus( data.threadId ) & READY ) ) {
             return this.get( 'thread' );
         }
         return null;
@@ -6234,16 +6422,6 @@ const Message = Class({
 
     // ---
 
-    fullDate: function () {
-        var date = this.get( 'receivedAt' );
-        return i18n.date( date, 'fullDateAndTime' );
-    }.property( 'receivedAt' ),
-
-    relativeDate: function () {
-        var date = this.get( 'receivedAt' );
-        return date.relativeTo( null, true, true );
-    }.property().nocache(),
-
     formattedSize: function () {
         return i18n.fileSize( this.get( 'size' ), 1 );
     }.property( 'size' ),
@@ -6284,7 +6462,10 @@ const Message = Class({
     }),
     listPost: function () {
         var urls = this.get( '_listPost' );
-        return urls && urls[0] || '';
+        var mailto = urls && urls.find( function ( url ) {
+            return url.startsWith( 'mailto:' );
+        });
+        return mailto ? mailto.slice( 7 ) : '';
     }.property( '_listPost' ),
 
     sender: attr( Array ),
@@ -6324,7 +6505,7 @@ const Message = Class({
 
     hasTextBody: function () {
         return this.get( 'bodyParts' ).text.some( function ( part ) {
-            return part.type === 'text/plain';
+            return bodyType[ part.type ] === 'text';
         });
     }.property( 'bodyParts' ),
 
@@ -6409,6 +6590,10 @@ Message.bodyProperties = [
     'cid',
     'location',
 ];
+Message.mutableProperties = [
+    'mailboxIds',
+    'keywords',
+];
 Message.Details = MessageDetails;
 Message.Thread = MessageThread;
 Message.BodyValues = MessageBodyValues;
@@ -6492,10 +6677,7 @@ mail.handle( Message, {
             this.callMethod( 'Email/get', {
                 accountId: accountId,
                 ids: ids,
-                properties: [
-                    'mailboxIds',
-                    'keywords',
-                ]
+                properties: Message.mutableProperties,
             });
         } else {
             this.callMethod( 'Email/changes', {
@@ -6527,8 +6709,9 @@ mail.handle( Message, {
 
         if ( !message || message.receivedAt ) {
             this.didFetch( Message, args, false );
-        } else if ( message.mailboxIds ) {
-            // keywords/mailboxIds (OBSOLETE message refreshed)
+        } else if ( message.mailboxIds || message.threadId ) {
+            // Mutable props: keywords/mailboxIds (OBSOLETE message refreshed)
+            // Or threadId/blobId/size from fetch after alreadyExists error
             updates = list.reduce( function ( updates, message ) {
                 updates[ message.id ] = message;
                 return updates;
@@ -6576,6 +6759,37 @@ mail.handle( Message, {
     },
 
     'Email/copy': function ( args, _, reqArgs ) {
+        var notCreated = args.notCreated;
+        var alreadyExists = notCreated ?
+            Object.keys( notCreated )
+                .filter( storeKey =>
+                    notCreated[ storeKey ].type === 'alreadyExists' ) :
+            null;
+        if ( alreadyExists && alreadyExists.length ) {
+            var create = reqArgs.create;
+            this.callMethod( 'Email/set', {
+                accountId: reqArgs.accountId,
+                update: Object.zip(
+                    alreadyExists.map( storeKey =>
+                        notCreated[ storeKey ].existingId ),
+                    alreadyExists.map( storeKey => {
+                        var patch = {};
+                        var mailboxIds = create[ storeKey ].mailboxIds;
+                        for ( var id in mailboxIds ) {
+                            patch[ 'mailboxIds/' + id ] = true;
+                        }
+                        return patch;
+                    })
+                ),
+            });
+            if ( reqArgs.onSuccessDestroyOriginal ) {
+                this.callMethod( 'Email/set', {
+                    accountId: reqArgs.fromAccountId,
+                    destroy: alreadyExists.map(
+                        storeKey => create[ storeKey ].id ),
+                });
+            }
+        }
         this.didCopy( Message, args, reqArgs );
     },
 
@@ -6596,72 +6810,7 @@ mail.handle( Message, {
             Message, null, null, store.getTypeState( accountId, Message ), '' );
     },
 
-    'Email/set': function ( args, reqName, reqArgs ) {
-        // If we did a set implicitly on successful send, the change is not in
-        // the store, so don't call didCommit. Instead we tell the store the
-        // updates the server has made.
-        var store = this.get( 'store' );
-        var accountId = reqArgs.accountId;
-        if ( reqName === 'EmailSubmission/set' ) {
-            var create = reqArgs.create;
-            var onSuccessUpdateEmail = reqArgs.onSuccessUpdateEmail;
-            var onSuccessDestroyEmail = reqArgs.onSuccessDestroyEmail;
-            var updates = {};
-            var destroyed = [];
-            var emailId, storeKey, path, id, update, data;
-            for ( id in create ) {
-                emailId = create[ id ].emailId;
-                if ( emailId.charAt( 0 ) === '#' ) {
-                    storeKey = emailId.slice( 1 );
-                    emailId = store.getIdFromStoreKey( storeKey );
-                } else {
-                    storeKey = store.getStoreKey( accountId, Message, emailId );
-                }
-                id = '#' + id;
-                if ( onSuccessUpdateEmail &&
-                        ( update = onSuccessUpdateEmail[ id ] )) {
-                    // If we've made further changes since this commit, bail
-                    // out. This is just an optimisation, and we'll fetch the
-                    // real changes from the source instead automatically if
-                    // we don't do it.
-                    if ( store.getStatus( storeKey ) !== READY ) {
-                        updates = null;
-                        break;
-                    }
-                    data = store.getData( storeKey );
-                    data = {
-                        keywords: clone( data.keywords ),
-                        mailboxIds: Object.keys( data.mailboxIds ).reduce(
-                            function ( mailboxIds, storeKey ) {
-                                mailboxIds[
-                                    store.getIdFromStoreKey( storeKey )
-                                ] = true;
-                                return mailboxIds;
-                            },
-                            {}
-                        ),
-                    };
-                    for ( path in update ) {
-                        applyPatch( data, path, update[ path ] );
-                    }
-                    updates[ emailId ] = data;
-                } else if ( onSuccessDestroyEmail &&
-                        onSuccessDestroyEmail.contains( id ) ) {
-                    destroyed.push( emailId );
-                }
-            }
-            if ( updates ) {
-                store.sourceDidFetchUpdates( accountId,
-                    Message, [], destroyed, args.oldState, args.newState );
-                store.sourceDidFetchPartialRecords( accountId,
-                    Message, updates );
-            }
-            // And we invalidate all MessageList queries, as some may be
-            // invalid and we don't know which ones.
-            this.get( 'store' )
-                .fire( guid( Message ) + ':server:' + accountId );
-            return;
-        }
+    'Email/set': function ( args ) {
         this.didCommit( Message, args );
     },
 });
@@ -6687,7 +6836,9 @@ JMAP.Message = Message;
 
 const meta = O.meta;
 const Class = O.Class;
-const ObservableArray = O.ObservableArray;
+const Obj = O.Object;
+const Enumerable = O.Enumerable;
+const ObservableRange = O.ObservableRange;
 const Record = O.Record;
 const READY = O.Status.READY;
 
@@ -6753,6 +6904,70 @@ const size = function( property ) {
     }.property( 'messages' ).nocache();
 };
 
+// ---
+
+const MessageArray = Class({
+
+    Extends: Obj,
+
+    Mixin: [ ObservableRange, Enumerable ],
+
+    init ( store, storeKeys ) {
+        this._store = store;
+        this._storeKeys = storeKeys;
+
+        MessageArray.parent.constructor.call( this );
+    },
+
+    length: function () {
+        return this._storeKeys.length;
+    }.property().nocache(),
+
+    getObjectAt ( index ) {
+        var storeKey = this._storeKeys[ index ];
+        if ( storeKey ) {
+            return this._store.materialiseRecord( storeKey );
+        }
+    },
+
+    update: function ( storeKeys ) {
+        var oldStoreKeys = this._storeKeys;
+        var oldLength = oldStoreKeys.length;
+        var newLength = storeKeys.length;
+        var start = 0;
+        var end = newLength;
+
+        this._storeKeys = storeKeys;
+
+        while ( ( start < newLength ) &&
+                ( storeKeys[ start ] === oldStoreKeys[ start ] ) ) {
+            start += 1;
+        }
+        if ( newLength === oldLength ) {
+            var last = end - 1;
+            while ( ( end > start ) &&
+                    ( storeKeys[ last ] === oldStoreKeys[ last ] ) ) {
+                end = last;
+                last -= 1;
+            }
+        } else {
+            end = Math.max( oldLength, newLength );
+            this.propertyDidChange( 'length', oldLength, newLength );
+        }
+
+        if ( start !== end ) {
+            this.rangeDidChange( start, end );
+        }
+        return this;
+    },
+});
+
+const toStoreKey = function ( record ) {
+    return record.get( 'storeKey' );
+};
+
+// ---
+
 const Thread = Class({
 
     Extends: Record,
@@ -6764,29 +6979,31 @@ const Thread = Class({
     }),
 
     messagesInNotTrash: function () {
-        return new ObservableArray(
-            this.get( 'messages' ).filter( isInNotTrash )
+        return new MessageArray(
+            this.get( 'store' ),
+            this.get( 'messages' ).filter( isInNotTrash ).map( toStoreKey )
         );
     }.property(),
 
     messagesInTrash: function () {
-        return new ObservableArray(
-            this.get( 'messages' ).filter( isInTrash )
+        return new MessageArray(
+            this.get( 'store' ),
+            this.get( 'messages' ).filter( isInTrash ).map( toStoreKey )
          );
     }.property(),
 
-    _setMessagesArrayContent: function () {
+    _setSubsetMessagesContent: function () {
         var cache = meta( this ).cache;
         var messagesInNotTrash = cache.messagesInNotTrash;
         var messagesInTrash = cache.messagesInTrash;
         if ( messagesInNotTrash ) {
-            messagesInNotTrash.set( '[]',
-                this.get( 'messages' ).filter( isInNotTrash )
+            messagesInNotTrash.update(
+                this.get( 'messages' ).filter( isInNotTrash ).map( toStoreKey )
             );
         }
         if ( messagesInTrash ) {
-            messagesInTrash.set( '[]',
-                this.get( 'messages' ).filter( isInTrash )
+            messagesInTrash.update(
+                this.get( 'messages' ).filter( isInTrash ).map( toStoreKey )
             );
         }
     }.observes( 'messages' ),
@@ -6800,7 +7017,6 @@ const Thread = Class({
             }, true );
     },
 
-    // Note: API Mail mutates this value; do not cache.
     mailboxCounts: function () {
         var counts = {};
         this.get( 'messages' ).forEach( function ( message ) {
@@ -6810,7 +7026,7 @@ const Thread = Class({
             });
         });
         return counts;
-    }.property( 'messages' ).nocache(),
+    }.property( 'messages' ),
 
     // ---
 
@@ -6968,6 +7184,7 @@ const isEqual = O.isEqual;
 const Status = O.Status;
 const EMPTY = Status.EMPTY;
 const READY = Status.READY;
+const NEW = Status.NEW;
 const OBSOLETE = Status.OBSOLETE;
 const LOADING = Status.LOADING;
 
@@ -7059,7 +7276,7 @@ const MessageList = Class({
         req.records = req.records.filter( function ( req ) {
             var i = req.start;
             var l = i + req.count;
-            var message, thread, messageSK;
+            var message, thread, messageSK, status;
 
             if ( length ) {
                 l = Math.min( l, length );
@@ -7077,7 +7294,13 @@ const MessageList = Class({
                 // Fetch the Message objects (if not already fetched).
                 // If already fetched, fetch the updates
                 if ( collapseThreads ) {
-                    if ( store.getStatus( messageSK ) & READY ) {
+                    status = store.getStatus( messageSK );
+                    // If it's a draft pre-emptively added to the message
+                    // list, ignore it
+                    if ( status & NEW ) {
+                        continue;
+                    }
+                    if ( status & READY ) {
                         thread = store.getRecordFromStoreKey( messageSK )
                                       .get( 'thread' );
                         // If already fetched, fetch the updates
@@ -7266,7 +7489,7 @@ JMAP.mail.handle( MessageList, {
     // ---
 
     'Email/query': function ( args, _, reqArgs ) {
-        const query = this.get( 'store' ).getQuery( getId( args ) );
+        const query = this.get( 'store' ).getQuery( getId( reqArgs ) );
         var total, hasTotal, numIds;
         if ( query ) {
             if ( args.total === undefined ) {
@@ -7308,9 +7531,10 @@ JMAP.mail.handle( MessageList, {
         }
     },
 
-    'Email/queryChanges': function ( args ) {
-        const query = this.get( 'store' ).getQuery( getId( args ) );
+    'Email/queryChanges': function ( args, _, reqArgs ) {
+        const query = this.get( 'store' ).getQuery( getId( reqArgs ) );
         if ( query ) {
+            args.upToId = reqArgs.upToId;
             query.sourceDidFetchUpdate( args );
         }
     },
@@ -7339,9 +7563,9 @@ JMAP.mail.handle( MessageList, {
 
     // ---
 
-    'SearchSnippet/get': function ( args ) {
+    'SearchSnippet/get': function ( args, _, reqArgs ) {
         var store = this.get( 'store' );
-        var where = args.filter;
+        var where = reqArgs.filter;
         var list = args.list;
         var accountId = args.accountId;
         store.getAllQueries().forEach( function ( query ) {
@@ -7380,15 +7604,19 @@ JMAP.MessageList = MessageList;
 
 ( function ( JMAP ) {
 
+const clone = O.clone;
+const guid = O.guid;
 const Class = O.Class;
 const Record = O.Record;
 const attr = Record.attr;
+const READY = O.Status.READY;
 
 const mail = JMAP.mail;
 const Identity = JMAP.Identity;
 const Message = JMAP.Message;
 const Thread = JMAP.Thread;
 const Mailbox = JMAP.Mailbox;
+const applyPatch = JMAP.Connection.applyPatch;
 const makeSetRequest = JMAP.Connection.makeSetRequest;
 
 // ---
@@ -7422,10 +7650,7 @@ const MessageSubmission = Class({
         noSync: true,
     }),
 
-    undoStatus: attr( String, {
-        noSync: true,
-        defaultValue: 'pending',
-    }),
+    undoStatus: attr( String ),
 
     deliveryStatus: attr( Object, {
         noSync: true,
@@ -7502,17 +7727,8 @@ mail.handle( MessageSubmission, {
         var onSuccessDestroyEmail = [];
         var create = args.create;
         var update = args.update;
-        var id, submission;
-
         var accountId = change.accountId;
-        var drafts = mail.getMailboxForRole( accountId, 'drafts' );
-        var sent = mail.getMailboxForRole( accountId, 'sent' );
-        var updateMessage = {};
-        if ( drafts && sent ) {
-            updateMessage[ 'mailboxIds/' + sent.get( 'id' ) ] = null;
-            updateMessage[ 'mailboxIds/' + drafts.get( 'id' ) ] = true;
-        }
-        updateMessage[ 'keywords/$draft' ] = true;
+        var id, submission;
 
         // On create move from drafts, remove $draft keyword
         for ( id in create ) {
@@ -7530,10 +7746,14 @@ mail.handle( MessageSubmission, {
         // On unsend, move back to drafts, set $draft keyword.
         for ( id in update ) {
             submission = update[ id ];
-            if ( submission.undoStatus === 'canceled' ) {
+            if ( submission.onSuccess === null ) {
+                args.onSuccessDestroyEmail = onSuccessDestroyEmail;
+                onSuccessDestroyEmail.push( id );
+            } else if ( submission.onSuccess ) {
                 args.onSuccessUpdateEmail = onSuccessUpdateEmail;
-                onSuccessUpdateEmail[ submission.id ] = updateMessage;
+                onSuccessUpdateEmail[ id ] = submission.onSuccess;
             }
+            delete submission.onSuccess;
         }
 
         this.callMethod( 'EmailSubmission/set', args );
@@ -7596,6 +7816,124 @@ mail.handle( MessageSubmission, {
         // 2. Check if any of these are sending the same message
         // 3. If not retry. If yes, destroy?
     },
+
+    // ---
+
+    'Email/set': function ( args, reqName, reqArgs ) {
+        // If we did a set implicitly on successful send, the change is not in
+        // the store, so don't call didCommit. Instead we tell the store the
+        // updates the server has made.
+        var store = this.get( 'store' );
+        var accountId = reqArgs.accountId;
+        if ( reqName === 'EmailSubmission/set' ) {
+            var create = reqArgs.create;
+            var update = reqArgs.update;
+            var changes = Object.keys( create || {} ).reduce(
+                ( changes, creationId ) => {
+                    changes[ '#' + creationId ] = create[ creationId ];
+                    return changes;
+                },
+                update ? clone( update ) : {}
+            );
+            var onSuccessUpdateEmail = reqArgs.onSuccessUpdateEmail;
+            var onSuccessDestroyEmail = reqArgs.onSuccessDestroyEmail;
+            var updates = {};
+            var destroyed = [];
+            var emailId, storeKey, path, id, patch, data;
+            for ( id in changes ) {
+                emailId = changes[ id ].emailId;
+                if ( emailId && emailId.charAt( 0 ) === '#' ) {
+                    storeKey = emailId.slice( 1 );
+                    emailId = store.getIdFromStoreKey( storeKey );
+                } else {
+                    if ( !emailId ) {
+                        emailId = store
+                            .getRecord( accountId, MessageSubmission, id )
+                            .getFromPath( 'message.id' );
+                    }
+                    storeKey = store.getStoreKey( accountId, Message, emailId );
+                }
+                if ( onSuccessUpdateEmail &&
+                        ( patch = onSuccessUpdateEmail[ id ] )) {
+                    // If we've made further changes since this commit, bail
+                    // out. This is just an optimisation, and we'll fetch the
+                    // real changes from the source instead automatically if
+                    // we don't do it.
+                    if ( store.getStatus( storeKey ) !== READY ) {
+                        updates = null;
+                        break;
+                    }
+                    data = store.getData( storeKey );
+                    data = {
+                        keywords: clone( data.keywords ),
+                        mailboxIds: Object.keys( data.mailboxIds ).reduce(
+                            function ( mailboxIds, storeKey ) {
+                                mailboxIds[
+                                    store.getIdFromStoreKey( storeKey )
+                                ] = true;
+                                return mailboxIds;
+                            },
+                            {}
+                        ),
+                    };
+                    for ( path in patch ) {
+                        applyPatch( data, path, patch[ path ] );
+                    }
+                    updates[ emailId ] = data;
+                } else if ( onSuccessDestroyEmail &&
+                        onSuccessDestroyEmail.contains( id ) ) {
+                    destroyed.push( emailId );
+                }
+            }
+            if ( updates ) {
+                store.sourceDidFetchUpdates( accountId,
+                    Message, [], destroyed, args.oldState, args.newState );
+                store.sourceDidFetchPartialRecords( accountId,
+                    Message, updates );
+            }
+            // And we invalidate all MessageList queries, as some may be
+            // invalid and we don't know which ones.
+            this.get( 'store' )
+                .fire( guid( Message ) + ':server:' + accountId );
+            return;
+        } else {
+            var notCreated = args.notCreated;
+            if ( notCreated ) {
+                // If we get an alreadyExists error, just pretend it was
+                // success as long as we don't already have the record loaded.
+                // The only thing that could *potentially* differ is the
+                // keywords/mailboxes. However, in practice, almost certainly
+                // what's happened is that we had a network loss and have
+                // retried the create, and the original request actually
+                // succeeded; we just never got the response.
+                var created = args.created || ( args.created = {} );
+                var existing = [];
+                Object.keys( notCreated ).forEach( storeKey => {
+                    var error = notCreated[ storeKey ];
+                    var existingId = error.existingId;
+                    if ( error.type === 'alreadyExists' &&!(
+                            store.getRecordStatus(
+                                accountId, Message, existingId ) & READY
+                            )) {
+                        delete notCreated[ storeKey ];
+                        created[ storeKey ] = {
+                            id: existingId,
+                        };
+                        existing.push( existingId );
+                    }
+                });
+                // We need to fetch the other server-set properties.
+                if ( existing.length ) {
+                    this.callMethod( 'Email/get', {
+                        accountId: accountId,
+                        ids: existing,
+                        properties: [ 'blobId', 'threadId', 'size' ],
+                    });
+                }
+            }
+        }
+        this.didCommit( Message, args );
+    },
 });
 
 // --- Export
@@ -7612,6 +7950,8 @@ JMAP.MessageSubmission = MessageSubmission;
 // -------------------------------------------------------------------------- \\
 
 /*global O, JMAP */
+
+'use strict';
 
 ( function ( JMAP ) {
 
@@ -7663,14 +8003,14 @@ const VacationResponse = Class({
     }.property( 'fromDate', 'toDate' ),
 });
 VacationResponse.__guid__ = 'VacationResponse';
-VacationResponse.dataGroup = 'mail';
+VacationResponse.dataGroup = 'urn:ietf:params:jmap:vacationresponse';
 
 mail.handle( VacationResponse, {
 
     precedence: 3,
 
-    fetch: 'VacationResponse/get',
-    commit: 'VacationResponse/set',
+    fetch: 'VacationResponse',
+    commit: 'VacationResponse',
 
     // ---
 
@@ -7703,6 +8043,7 @@ JMAP.VacationResponse = VacationResponse;
 ( function ( JMAP ) {
 
 const clone = O.clone;
+const isEqual = O.isEqual;
 const READY = O.Status.READY;
 
 const auth = JMAP.auth;
@@ -7713,6 +8054,7 @@ const Thread = JMAP.Thread;
 const Message = JMAP.Message;
 const MessageList = JMAP.MessageList;
 const MessageSubmission = JMAP.MessageSubmission;
+const SnoozeDetails = JMAP.SnoozeDetails;
 
 // --- Preemptive mailbox count updates ---
 
@@ -7771,7 +8113,7 @@ const updateMailboxCounts = function ( mailboxDeltas ) {
 
 // --- Preemptive query updates ---
 
-const isSortedOnKeyword = function ( sort, keyword ) {
+const isSortedOnKeyword = function ( keyword, sort ) {
     for ( var i = 0, l = sort.length; i < l; i += 1 ) {
         if ( sort[i].keyword === keyword ) {
             return true;
@@ -7780,13 +8122,7 @@ const isSortedOnKeyword = function ( sort, keyword ) {
     return false;
 };
 
-const isSortedOnUnread = function ( sort ) {
-    return isSortedOnKeyword( sort, '$seen' );
-};
-
-const isSortedOnFlagged = function ( sort ) {
-    return isSortedOnKeyword( sort, '$flagged' );
-};
+const isSortedOnUnread = isSortedOnKeyword.bind( null, '$seen' );
 
 const filterHasKeyword = function ( filter, keyword ) {
     return (
@@ -7805,11 +8141,13 @@ const isFilteredOnUnread = function ( filter ) {
     return filterHasKeyword( filter, '$seen' );
 };
 
-const isFilteredOnFlagged = function ( filter ) {
+const isFilteredOnKeyword = function ( keyword, filter ) {
     if ( filter.operator ) {
-        return filter.conditions.some( isFilteredOnFlagged );
+        return filter.conditions.some(
+            isFilteredOnKeyword.bind( null, keyword )
+        );
     }
-    return filterHasKeyword( filter, '$flagged' );
+    return filterHasKeyword( filter, keyword );
 };
 
 const isFilteredOnMailboxes = function ( filter ) {
@@ -7841,6 +8179,11 @@ const returnFalse = function () {
 
 // ---
 
+const getInboxId = function ( accountId ) {
+    const inbox = getMailboxForRole( accountId, 'inbox' );
+    return inbox ? inbox.get( 'id' ) : '';
+};
+
 const reOrFwd = /^(?:(?:re|fwd):\s*)+/;
 const comparators = {
     id: function ( a, b ) {
@@ -7851,6 +8194,32 @@ const comparators = {
     },
     receivedAt: function ( a, b ) {
         return a.get( 'receivedAt' ) - b.get( 'receivedAt' );
+    },
+    snoozedUntil: function ( a, b, field ) {
+        var aSnoozed = a.get( 'snoozed' );
+        var bSnoozed = b.get( 'snoozed' );
+        var mailboxId = field.mailboxId;
+        return (
+            aSnoozed && ( !mailboxId || (
+                a.isIn( 'snoozed' ) ||
+                mailboxId === (
+                    aSnoozed.moveToMailboxId ||
+                    getInboxId( a.get( 'accountId' ) )
+                )
+            )) ?
+                aSnoozed.until :
+                a.get( 'receivedAt' )
+        ) - (
+            bSnoozed && ( !mailboxId || (
+                b.isIn( 'snoozed' ) ||
+                mailboxId === (
+                    bSnoozed.moveToMailboxId ||
+                    getInboxId( b.get( 'accountId' ) )
+                )
+            )) ?
+                bSnoozed.until :
+                b.get( 'receivedAt' )
+        );
     },
     size: function ( a, b ) {
         return a.get( 'size' ) - b.get( 'size' );
@@ -7892,8 +8261,10 @@ const comparators = {
         };
         var aThread = a.get( 'thread' );
         var bThread = b.get( 'thread' );
-        var aHasKeyword = aThread.get( 'messages' ).some( hasKeyword );
-        var bHasKeyword = bThread.get( 'messages' ).some( hasKeyword );
+        var aMessages = aThread ? aThread.get( 'messages' ) : [ a ];
+        var bMessages = bThread ? bThread.get( 'messages' ) : [ b ];
+        var aHasKeyword = aMessages.some( hasKeyword );
+        var bHasKeyword = bMessages.some( hasKeyword );
 
         return aHasKeyword === bHasKeyword ? 0 :
             aHasKeyword ? 1 : -1;
@@ -7941,16 +8312,19 @@ const compareToMessage = function ( fields, aData, bData ) {
 const calculatePreemptiveAdd = function ( query, addedMessages, replaced ) {
     var storeKeys = query.getStoreKeys();
     var sort = query.get( 'sort' );
+    var collapseThreads = query.get( 'collapseThreads' );
     var comparator = compareToStoreKey.bind( null, sort );
-    var threadSKToIndex = {};
+    var messageSKToIndex = {};
     var indexDelta = 0;
-    var added, i, l, messageSK, threadSK, seenThreadSk;
+    var added, i, l, messageSK, threadSK, seenThreadSk, threadSKToIndex;
 
     added = addedMessages.reduce( function ( added, message ) {
         added.push({
             message: message,
             messageSK: message.get( 'storeKey' ),
-            threadSK: message.getFromPath( 'thread.storeKey' ),
+            threadSK: collapseThreads ?
+                message.getFromPath( 'thread.storeKey' ) :
+                null,
             index: storeKeys.binarySearch( message, comparator ),
         });
         return added;
@@ -7961,7 +8335,7 @@ const calculatePreemptiveAdd = function ( query, addedMessages, replaced ) {
         return added;
     }
 
-    if ( query.get( 'collapseThreads' ) ) {
+    if ( collapseThreads ) {
         seenThreadSk = {};
         added = added.filter( function ( item ) {
             var threadSK = item.threadSK;
@@ -7971,23 +8345,28 @@ const calculatePreemptiveAdd = function ( query, addedMessages, replaced ) {
             seenThreadSk[ threadSK ] = true;
             return true;
         });
-        l = Math.min( added.last().index, storeKeys.length );
-        for ( i = 0; i < l; i += 1 ) {
-            messageSK = storeKeys[i];
-            if ( messageSK && ( store.getStatus( messageSK ) & READY ) ) {
-                threadSK = store.getRecordFromStoreKey( messageSK )
-                                .getData()
-                                .threadId;
+        threadSKToIndex = {};
+    }
+    l = storeKeys.length;
+    for ( i = 0; i < l; i += 1 ) {
+        messageSK = storeKeys[i];
+        if ( messageSK ) {
+            if ( collapseThreads && ( store.getStatus( messageSK ) & READY ) ) {
+                threadSK = store.getData( messageSK ).threadId;
                 threadSKToIndex[ threadSK ] = i;
             }
+            messageSKToIndex[ messageSK ] = i;
         }
     }
 
     return added.reduce( function ( result, item ) {
-        var threadIndex = item.threadSK && threadSKToIndex[ item.threadSK ];
-        if ( threadIndex !== undefined ) {
-            if ( threadIndex >= item.index ) {
-                replaced.push( storeKeys[ threadIndex ] );
+        var currentExemplarIndex = messageSKToIndex[ item.messageSK ];
+        if ( item.threadSK && currentExemplarIndex === undefined ) {
+            currentExemplarIndex = threadSKToIndex[ item.threadSK ];
+        }
+        if ( currentExemplarIndex !== undefined ) {
+            if ( currentExemplarIndex >= item.index ) {
+                replaced.push( storeKeys[ currentExemplarIndex ] );
             } else {
                 return result;
             }
@@ -8043,7 +8422,11 @@ const updateQueries = function ( filterTest, sortTest, deltas ) {
 
 const identity = function ( v ) { return v; };
 
-const addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messageSK ) {
+const isSnoozedMailbox = function ( mailbox ) {
+    return !!mailbox && mailbox.get( 'role' ) === 'snoozed';
+};
+
+const addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, messageSK, wasSnoozed ) {
     var l = willRemove ? willRemove.length : 1;
     var i, addMailbox, removeMailbox, key, data;
     for ( i = 0; i < l; i += 1 ) {
@@ -8056,14 +8439,43 @@ const addMoveInverse = function ( inverse, undoManager, willAdd, willRemove, mes
             data = {
                 method: 'move',
                 messageSKs: [],
-                args: [ null, removeMailbox, addMailbox, true ],
+                args: [ null, removeMailbox, addMailbox, true, {} ],
             };
             inverse[ key ] = data;
             undoManager.pushUndoData( data );
         }
         data.messageSKs.push( messageSK );
+        if ( wasSnoozed ) {
+            data.args[4][ messageSK ] = wasSnoozed;
+        }
         willAdd = null;
     }
+};
+
+// Sets snooze details and returns old details if set and different to new.
+// snooze can be a SnoozeDetails object or a map of store key -> SnoozeDetails.
+const setSnoozed = function ( message, newSnoozed ) {
+    var oldSnoozed = message.get( 'snoozed' );
+    if ( !isEqual( oldSnoozed, newSnoozed ) ) {
+        message.set( 'snoozed', newSnoozed );
+        return oldSnoozed;
+    }
+    return null;
+};
+
+const isSnoozeRemoved = function ( willRemove, snoozed ) {
+    if ( !snoozed || !willRemove ) {
+        return false;
+    }
+    var moveToMailboxId = snoozed.moveToMailboxId;
+    return willRemove.some( moveToMailboxId ?
+        ( mailbox => (
+            mailbox.get( 'role' ) === 'snoozed' ||
+            mailbox.get( 'id' ) === moveToMailboxId ) ) :
+        ( mailbox => (
+            mailbox.get( 'role' ) === 'snoozed' ||
+            mailbox.get( 'role' ) === 'inbox' ) )
+    );
 };
 
 // ---
@@ -8107,7 +8519,7 @@ const getMessages = function getMessages ( messageSKs, expand, mailbox, callback
             if ( store.getStatus( messageSK ) & READY ) {
                 thread = store.getRecordFromStoreKey( messageSK )
                               .get( 'thread' );
-                if ( thread.is( READY ) ) {
+                if ( thread && thread.is( READY ) ) {
                     thread.get( 'messages' ).forEach( checkMessage );
                 } else {
                     allLoaded = false;
@@ -8189,7 +8601,25 @@ const getMailboxForRole = function ( accountId, role ) {
 
 // ---
 
+const logACLsError = function ( type, mailbox ) {
+    var name = mailbox.get( 'name' );
+    O.RunLoop.didError({
+        name: 'JMAP.mail.move',
+        message: 'May not ' + type + ' messages in ' + name,
+        details: {
+            status: mailbox.get( 'status' ),
+            myRights: mailbox.get( 'myRights' ),
+        },
+    });
+};
+
 Object.assign( connection, {
+
+    NO: NO,
+    TO_MAILBOX: TO_MAILBOX,
+    TO_THREAD_IN_NOT_TRASH: TO_THREAD_IN_NOT_TRASH,
+    TO_THREAD_IN_TRASH: TO_THREAD_IN_TRASH,
+    TO_THREAD: TO_THREAD,
 
     getMessages: getMessages,
 
@@ -8312,6 +8742,10 @@ Object.assign( connection, {
                         redoStack.pop();
                         this.set( 'canRedo', !!redoStack.length );
                     }
+                    // This could get called synchronously before applyChange
+                    // returns depending on the undoAction; set pending to null
+                    // to ensure we don't add a noop to the redo stack.
+                    pending = null;
                 }
                 this.pending = [];
             }.bind( this );
@@ -8418,27 +8852,28 @@ Object.assign( connection, {
         return this;
     },
 
-    setFlagged: function ( messages, isFlagged, allowUndo ) {
+    setKeyword: function ( messages, keyword, value, allowUndo ) {
         var inverseMessageSKs = allowUndo ? [] : null;
         var inverse = allowUndo ? {
-                method: 'setFlagged',
+                method: 'setKeyword',
                 messageSKs: inverseMessageSKs,
                 args: [
                     null,
-                    !isFlagged,
+                    keyword,
+                    !value,
                     true
                 ]
             } : null;
 
         messages.forEach( function ( message ) {
             // Check we have something to do
-            if ( message.get( 'isFlagged' ) === isFlagged ||
+            if ( !!message.get( 'keywords' )[ keyword ] === value ||
                     !message.hasPermission( 'maySetKeywords' ) ) {
                 return;
             }
 
             // Update the message
-            message.set( 'isFlagged', isFlagged );
+            message.setKeyword( keyword, value );
 
             // Add inverse for undo
             if ( allowUndo ) {
@@ -8447,7 +8882,11 @@ Object.assign( connection, {
         });
 
         // Update message list queries, or mark in need of refresh
-        updateQueries( isFilteredOnFlagged, isSortedOnFlagged, null );
+        updateQueries(
+            isFilteredOnKeyword.bind( null, keyword ),
+            isSortedOnKeyword.bind( null, keyword ),
+            null
+        );
 
         if ( allowUndo && inverseMessageSKs.length ) {
             this.undoManager.pushUndoData( inverse );
@@ -8456,13 +8895,15 @@ Object.assign( connection, {
         return this;
     },
 
-    move: function ( messages, addMailbox, removeMailbox, allowUndo ) {
+    move: function ( messages, addMailbox, removeMailbox, allowUndo, snoozed ) {
         var mailboxDeltas = {};
         var inverse = allowUndo ? {} : null;
         var removeAll = removeMailbox === 'ALL';
         var undoManager = this.undoManager;
         var addMailboxOnlyIfNone = false;
+        var isAddingToSnoozed = isSnoozedMailbox( addMailbox );
         var toCopy = {};
+        var now = FASTMAIL && ( new Date().toJSON() + 'Z' );
         var accountId, fromAccountId, mailboxIds;
 
         if ( !addMailbox ) {
@@ -8487,19 +8928,17 @@ Object.assign( connection, {
         // Check ACLs
         if ( addMailbox && ( !addMailbox.is( READY ) ||
                 !addMailbox.get( 'myRights' ).mayAddItems ) ) {
-            O.RunLoop.didError({
-                name: 'JMAP.mail.move',
-                message: 'May not add messages to ' + addMailbox.get( 'name' ),
-            });
+            logACLsError( 'add', addMailbox );
             return this;
         }
         if ( removeMailbox && ( !removeMailbox.is( READY ) ||
                 !removeMailbox.get( 'myRights' ).mayRemoveItems ) ) {
-            O.RunLoop.didError({
-                name: 'JMAP.mail.move',
-                message: 'May not remove messages from ' +
-                    removeMailbox.get( 'name' ),
-            });
+            logACLsError( 'remove', removeMailbox );
+            return this;
+        }
+
+        // Can't move to snoozed mailbox without snooze details
+        if ( isAddingToSnoozed && !snoozed ) {
             return this;
         }
 
@@ -8520,10 +8959,15 @@ Object.assign( connection, {
             var isThreadUnreadInTrash = false;
             var mailboxCounts = null;
 
+            var wasSnoozed = null;
+            var newSnoozed = snoozed && !( snoozed instanceof SnoozeDetails ) ?
+                snoozed[ message.get( 'storeKey' ) ] || null :
+                snoozed || null;
+
             var isUnread, thread;
             var deltaThreadUnreadInNotTrash, deltaThreadUnreadInTrash;
             var decrementMailboxCount, incrementMailboxCount;
-            var delta, mailboxSK, mailbox;
+            var delta, mailboxSK, mailbox, removedDates;
 
             // Calculate the changes required to the message's mailboxes
             if ( removeAll ) {
@@ -8547,6 +8991,20 @@ Object.assign( connection, {
 
             // Check we have something to do
             if ( !willRemove && ( !willAdd || addMailboxOnlyIfNone ) ) {
+                // We may be updating snooze but not moving
+                if ( isAddingToSnoozed && newSnoozed ) {
+                    wasSnoozed = setSnoozed( message, newSnoozed );
+                    if ( allowUndo && wasSnoozed ) {
+                        addMoveInverse(
+                            inverse,
+                            undoManager,
+                            addMailbox,
+                            null,
+                            messageSK,
+                            wasSnoozed
+                        );
+                    }
+                }
                 return;
             }
 
@@ -8597,10 +9055,28 @@ Object.assign( connection, {
                 willRemove ? willRemove.length : 0,
                 willAdd
             );
+            if ( willRemove ) {
+                if ( FASTMAIL ) {
+                    removedDates = clone( message.get( 'removedDates' ) );
+                    willRemove.forEach( mailbox => {
+                        removedDates[ mailbox.get( 'id' ) ] = now;
+                    });
+                    message.set( 'removedDates', removedDates );
+                }
+            }
 
             if ( alreadyHasMailbox ) {
                 willAdd = null;
                 willRemove.erase( addMailbox );
+            }
+
+            // Set snoozed if given; clear snooze if removing from
+            // mailbox target of snooze and not still in Snoozed mailbox.
+            if ( newSnoozed ) {
+                wasSnoozed = setSnoozed( message, newSnoozed );
+            } else if ( !message.isIn( 'snoozed' ) &&
+                    isSnoozeRemoved( willRemove, message.get( 'snoozed' ) ) ) {
+                wasSnoozed = setSnoozed( message, null );
             }
 
             // Add inverse for undo
@@ -8608,7 +9084,8 @@ Object.assign( connection, {
                 addMoveInverse( inverse, undoManager,
                     // Don't use messageSK, because we need the new store key
                     // if we moved it to a new account
-                    willAdd, willRemove, message.get( 'storeKey' ) );
+                    willAdd, willRemove, message.get( 'storeKey' ),
+                    wasSnoozed );
             }
 
             // Calculate any changes to the mailbox message counts
@@ -8967,11 +9444,10 @@ Object.assign( connection, {
 
     // ---
 
-    redirect: function ( messages, identity, to ) {
-        var accountId = identity.get( 'accountId' );
+    redirect: function ( messages, to ) {
         var envelope = {
             mailFrom: {
-                email: identity.get( 'email' ),
+                email: auth.get( 'username' ),
                 parameters: null,
             },
             rcptTo: to.map( function ( address ) {
@@ -8984,8 +9460,8 @@ Object.assign( connection, {
 
         return messages.map( function ( message ) {
             return new MessageSubmission( store )
-                .set( 'accountId', accountId )
-                .set( 'identity', identity )
+                .set( 'accountId', message.get( 'accountId' ) )
+                .set( 'identity', null )
                 .set( 'message', message )
                 .set( 'envelope', envelope )
                 .saveToStore();

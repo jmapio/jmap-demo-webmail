@@ -10,6 +10,10 @@
 
 ( function () {
 
+const el = O.Element.create;
+
+// ---
+
 var left = {
     transform: 'translate3d(-100%,0,0)'
 };
@@ -44,7 +48,7 @@ var EventItemView = O.Class({
 
     layerTag: 'li',
 
-    draw: function ( layer, Element, el ) {
+    draw: function ( layer ) {
         var event = this.get( 'content' ),
             date = this.getParent( O.ListView ).get( 'content' ).get( 'date' ),
             isAllDay = event.get( 'isAllDay' ),

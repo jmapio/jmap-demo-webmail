@@ -10,6 +10,10 @@
 
 ( function () {
 
+const el = O.Element.create;
+
+// ---
+
 var filterIsSentOrDraft = function ( filter ) {
     if ( filter.operator ) {
         return filter.conditions.every( filterIsSentOrDraft );
@@ -163,7 +167,7 @@ var MailboxItemView = O.Class({
             ( this.get( 'isFlagged' ) ? ' is-flagged': '' );
     }.property( 'isSelected', 'isUnread', 'isFlagged' ),
 
-    draw: function ( layer, Element, el ) {
+    draw: function ( layer ) {
         var message = this.get( 'content' ),
             thread = this.get( 'thread' ),
             isInTrash = this.get( 'isInTrash' ),

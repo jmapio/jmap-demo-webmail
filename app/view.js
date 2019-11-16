@@ -10,6 +10,10 @@
 
 O.RunLoop.invoke( function () {
 
+const el = O.Element.create;
+
+// ---
+
 App.views = {
     mainWindow: new O.RootView( document )
 };
@@ -63,7 +67,7 @@ var agendaView = new O.View({
             oldEvents.destroy();
         }
     }.observes( 'events' ),
-    draw: function ( layer, Element, el ) {
+    draw: function ( layer ) {
         return [
             el( 'div.v-Agenda-header', [
                 this._prev = el( 'a.v-Agenda-prev', [
@@ -174,7 +178,7 @@ var threadView = new O.ScrollView({
                             content: O.bind( App.state, 'threadMessageList' ),
                             ItemView: App.ThreadMessageView
                         }),
-                        O.Element.when( App.state, 'showAgenda' ).show([
+                        O.when( App.state, 'showAgenda' ).show([
                             agendaView
                         ]).end()
                     ]
@@ -211,7 +215,7 @@ var main = new O.View({
                     className: 'v-MailboxTitle',
                     positioning: 'absolute',
                     layout: O.bind( contentSplitController, 'topLeftLayout' ),
-                    draw: function ( layer, Element, el ) {
+                    draw: function ( layer ) {
                         return [
                             el( 'div.v-MailboxTitle-name', {
                                 text: O.bind( App.state, 'mailboxName' )
@@ -302,7 +306,7 @@ var sidebar = new O.View({
                 right: 0,
                 height: 50
             },
-            draw: function ( layer, Element, el ) {
+            draw: function ( layer ) {
                 return el( 'div.v-MailboxTitle', { style: 'display:block' }, [
                     el( 'b', { style: 'font-weight:600' }, [ 'JMAP' ]),
                     ' / Mail'

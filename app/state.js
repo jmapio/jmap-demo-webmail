@@ -8,6 +8,8 @@
 
 "use strict";
 
+JMAP.auth.didAuthenticate({"primaryAccounts":{"urn:ietf:params:jmap:mail":"ue150411c","urn:ietf:params:jmap:submission":"ue150411c","urn:ietf:params:jmap:vacationresponse":"ue150411c"},"username":"neilj@fastmail.fm","uploadUrl":"https://jmap.fastmail.com/upload/{accountId}/","downloadUrl":"https://jmap.fastmail.com/download/{accountId}/{blobId}/{name}","capabilities":{"urn:ietf:params:jmap:vacationresponse":{},"urn:ietf:params:jmap:core":{"maxSizeRequest":10000000,"maxConcurrentUpload":10,"maxSizeUpload":50000000,"maxObjectsInSet":1000,"maxConcurrentRequests":10,"maxCallsInRequest":64,"collationAlgorithms":["i;ascii-numeric","i;ascii-casemap","i;octet"],"maxObjectsInGet":1000},"urn:ietf:params:jmap:submission":{},"urn:ietf:params:jmap:mail":{}},"accounts":{"ue150411c":{"accountCapabilities":{"urn:ietf:params:jmap:mail":{"emailQuerySortOptions":["receivedAt","from","to","subject","size","header.x-spam-score"],"mayCreateTopLevelMailbox":true,"maxSizeAttachmentsPerEmail":50000000,"maxSizeMailboxName":490,"maxMailboxDepth":null,"maxMailboxesPerEmail":1000},"urn:ietf:params:jmap:submission":{"submissionExtensions":[],"maxDelayedSend":44236800},"urn:ietf:params:jmap:vacationresponse":{}},"isArchiveUser":false,"isPersonal":true,"isReadOnly":false,"name":"neilj@fastmail.fm"}},"state":"cyrus-1415507;p-3;vfs-0","apiUrl":"https://jmap.fastmail.com/api/","eventSourceUrl":"https://jmap.fastmail.com/event/",'authenticationUrl':'https://jmap.fastmail.com/.well-known/jmap', accessToken:'TODO'});
+
 O.RunLoop.invoke( function () {
 
 var i18n = O.i18n;
@@ -20,10 +22,6 @@ var MessageList = JMAP.MessageList;
 var Mailbox = JMAP.Mailbox;
 var Thread = JMAP.Thread;
 var Message = JMAP.Message;
-
-// --- Temp hack to talk to proxy without implementing proper auth ---
-JMAP.auth.didAuthenticate(
-    JSON.parse( document.body.getAttribute( 'data-session' ) ) );
 
 // ---
 
@@ -97,9 +95,6 @@ store.on( Mailbox, allMailboxes, 'contentDidChange' );
 // ---
 
 App.state = new O.Router({
-
-    useHash: true,
-    baseUrl: '/client/',
 
     routes: [
         // Selected conversation

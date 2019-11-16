@@ -10,7 +10,10 @@
 
 ( function () {
 
+const el = O.Element.create;
 var READY = O.Status.READY;
+
+// ---
 
 var ThreadMessageView = O.Class({
 
@@ -26,7 +29,7 @@ var ThreadMessageView = O.Class({
         ThreadMessageView.parent.destroy.call( this );
     },
 
-    draw: function (/* layer, Element, el */) {
+    draw: function (/* layer */) {
         var content = this.get( 'content' );
         if ( content && content.is( READY ) ) {
             var view = new App.MessageView({
