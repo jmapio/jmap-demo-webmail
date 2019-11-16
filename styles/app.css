@@ -63,11 +63,13 @@ html {
 
 .v-MailboxSource-name {
     flex: auto;
+    overflow: hidden;
+    white-space: nowrap;
 }
 
 .v-MailboxSource-count {
     flex: none;
-    padding-left: 5px;
+    padding-left: 10px;
 }
 
 /* --- Toolbar Heading --- */
