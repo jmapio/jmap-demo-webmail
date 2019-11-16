@@ -333,11 +333,6 @@ var loginView = new O.View({
     positioning: 'absolute',
     layout: O.View.LAYOUT_FILL_PARENT,
     className: 'v-Login',
-
-    server: 'https://jmap.fastmail.com/.well-known/jmap',
-    username: '',
-    password: '',
-
     draw: function () {
         return [
             el( 'div.v-Login-modal', [
@@ -345,36 +340,28 @@ var loginView = new O.View({
                     'JMAP Session URL',
                 ]),
                 new O.TextView({
-                    value: O.bindTwoWay( this, 'server' ),
+                    value: O.bindTwoWay( App.credentials, 'server' ),
                 }),
                 el( 'h2.v-Login-title', [
                     'Username',
                 ]),
                 new O.TextView({
-                    value: O.bindTwoWay( this, 'username' ),
+                    value: O.bindTwoWay( App.credentials, 'username' ),
                 }),
                 el( 'h2.v-Login-title', [
                     'Password',
                 ]),
                 new O.TextView({
-                    value: O.bindTwoWay( this, 'password' ),
+                    value: O.bindTwoWay( App.credentials, 'password' ),
                 }),
                 new O.ButtonView({
                     label: 'Log in',
-                    target: this,
+                    target: App.credentials,
                     method: 'login',
                 }),
             ]),
         ];
     },
-
-    login: function () {
-        var server = this.get( 'server' );
-        var username = this.get( 'username' );
-        var password = this.get( 'password' );
-        var accessToken = 'Basic ' + btoa( username + ':' + password );
-        JMAP.auth.fetchSession( server, accessToken );
-    }
 });
 
 App.views.mail = new O.View({

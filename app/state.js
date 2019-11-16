@@ -376,4 +376,24 @@ App.push = new O.EventSource({
     }.on( 'state' )
 }).open();
 
+// ---
+
+App.credentials = new O.LocalStorage( 'credentials', false, {
+    server: 'https://jmap.fastmail.com/.well-known/jmap',
+    username: '',
+    password: '',
+});
+
+App.credentials.login = function () {
+    var server = this.get( 'server' );
+    var username = this.get( 'username' );
+    var password = this.get( 'password' );
+    var accessToken = 'Basic ' + btoa( username + ':' + password );
+    JMAP.auth.fetchSession( server, accessToken );
+};
+
+if ( App.credentials.get( 'username' ) && App.credentials.get( 'password' ) ) {
+    App.credentials.login();
+}
+
 });
