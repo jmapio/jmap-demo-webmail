@@ -329,6 +329,54 @@ var sidebar = new O.View({
     ]
 });
 
+var loginView = new O.View({
+    positioning: 'absolute',
+    layout: O.View.LAYOUT_FILL_PARENT,
+    className: 'v-Login',
+
+    server: 'https://jmap.fastmail.com/.well-known/jmap',
+    username: '',
+    password: '',
+
+    draw: function () {
+        return [
+            el( 'div.v-Login-modal', [
+                el( 'h2.v-Login-title', [
+                    'JMAP Session URL',
+                ]),
+                new O.TextView({
+                    value: O.bindTwoWay( this, 'server' ),
+                }),
+                el( 'h2.v-Login-title', [
+                    'Username',
+                ]),
+                new O.TextView({
+                    value: O.bindTwoWay( this, 'username' ),
+                }),
+                el( 'h2.v-Login-title', [
+                    'Password',
+                ]),
+                new O.TextView({
+                    value: O.bindTwoWay( this, 'password' ),
+                }),
+                new O.ButtonView({
+                    label: 'Log in',
+                    target: this,
+                    method: 'login',
+                }),
+            ]),
+        ];
+    },
+
+    login: function () {
+        var server = this.get( 'server' );
+        var username = this.get( 'username' );
+        var password = this.get( 'password' );
+        var accessToken = 'Basic ' + btoa( username + ':' + password );
+        JMAP.auth.fetchSession( server, accessToken );
+    }
+});
+
 App.views.mail = new O.View({
     positioning: 'absolute',
     layout: O.View.LAYOUT_FILL_PARENT,
@@ -337,7 +385,10 @@ App.views.mail = new O.View({
         sidebar,
         new O.SplitDividerView({
             controller: sidebarSplitController
-        })
+        }),
+        O.when( JMAP.auth, 'isAuthenticated', O.Transform.invert ).show([
+            loginView,
+        ]).end(),
     ]
 });
 

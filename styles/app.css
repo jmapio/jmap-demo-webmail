@@ -454,3 +454,53 @@ html {
     margin-top: 3px;
     color: #a1a8aa;
 }
+
+/* --- */
+
+.v-Login {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.3);
+}
+
+.v-Login-modal {
+    padding: 20px;
+    width: 400px;
+    background: #fff;
+}
+
+.v-Login-title {
+    font-weight: bold;
+    margin-bottom: 3px;
+}
+
+.v-Login .v-Text {
+    margin-bottom: 14px;
+}
+
+.v-Text {
+    border: none;
+    border-bottom: 1px solid #ccc;
+    width: 100%;
+    background: #eee;
+}
+
+.v-Text-input {
+    box-sizing: border-box;
+    width: 100%;
+    border: 0;
+    padding: 7px;
+    background: none;
+}
+
+.v-Button {
+    border: none;
+    border-radius: 3px;
+    padding: 7px 14px;
+    background: #e74c3c;
+    color: #fff;
+}
+.v-Button:active {
+    background: #d12c1a;
+}

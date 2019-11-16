@@ -26370,19 +26370,25 @@
         */
         open: function open () {
             var this$1 = this;
+            var url = this.get( 'url' );
 
-            if ( this.get( 'readyState' ) === CLOSED ) {
-                var eventSource = this._eventSource =
-                    new NativeEventSource( this.get( 'url' ) );
+            if ( url && this.get( 'readyState' ) === CLOSED ) {
+                var eventSource = null;
+                try {
+                    new NativeEventSource( url );
+                } catch ( error ) {}
+                if ( eventSource ) {
+                    this._eventSource = eventSource;
 
-                this._eventTypes.forEach(
-                    function (type) { return eventSource.addEventListener( type, this$1, false ); }
-                );
+                    this._eventTypes.forEach(
+                        function (type) { return eventSource.addEventListener( type, this$1, false ); }
+                    );
 
-                this.set( 'readyState', eventSource.readyState );
+                    this.set( 'readyState', eventSource.readyState );
+                }
             }
             return this;
-        },
+        }.observes( 'url' ),
 
         /**
             Method: O.EventSource#close
