@@ -313,7 +313,7 @@ var sidebar = new O.View({
                 ]);
             }
         }),
-        new O.View({
+        new O.ScrollView({
             className: 'v-Sidebar',
             positioning: 'absolute',
             layout: O.extend({
