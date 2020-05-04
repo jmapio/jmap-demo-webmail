@@ -98,7 +98,7 @@ App.state = new O.Router({
         // Selected conversation
         {
             url: /^(.+)$/,
-            handle: function ( _, emailId ) {
+            handle: function ( _, queryParams, emailId ) {
                 this.selection.selectNone();
                 this.beginPropertyChanges()
                     .set( 'emailId', emailId )
