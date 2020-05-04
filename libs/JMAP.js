@@ -911,7 +911,7 @@ const Connection = Class({
                 method: 'POST',
                 url: auth.get( 'apiUrl' ),
                 headers: headers,
-                withCredentials: true,
+                withCredentials: false,
                 responseType: 'json',
                 data: this.willSendRequest({
                     using: Object.keys( capabilities ),
@@ -1879,7 +1879,7 @@ const LocalFile = Class({
                     headers: {
                         'Authorization': auth.get( 'accessToken' ),
                     },
-                    withCredentials: true,
+                    withCredentials: false,
                     responseType: 'json',
                     data: this.file,
                 })
