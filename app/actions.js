@@ -72,14 +72,14 @@ var actions = {
 
     flag: function ( storeKeys ) {
         doAction( storeKeys, NO, function ( messages ) {
-            JMAP.mail.setFlagged( messages, true, true );
+            JMAP.mail.setKeyword( messages, '$flagged', true, true );
         });
         return this;
     },
 
     unflag: function ( storeKeys ) {
         doAction( storeKeys, TO_THREAD, function ( messages ) {
-            JMAP.mail.setFlagged( messages, false, true );
+            JMAP.mail.setKeyword( messages, '$flagged', false, true );
         });
         return this;
     },

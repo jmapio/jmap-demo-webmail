@@ -39,7 +39,7 @@
         cache         - A mapping of keys to the last returned value of cacheable
                         computed properties.
         observers     - A mapping of keys to an array of observers for that key.
-                        Event listeners are also in  here, mapped from a key of
+                        Event listeners are also in here, mapped from a key of
                         '__event__' + the event type.
         changed       - Null, or if the depth property is >1, an object mapping keys
                         or properties that have changed value, to an object holding
@@ -146,16 +146,6 @@
     Metadata.prototype.addObserver = function addObserver ( key, observer ) {
         var observers = this.observers;
         var keyObservers = observers[ key ];
-        if ( keyObservers ) {
-            var isSame = typeof observer === 'function' ?
-                isIdentical : isSameObserver;
-            var l = keyObservers.length;
-            for ( var i = 0; i < l; i += 1 ) {
-                if ( isSame( keyObservers[i], observer ) ) {
-                    return this;
-                }
-            }
-        }
         if ( !keyObservers ) {
             keyObservers = observers[ key ] = [];
         } else if ( !observers.hasOwnProperty( key ) ) {
@@ -164,6 +154,22 @@
         keyObservers.push( observer );
 
         return this;
+    };
+
+    Metadata.prototype.hasObserver = function hasObserver ( key, observer ) {
+        var observers = this.observers;
+        var keyObservers = observers[ key ];
+        if ( keyObservers ) {
+            var isSame = typeof observer === 'function' ?
+                isIdentical : isSameObserver;
+            var l = keyObservers.length;
+            for ( var i = 0; i < l; i += 1 ) {
+                if ( isSame( keyObservers[i], observer ) ) {
+                    return true;
+                }
+            }
+        }
+        return false;
     };
 
     Metadata.prototype.removeObserver = function removeObserver ( key, observer ) {
@@ -191,10 +197,10 @@
         } else if ( data.object !== object ) {
             // Until the set of computed properties on the object changes, the
             // 'dependents' information is identical to that of the parent so
-            // can be shared. The computed 'allDependents will be calculated
-            // when needed and stored in the parent meta object, so be available
-            // to all other objects of the same type. The dependents property
-            // is copied on write (and the allDependents then reset and
+            // can be shared. The computed allDependents will be calculated
+            // when needed and stored in the parent meta object, so as to be
+            // available to all other objects of the same type. The dependents
+            // property is copied on write (and the allDependents then reset and
             // calculated separately for the object).
             data = Object.create( data );
             data.object = object;
@@ -470,10 +476,22 @@
     /**
         Function: O.Class
 
-        The Class function takes an object containing the instance functions for a
+        The Class function is for creating classes with Overture magic properties.
+
+        The Class function takes an object containing the prototype members for a
         new class and returns a constructor function with each of these methods in
-        its prototype. It also supports inheritance and mixins, via the special
-        Extends and Mixin properties respectively.
+        its prototype.
+
+        There are three special parameters:
+
+        - `Extends` is mandatory and declares the parent class to use. Reminder: all
+          classes created with `O.Class` are expected to extend `O.Object`. If you
+          don’t want that, use ECMAScript class syntax instead.
+
+        - `Mixin` is optional, being an object or an array of objects to mix into
+          the class prototype.
+
+        - `init`, if present, is used as the constructor.
 
         The returned constructor function will be the init method passed in the
         params. If the prototype has no function with the name 'init', an empty
@@ -482,9 +500,14 @@
 
         For example:
 
-            > const MyClass = O.Class({ sayBoo: function (){ alert( 'boo' ); } });
-            > let instance = new MyClass();
-            > instance.sayBoo(); // Alerts 'boo'.
+            const MyClass = O.Class({
+                Extends: O.Object,
+                sayBoo () {
+                    alert( 'boo' );
+                },
+            });
+            let instance = new MyClass();
+            instance.sayBoo(); // Alerts 'boo'.
 
         Parameters:
             params - {Object} An object containing methods or properties
@@ -492,13 +515,70 @@
 
         Returns:
             {Constructor} The constructor function for the new class.
+
+        ## `O.Class` versus ECMAScript class syntax
+
+        This function is not *necessary*, and may well eventually fall out of use,
+        but currently provides a measurable ergonomic advantage for three reasons:
+
+        - Special Overture functionality (bindings, computed properties, &c.)
+          must currently be added to any object using O.mixin() because it’s done
+          eagerly rather than lazily;
+        - ECMAScript class syntax doesn’t provide a way of adding non-methods to the
+          prototype;
+        - Overture uses a form of function decorators which don’t translate to
+          ECMAScript class syntax yet (Function.prototype.property et al.)
+
+        (In practical terms, these three reasons are facets of the one thing.)
+
+        The following two examples are *roughly* equivalent. (These are the
+        differences for the ECMAScript class syntax variant: property name
+        collisions are handled differently, `Foo.prototype.init` and `Foo.parent`
+        won’t be set, the class won’t be extendable with O.Class due to differences
+        in `[[Call]]` and `[[Construct]]` handling, and exactly what happens if
+        there are name collisions in members.)
+
+        The O.Class way:
+
+            const Foo = Class({
+                Extends: Bar,
+                Mixin: [ Baz, Quux ],
+
+                init: function ( … ) {
+                    Foo.parent.constructor.call( this, … );
+                    …
+                },
+
+                foo () {
+                    …
+                },
+
+                bar: function () {
+                    …
+                }.property(),
+            });
+
+        And the ES6 classes way:
+
+            class Foo extends Bar {
+                constructor ( … ) {
+                    super( … );
+                    …
+                }
+
+                foo () {
+                    …
+                }
+            }
+            mixin( Foo.prototype, Baz );
+            mixin( Foo.prototype, Quux );
+            mixin( Foo.prototype, {
+                bar: function () {
+                    …
+                }.property(),
+            });
     */
     var Class = function ( params ) {
-        var parent = params.Extends;
-        if ( 'Extends' in params && typeof parent !== 'function' ) {
-            throw new Error( 'Bad O.Class definition: Extends is ' + parent );
-        }
-        var mixins = params.Mixin;
         // Here’s a fine implementation detail: init must be a constructor, not just
         // a function. Oh, you thought all functions were constructors? Not any more
         // in ES6, because of new efficiency possibilities. Specifically, methods
@@ -515,8 +595,7 @@
         //         baz: 42,
         //     })
         //
-        // But rather, this, unshorthanding init (plus a recommended eslint line,
-        // because everywhere *else* you should still prefer shorthand):
+        // But rather, this, unshorthanding init:
         //
         //     Class({
         //         init: function () { },
@@ -524,20 +603,18 @@
         //         bar () { },
         //         baz: 42,
         //     })
-        var init = params.init || ( parent ?
-                function () {
-                    parent.apply( this, arguments );
-                } :
-                function () {} );
+        var parent = params.Extends;
+        var init = params.init || function () {
+            parent.apply( this, arguments );
+        };
 
-        if ( parent ) {
-            var proto = parent.prototype;
-            init.parent = proto;
-            init.prototype = Object.create( proto );
-            init.prototype.constructor = init;
-            delete params.Extends;
-        }
+        var proto = parent.prototype;
+        init.parent = proto;
+        init.prototype = Object.create( proto );
+        init.prototype.constructor = init;
+        delete params.Extends;
 
+        var mixins = params.Mixin;
         if ( mixins ) {
             if ( !( mixins instanceof Array ) ) {
                 mixins = [ mixins ];
@@ -3325,30 +3402,26 @@
             Calls O.RunLoop#flushQueue on each queue in the order specified in
             _queueOrder, starting at the first queue again whenever the queue
             indicates something has changed.
-
-            Parameters:
-                queue - {String} name of the queue to flush.
-
-            Returns:
-                {Boolean} Were any functions actually invoked?
         */
         flushAllQueues: function flushAllQueues () {
+            var queues = this._queues;
             var order = this._queueOrder;
             var l = order.length;
             var i = 0;
             while ( i < l ) {
-                // "Render" waits for next frame, except if in bg, since
-                // animation frames don't fire while in the background and we want
-                // to flush queues in a reasonable time, as they may redraw the tab
-                // name, favicon etc.
-                if ( !document.hidden && (
-                        ( i === 3 && !this.mayRedraw ) ) ) {
-                    if ( !this._queues.nextFrame.length ) {
-                        requestAnimFrame( nextFrame );
+                var queueName = order[i];
+                if ( queues[ queueName ].length ) {
+                    // "Render" waits for next frame, except if in bg, since
+                    // animation frames don't fire while in the background and we
+                    // want to flush queues in a reasonable time, as they may
+                    // redraw the tab name, favicon etc.
+                    if ( ( i > 2 && !this.mayRedraw ) && !document.hidden ) {
+                        if ( !queues.nextFrame.length ) {
+                            requestAnimFrame( nextFrame );
+                        }
+                        return;
                     }
-                    return;
-                }
-                if ( this.flushQueue( order[i] ) ) {
+                    this.flushQueue( queueName );
                     i = 0;
                 } else {
                     i = i + 1;
@@ -5960,43 +6033,49 @@
         It adds support for computed properties, bound properties, observable
         properties and subscribing/firing events.
     */
-    var Obj = Class({
+    /**
+        Constructor: O.Object
 
-        Mixin: [
-            ComputedProps, BoundProps, ObservableProps, EventTarget ],
+        Parameters:
+            ...mixins - {Object} (optional) Each argument passed will be treated
+                        as an object, with any properties in that object added
+                        to the new O.Object instance before initialisation (so
+                        you can pass it getter/setter functions or observing
+                        methods).
+    */
+    var Obj = function (/* ...mixins */) {
+        var arguments$1 = arguments;
 
-        /**
-            Constructor: O.Object
-
-            Parameters:
-                ...mixins - {Object} (optional) Each argument passed will be treated
-                            as an object, with any properties in that object added
-                            to the new O.Object instance before initialisation (so
-                            you can pass it getter/setter functions or observing
-                            methods).
-        */
-        init: function (/* ...mixins */) {
-            var arguments$1 = arguments;
-
-            for ( var i = 0, l = arguments.length; i < l; i += 1 ) {
-                mixin( this, arguments$1[i] );
+        for ( var i = 0, l = arguments.length; i < l; i += 1 ) {
+            mixin( this, arguments$1[i] );
+        }
+        var metadata = meta( this );
+        var inits = metadata.inits;
+        for ( var method in inits ) {
+            if ( inits[ method ] ) {
+                this[ 'init' + method ]();
             }
-            var metadata = meta( this );
-            var inits = metadata.inits;
-            for ( var method in inits ) {
-                if ( inits[ method ] ) {
-                    this[ 'init' + method ]();
-                }
-            }
-            metadata.lifestage = OBJECT_INITIALISED;
-        },
+        }
+        metadata.lifestage = OBJECT_INITIALISED;
+    };
+    var ObjPrototype = Obj.prototype;
+    ObjPrototype.constructor = Obj;
+    ObjPrototype.init = Obj;
 
-        /**
-            Method: O.Object#destroy
+    mixin( ObjPrototype, ComputedProps );
+    mixin( ObjPrototype, BoundProps );
+    mixin( ObjPrototype, ObservableProps );
+    mixin( ObjPrototype, EventTarget );
 
-            Removes any connections to other objects (e.g. path observers and
-            bindings) so the object will be available for garbage collection.
-        */
+    /**
+        Method: O.Object#destroy
+
+        Removes any connections to other objects (e.g. path observers and
+        bindings) so the object will be available for garbage collection.
+    */
+    mixin( ObjPrototype, {
+        constructor: Obj,
+
         destroy: function destroy () {
             var metadata = meta( this );
             var inits = metadata.inits;
@@ -6651,6 +6730,492 @@
         },
     });
 
+    var Color = function Color ( opacity ) {
+        this.opacity = opacity;
+    };
+
+    Color.prototype.toJSON = function toJSON () {
+        return this.toString();
+    };
+
+    // ---
+
+    // LAB helper functions
+    var rgbToLRGB = function ( x ) {
+        x /= 255;
+        return x > 0.04045 ?
+            Math.pow( ( x + 0.055 ) / 1.055, 2.4 ) :
+            x / 12.92;
+    };
+
+    var lrgbToRGB = function ( x ) {
+        x = x > 0.0031308 ?
+            1.055 * Math.pow( x, 1 / 2.4 ) - 0.055 :
+            12.92 * x;
+        x *= 255;
+        return x < 0 ? 0 : x > 255 ? 255 : x;
+    };
+
+    var fourOverTwentyNine = 4 / 29;
+    var delta = 6 / 29;
+    var deltaCubed = delta * delta * delta;
+    var threeDeltaSquared = 3 * delta * delta;
+
+    var f = function ( t ){
+        return t > deltaCubed ?
+            Math.pow( t, 1/3 ) :
+            ( t / threeDeltaSquared ) + fourOverTwentyNine;
+    };
+
+    var f1 = function ( t ){
+        return t > delta ?
+            t * t * t :
+            threeDeltaSquared * ( t - fourOverTwentyNine );
+    };
+
+    // ---
+
+    var printHex = function ( number ) {
+        var string = Math.round( number ).toString( 16 );
+        if ( number < 16 ) {
+            string = '0' + string;
+        }
+        return string;
+    };
+
+    var RGB = /*@__PURE__*/(function (Color) {
+        function RGB ( r, g, b, opacity ) {
+            Color.call( this, opacity );
+            this.r = r; // [0,255]
+            this.g = g; // [0,255]
+            this.b = b; // [0,255]
+        }
+
+        if ( Color ) RGB.__proto__ = Color;
+        RGB.prototype = Object.create( Color && Color.prototype );
+        RGB.prototype.constructor = RGB;
+
+        RGB.prototype.toString = function toString () {
+            var opacity = this.opacity;
+            if ( opacity < 1 ) {
+                return 'rgba(' +
+                    Math.round( this.r ) + ', ' +
+                    Math.round( this.g ) + ', ' +
+                    Math.round( this.b ) + ', ' +
+                    opacity +
+                ')';
+            }
+            return '#' +
+                printHex( this.r ) +
+                printHex( this.g ) +
+                printHex( this.b );
+        };
+
+        RGB.prototype.toRGB = function toRGB () {
+            return this;
+        };
+
+        // Algorithm from
+        // http://www.niwa.nu/2013/05/math-behind-colorspace-conversions-rgb-hsl/
+        RGB.prototype.toHSL = function toHSL () {
+            var r = this.r / 255;
+            var g = this.g / 255;
+            var b = this.b / 255;
+
+            var min = Math.min( r, g, b );
+            var max = Math.max( r, g, b );
+
+            var l = ( min + max ) / 2;
+            var h, s, d;
+
+            if ( min === max ) {
+                h = s = 0;
+            } else {
+                d = max - min;
+                s = d / ( l <= 0.5 ? max + min : 2 - max - min );
+                h = r === max ? ( g - b ) / d :
+                    g === max ? ( b - r ) / d + 2 :
+                                ( r - g ) / d + 4;
+                if ( h < 0 ) {
+                    h += 6;
+                }
+                h = h * 60;
+            }
+            return new HSL( h, s, l, this.opacity );
+        };
+
+        // Algorithm from https://observablehq.com/@mbostock/lab-and-rgb
+        RGB.prototype.toLAB = function toLAB () {
+            // 1. Convert to linear-light sRGB.
+            var r = rgbToLRGB( this.r );
+            var g = rgbToLRGB( this.g );
+            var b = rgbToLRGB( this.b );
+
+            // 2. Convert and apply chromatic adaptation to CIEXYZ D50.
+            var x = ( 0.4360747 * r + 0.3850649 * g + 0.1430804 * b );
+            var y = ( 0.2225045 * r + 0.7168786 * g + 0.0606169 * b );
+            var z = ( 0.0139322 * r + 0.0971045 * g + 0.7141733 * b );
+
+            // 3. Convert from CIEXYZ D50 to CIELAB
+            var fx = f( x / 0.96422 );
+            var fy = f( y );
+            var fz = f( z / 0.82521 );
+
+            return new LAB(
+                116 * fy - 16,
+                500 * ( fx - fy ),
+                200 * ( fy - fz ),
+                this.opacity
+            );
+        };
+
+        return RGB;
+    }(Color));
+
+    // ---
+
+    var HSL = /*@__PURE__*/(function (Color) {
+        function HSL ( h, s, l, opacity ) {
+            Color.call( this, opacity );
+            this.h = h; // [0,360]
+            this.s = s; // [0,1]
+            this.l = l; // [0,1]
+        }
+
+        if ( Color ) HSL.__proto__ = Color;
+        HSL.prototype = Object.create( Color && Color.prototype );
+        HSL.prototype.constructor = HSL;
+
+        HSL.prototype.toString = function toString () {
+            var hsl =
+                this.h + ', ' +
+                ( 100 * this.s ) + '%, ' +
+                ( 100 * this.l ) + '%';
+            var opacity = this.opacity;
+            return opacity < 1 ?
+                'hsla(' + hsl + ', ' + opacity + ')' :
+                'hsl(' + hsl + ')';
+        };
+
+        // Algorithm from https://en.wikipedia.org/wiki/HSL_and_HSV#HSL_to_RGB
+        HSL.prototype.toRGB = function toRGB () {
+            var h = this.h;
+            var s = this.s;
+            var l = this.l;
+            var x = s * Math.min( l, 1 - l );
+            var f = function (n) {
+                var k = ( n + h / 30 ) % 12;
+                return 255 *
+                    ( l - x * Math.max( Math.min( k - 3, 9 - k, 1 ), -1 ) );
+            };
+            return new RGB( f(0), f(8), f(4), this.opacity );
+        };
+
+        HSL.prototype.toHSL = function toHSL () {
+            return this;
+        };
+
+        HSL.prototype.toLAB = function toLAB () {
+            return this.toRGB().toLAB();
+        };
+
+        return HSL;
+    }(Color));
+
+    // ---
+
+    var LAB = /*@__PURE__*/(function (Color) {
+        function LAB ( l, a, b, opacity ) {
+            Color.call( this, opacity );
+            this.l = l; // [0, 100]
+            this.a = a; // [-160, 160]
+            this.b = b; // [-160, 160]
+        }
+
+        if ( Color ) LAB.__proto__ = Color;
+        LAB.prototype = Object.create( Color && Color.prototype );
+        LAB.prototype.constructor = LAB;
+
+        // Algorithm from https://observablehq.com/@mbostock/lab-and-rgb
+        LAB.prototype.toRGB = function toRGB () {
+            // 1. Convert from CIELAB to CIEXYZ D50
+            var dl = ( this.l + 16 ) / 116;
+            var da = this.a / 500;
+            var db = this.b / 200;
+
+            var x = 0.96422 * f1( dl + da );
+            var y = f1( dl );
+            var z = 0.82521 * f1( dl - db );
+
+            // 2. Convert to linear-light sRGB.
+            var r =  3.1338561 * x - 1.6168667 * y - 0.4906146 * z;
+            var g = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
+            var b =  0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
+
+            // 3. Convert to sRGB
+            return new RGB(
+                lrgbToRGB( r ),
+                lrgbToRGB( g ),
+                lrgbToRGB( b ),
+                this.opacity
+            );
+        };
+
+        LAB.prototype.toHSL = function toHSL () {
+            return this.toRGB().toHSL();
+        };
+
+        LAB.prototype.toLAB = function toLAB () {
+            return this;
+        };
+
+        return LAB;
+    }(Color));
+
+    // ---
+
+    var getByteDoubled = function ( number, offsetFromEnd ) {
+        offsetFromEnd <<= 2;
+        var byte = ( number >> offsetFromEnd ) & 0xf;
+        return ( byte << 4 ) | byte;
+    };
+
+    var getDoubleByte = function ( number, offsetFromEnd ) {
+        offsetFromEnd <<= 3;
+        return ( number >> offsetFromEnd ) & 0xff;
+    };
+
+    var splitColor = function ( color ) {
+        var first = color.indexOf( '(' ) + 1;
+        var last = color.lastIndexOf( ')' );
+        var parts = color.slice( first, last ).trim().split( /[, /]+/ );
+        return parts.length >= 3 ? parts : null;
+    };
+
+    var parseNumber = function ( string, max ) {
+        var number = parseFloat( string );
+        if ( string.charAt( string.length - 1 ) === '%' ) {
+            number = number * max / 100;
+        }
+        return number < 0 ? 0 : number > max ? max : number || 0;
+    };
+
+    // Source: https://drafts.csswg.org/css-color/
+    var cssColorNames = {
+        aliceblue: 0xf0f8ff,
+        antiquewhite: 0xfaebd7,
+        aqua: 0x00ffff,
+        aquamarine: 0x7fffd4,
+        azure: 0xf0ffff,
+        beige: 0xf5f5dc,
+        bisque: 0xffe4c4,
+        black: 0x000000,
+        blanchedalmond: 0xffebcd,
+        blue: 0x0000ff,
+        blueviolet: 0x8a2be2,
+        brown: 0xa52a2a,
+        burlywood: 0xdeb887,
+        cadetblue: 0x5f9ea0,
+        chartreuse: 0x7fff00,
+        chocolate: 0xd2691e,
+        coral: 0xff7f50,
+        cornflowerblue: 0x6495ed,
+        cornsilk: 0xfff8dc,
+        crimson: 0xdc143c,
+        cyan: 0x00ffff,
+        darkblue: 0x00008b,
+        darkcyan: 0x008b8b,
+        darkgoldenrod: 0xb8860b,
+        darkgray: 0xa9a9a9,
+        darkgreen: 0x006400,
+        darkgrey: 0xa9a9a9,
+        darkkhaki: 0xbdb76b,
+        darkmagenta: 0x8b008b,
+        darkolivegreen: 0x556b2f,
+        darkorange: 0xff8c00,
+        darkorchid: 0x9932cc,
+        darkred: 0x8b0000,
+        darksalmon: 0xe9967a,
+        darkseagreen: 0x8fbc8f,
+        darkslateblue: 0x483d8b,
+        darkslategray: 0x2f4f4f,
+        darkslategrey: 0x2f4f4f,
+        darkturquoise: 0x00ced1,
+        darkviolet: 0x9400d3,
+        deeppink: 0xff1493,
+        deepskyblue: 0x00bfff,
+        dimgray: 0x696969,
+        dimgrey: 0x696969,
+        dodgerblue: 0x1e90ff,
+        firebrick: 0xb22222,
+        floralwhite: 0xfffaf0,
+        forestgreen: 0x228b22,
+        fuchsia: 0xff00ff,
+        gainsboro: 0xdcdcdc,
+        ghostwhite: 0xf8f8ff,
+        gold: 0xffd700,
+        goldenrod: 0xdaa520,
+        gray: 0x808080,
+        green: 0x008000,
+        greenyellow: 0xadff2f,
+        grey: 0x808080,
+        honeydew: 0xf0fff0,
+        hotpink: 0xff69b4,
+        indianred: 0xcd5c5c,
+        indigo: 0x4b0082,
+        ivory: 0xfffff0,
+        khaki: 0xf0e68c,
+        lavender: 0xe6e6fa,
+        lavenderblush: 0xfff0f5,
+        lawngreen: 0x7cfc00,
+        lemonchiffon: 0xfffacd,
+        lightblue: 0xadd8e6,
+        lightcoral: 0xf08080,
+        lightcyan: 0xe0ffff,
+        lightgoldenrodyellow: 0xfafad2,
+        lightgray: 0xd3d3d3,
+        lightgreen: 0x90ee90,
+        lightgrey: 0xd3d3d3,
+        lightpink: 0xffb6c1,
+        lightsalmon: 0xffa07a,
+        lightseagreen: 0x20b2aa,
+        lightskyblue: 0x87cefa,
+        lightslategray: 0x778899,
+        lightslategrey: 0x778899,
+        lightsteelblue: 0xb0c4de,
+        lightyellow: 0xffffe0,
+        lime: 0x00ff00,
+        limegreen: 0x32cd32,
+        linen: 0xfaf0e6,
+        magenta: 0xff00ff,
+        maroon: 0x800000,
+        mediumaquamarine: 0x66cdaa,
+        mediumblue: 0x0000cd,
+        mediumorchid: 0xba55d3,
+        mediumpurple: 0x9370db,
+        mediumseagreen: 0x3cb371,
+        mediumslateblue: 0x7b68ee,
+        mediumspringgreen: 0x00fa9a,
+        mediumturquoise: 0x48d1cc,
+        mediumvioletred: 0xc71585,
+        midnightblue: 0x191970,
+        mintcream: 0xf5fffa,
+        mistyrose: 0xffe4e1,
+        moccasin: 0xffe4b5,
+        navajowhite: 0xffdead,
+        navy: 0x000080,
+        oldlace: 0xfdf5e6,
+        olive: 0x808000,
+        olivedrab: 0x6b8e23,
+        orange: 0xffa500,
+        orangered: 0xff4500,
+        orchid: 0xda70d6,
+        palegoldenrod: 0xeee8aa,
+        palegreen: 0x98fb98,
+        paleturquoise: 0xafeeee,
+        palevioletred: 0xdb7093,
+        papayawhip: 0xffefd5,
+        peachpuff: 0xffdab9,
+        peru: 0xcd853f,
+        pink: 0xffc0cb,
+        plum: 0xdda0dd,
+        powderblue: 0xb0e0e6,
+        purple: 0x800080,
+        rebeccapurple: 0x663399,
+        red: 0xff0000,
+        rosybrown: 0xbc8f8f,
+        royalblue: 0x4169e1,
+        saddlebrown: 0x8b4513,
+        salmon: 0xfa8072,
+        sandybrown: 0xf4a460,
+        seagreen: 0x2e8b57,
+        seashell: 0xfff5ee,
+        sienna: 0xa0522d,
+        silver: 0xc0c0c0,
+        skyblue: 0x87ceeb,
+        slateblue: 0x6a5acd,
+        slategray: 0x708090,
+        slategrey: 0x708090,
+        snow: 0xfffafa,
+        springgreen: 0x00ff7f,
+        steelblue: 0x4682b4,
+        tan: 0xd2b48c,
+        teal: 0x008080,
+        thistle: 0xd8bfd8,
+        tomato: 0xff6347,
+        turquoise: 0x40e0d0,
+        violet: 0xee82ee,
+        wheat: 0xf5deb3,
+        white: 0xffffff,
+        whitesmoke: 0xf5f5f5,
+        yellow: 0xffff00,
+        yellowgreen: 0x9acd32,
+    };
+
+    var cssColorRegEx = new RegExp(
+        '#(?:[0-9a-f]{3,4}){1,2}|(?:rgb|hsl)a?\\(.*?\\)|' +
+        Object.keys( cssColorNames ).join( '|' ),
+        'ig'
+    );
+
+    Object.assign( Color, {
+
+        RGB: RGB,
+        HSL: HSL,
+        LAB: LAB,
+
+        cssColorRegEx: cssColorRegEx,
+        cssColorNames: cssColorNames,
+
+        fromCSSColorValue: function fromCSSColorValue ( color ) {
+            var opacity = 1;
+            var r, g, b, number, size, getChannel, alphaOffset, parts;
+            color = color.toLowerCase();
+            if ( color in cssColorNames ) {
+                number = cssColorNames[ color ];
+                r = getDoubleByte( number, 2 );
+                g = getDoubleByte( number, 1 );
+                b = getDoubleByte( number, 0 );
+            } else if ( color.charAt( 0 ) === '#' ) {
+                number = parseInt( color.slice( 1 ), 16 ) || 0;
+                size = color.length;
+                getChannel = size < 6 ? getByteDoubled : getDoubleByte;
+                alphaOffset = 0;
+                if ( size === 5 || size === 9 ) {
+                    opacity = getChannel( number, 0 ) / 255;
+                    alphaOffset = 1;
+                }
+                r = getChannel( number, alphaOffset + 2 );
+                g = getChannel( number, alphaOffset + 1 );
+                b = getChannel( number, alphaOffset + 0 );
+            } else if ( /^rgb/i.test( color ) &&
+                    ( parts = splitColor( color ) ) ) {
+                r = parseNumber( parts[0], 255 );
+                g = parseNumber( parts[1], 255 );
+                b = parseNumber( parts[2], 255 );
+                if ( parts.length > 3 ) {
+                    opacity = parseNumber( parts[3], 1 );
+                }
+            } else if ( /^hsl/i.test( color ) &&
+                    ( parts = splitColor( color ) ) ) {
+                var h = parseNumber( parts[0], 360 );
+                var s = parseNumber( parts[1], 1 );
+                var l = parseNumber( parts[2], 1 );
+                if ( parts.length > 3 ) {
+                    opacity = parseNumber( parts[3], 1 );
+                }
+                return new HSL( h, s, l, opacity );
+            } else {
+                return null;
+            }
+            return new RGB( r, g, b, opacity );
+        },
+
+        fromJSON: function fromJSON ( color ) {
+            return color ? Color.fromCSSColorValue( color ) : null;
+        },
+    });
+
     /*global navigator, document, window */
 
     /**
@@ -6714,13 +7279,6 @@
         True if running on iOS (or iPadOS).
     */
     var isIOS = platform === 'ios';
-    /**
-        Property: O.UA.isWKWebView
-        Type: Boolean
-
-        True if running on WKWebView in iOS (or iPadOS).
-    */
-    var isWKWebView = platform === 'ios' && !!window.indexedDB;
     /**
         Property: O.UA.isAndroid
         Type: Boolean
@@ -6788,7 +7346,6 @@
         isWin: isWin,
         isLinux: isLinux,
         isIOS: isIOS,
-        isWKWebView: isWKWebView,
         isAndroid: isAndroid,
         isApple: isApple,
         browser: browser,
@@ -9390,8 +9947,8 @@
                                 // the value passed to setStyle is a number, so
                                 // it will add 'px' if appropriate.
                                 0;
-                            start = from[ property ] = parseInt( start, 10 );
-                            delta[ property ] = parseInt( end, 10 ) - start;
+                            start = from[ property ] = parseFloat( start );
+                            delta[ property ] = parseFloat( end ) - start;
                         }
                     } else {
                         current[ property ] = end;
@@ -9622,6 +10179,9 @@
             } else {
                 // Or just set.
                 layerAnimation.stop();
+                if ( layerAnimation.current ) {
+                    oldStyles = layerAnimation.current;
+                }
                 layerAnimation.current = newStyles;
                 for ( var property in newStyles ) {
                     var value = newStyles[ property ];
@@ -9636,14 +10196,24 @@
             for ( var property$1 in oldStyles ) {
                 if ( !( property$1 in newStyles ) ) {
                     setStyle( layer, property$1, null );
+                    if ( layerAnimation.current ) {
+                        delete layerAnimation.current[ property$1 ];
+                    }
                 }
             }
         },
     };
 
+    var DEFAULT_IN_INPUT = 0;
+    var ACTIVE_IN_INPUT = 1;
+    var DISABLE_IN_INPUT = 2;
+
     var DELETE_ITEM = isApple ? 'Cmd-Backspace' : 'Delete';
 
     var keyboardShortcuts = /*#__PURE__*/Object.freeze({
+        DEFAULT_IN_INPUT: DEFAULT_IN_INPUT,
+        ACTIVE_IN_INPUT: ACTIVE_IN_INPUT,
+        DISABLE_IN_INPUT: DISABLE_IN_INPUT,
         DELETE_ITEM: DELETE_ITEM
     });
 
@@ -10083,7 +10653,7 @@
         TapEvent.prototype = Object.create( Event$$1 && Event$$1.prototype );
         TapEvent.prototype.constructor = TapEvent;
 
-
+        
 
         return TapEvent;
     }(Event));
@@ -10347,6 +10917,15 @@
         shortcut: '',
 
         /**
+            Property: O.AbstractControlView#shortcutWhenInputFocused
+            Type: Enum
+            Default: GlobalKeyboardShortcuts.DEFAULT_IN_INPUT
+
+            If a shortcut is set, should it be active when an input is focused?
+        */
+        shortcutWhenInputFocused: DEFAULT_IN_INPUT,
+
+        /**
             Property: O.AbstractControlView#tooltip
             Type: String
             Default: '' or 'Shortcut: <shortcut>'
@@ -10378,8 +10957,12 @@
             var shortcut = this.get( 'shortcut' );
             if ( shortcut ) {
                 shortcut.split( ' ' ).forEach( function (key) {
-                    ViewEventsController.kbShortcuts
-                        .register( key, this$1, 'activate' );
+                    ViewEventsController.kbShortcuts.register(
+                        key,
+                        this$1,
+                        'activate',
+                        this$1.get( 'shortcutWhenInputFocused' )
+                    );
                 });
             }
             return this;
@@ -10406,8 +10989,7 @@
             if ( isIOS && this.get( 'isFocused' ) ) {
                 this.blur();
             }
-            return AbstractControlView.parent.willLeaveDocument.call(
-                this );
+            return AbstractControlView.parent.willLeaveDocument.call( this );
         },
 
         /**
@@ -10538,10 +11120,15 @@
         */
         focus: function focus () {
             if ( this.get( 'isInDocument' ) ) {
-                this._domControl.focus();
+                this._domControl.focus({
+                    preventScroll: true,
+                });
                 // Fire event synchronously.
                 if ( !this.get( 'isFocused' ) ) {
-                    this.fire( 'focus' );
+                    this.fire( 'focus', {
+                        target: this._domControl,
+                        targetView: this,
+                    });
                 }
             }
             return this;
@@ -10560,7 +11147,10 @@
                 this._domControl.blur();
                 // Fire event synchronously.
                 if ( this.get( 'isFocused' ) ) {
-                    this.fire( 'blur' );
+                    this.fire( 'blur', {
+                        target: this._domControl,
+                        targetView: this,
+                    });
                 }
             }
             return this;
@@ -10575,7 +11165,10 @@
                 event - {Event} The focus event.
         */
         _updateIsFocused: function ( event ) {
-            this.set( 'isFocused', event.type === 'focus' );
+            this.set(
+                'isFocused',
+                event.type === 'focus' && event.target === this._domControl
+            );
         }.on( 'focus', 'blur' ),
 
         // --- Activate ---
@@ -10636,6 +11229,7 @@
                 Array.prototype.slice.call( arguments, 1 ) );
 
             // Node.DOCUMENT_NODE => 9.
+            var className = this.get( 'className' );
             var nodeIsDocument = ( node.nodeType === 9 );
             var doc = nodeIsDocument ? node : node.ownerDocument;
             var win = doc.defaultView;
@@ -10671,6 +11265,9 @@
             this.isRendered = true;
             this.isInDocument = true;
             this.layer = nodeIsDocument ? node.body : node;
+            if ( className ) {
+                this.layer.className = className;
+            }
         },
 
         safeAreaInsetBottom: 0,
@@ -11426,9 +12023,11 @@
             var options = this.get( 'options' );
             var positionToThe = options && options.positionToThe || 'bottom';
             var alignEdge = options && options.alignEdge || 'left';
+            var extra = options.className || '';
             return 'v-PopOverContainer' +
                 ' v-PopOverContainer--p' + positionToThe.charAt( 0 ) +
-                ' v-PopOverContainer--a' + alignEdge.charAt( 0 );
+                ' v-PopOverContainer--a' + alignEdge.charAt( 0 ) +
+                ( extra ? ' ' + extra : '' );
         }.property( 'options' ),
 
         positioning: 'absolute',
@@ -11795,7 +12394,7 @@
 
         A ButtonView represents an interactive rectangle in your user interface
         which the user can click/tap to perform an action. The ButtonView uses a
-        <button> element in the DOM by default. If the action being perfomed is
+        <button> element in the DOM by default. If the action being performed is
         actually a navigation and just shows/hides content and does not change any
         state, semantically you should change the layer tag to an <a>.
 
@@ -12347,6 +12946,7 @@
                             'right' :
                         position.left < rootViewWidth - position.right ?
                             'right' : 'left';
+                    popOverOptions.keepInHorizontalBounds = true;
                     popOverOptions.showCallout = false;
                     popOverOptions.alignEdge = 'top';
                     popOverOptions.offsetTop =
@@ -12973,7 +13573,7 @@
                 }
                 if ( newView ) {
                     newView.set( 'isFocused', true );
-                    this.scrollIntoView( newView );
+                    this.scrollIntoView();
                 }
                 this._focusedOption = newView;
             }
@@ -12989,29 +13589,42 @@
                 }
                 if ( newView ) {
                     newView.set( 'isSelected', true );
-                    this.scrollIntoView( newView );
+                    this.scrollIntoView();
                 }
                 this._selectedOption = newView;
             }
         }.observes( 'selectedOption' ),
 
-        scrollIntoView: function scrollIntoView ( view ) {
+        // 1. after    => Trigger after the list redraws, which sets new index on
+        //                ListItemView.
+        // 2. nextLoop => Trigger after ListItemView#layoutWillChange, which happens
+        //                in the next loop after the item's index changes.
+        // 3. after    => Trigger after that ListItemView has redrawn in its new
+        //                position so we scroll to the right place.
+        scrollIntoView: function () {
+            var item =
+                this.get( 'focusedOption' ) || this.get( 'selectedOption' );
+            var view = item && this.getView( item );
             var scrollView = this.getParent( ScrollView );
-            if ( !scrollView || !this.get( 'isInDocument' ) ) {
+            if ( !view || !scrollView || !this.get( 'isInDocument' ) ) {
                 return;
             }
-            var scrollHeight = scrollView.get( 'pxHeight' );
-            var scrollTop = scrollView.get( 'scrollTop' );
             var top = view.getPositionRelativeTo( scrollView ).top;
             var height = view.get( 'pxHeight' );
+            var scrollTop = scrollView.get( 'scrollTop' );
+            var scrollHeight = scrollView.get( 'pxHeight' );
 
             if ( top < scrollTop ) {
-                scrollView.scrollTo( 0, top - ( height >> 1 ), true );
+                scrollView.scrollTo(
+                    0,
+                    top - ( height >> 1 ),
+                    true
+                );
             } else if ( top + height > scrollTop + scrollHeight ) {
                 scrollView.scrollTo( 0,
                     top + height - scrollHeight + ( height >> 1 ), true );
             }
-        },
+        }.queue( 'after' ).nextLoop().queue( 'after' ),
     });
 
     /*global document */
@@ -13280,7 +13893,7 @@
             return this;
         },
 
-        _addCondition: function _addCondition ( view, index ) {
+        case: function case$1 ( index, view ) {
             view = view ?
                 view instanceof Array ?
                     view :
@@ -13296,11 +13909,11 @@
         },
 
         show: function show ( view ) {
-            return this._addCondition( view, 0 );
+            return this.case( 0, view );
         },
 
         otherwise: function otherwise ( view ) {
-            return this._addCondition( view, 1 );
+            return this.case( 1, view );
         },
 
         end: function end () {
@@ -13317,7 +13930,7 @@
         return bool ? 1 : 0;
     };
 
-    var createView = function ( object, property, transform ) {
+    var choose = function ( object, property, transform ) {
         var switchView = new SwitchView({
             index: bind( object, property, transform ),
         });
@@ -13329,13 +13942,17 @@
         var pickView = transform ? function ( value, syncForward ) {
             return pickViewWhen( transform( value, syncForward ) );
         } : pickViewWhen;
-        return createView( object, property, pickView );
+        // (The lint would complain that it expected .case().)
+        // eslint-disable-next-line overture/switch-view-usage
+        return choose( object, property, pickView );
     };
     var unless = function ( object, property, transform ) {
         var pickView = transform ? function ( value, syncForward ) {
             return pickViewUnless( transform( value, syncForward ) );
         } : pickViewUnless;
-        return createView( object, property, pickView );
+        // (The lint would complain that it expected .case().)
+        // eslint-disable-next-line overture/switch-view-usage
+        return choose( object, property, pickView );
     };
 
     /*global document */
@@ -13539,6 +14156,7 @@
             var type = this.get( 'type' );
             return 'v-Text' +
                 ( this.get( 'isExpanding' ) ? ' v-Text--expanding' : '' ) +
+                ( this.get( 'isMultiline' ) ? ' v-Text--multiline' : '' ) +
                 ( this.get( 'isHighlighted' ) ? ' is-highlighted' : '' ) +
                 ( this.get( 'isFocused' ) ? ' is-focused' : '' ) +
                 ( this.get( 'isValid' ) ? '' : ' is-invalid' ) +
@@ -13546,15 +14164,6 @@
                 ( type ? ' ' + type : '' );
         }.property( 'type', 'isExpanding', 'isHighlighted',
             'isFocused', 'isValid', 'isDisabled' ),
-
-        layerStyles: function () {
-            return Object.assign({
-                position: this.get( 'positioning' ),
-                display: this.get( 'isMultiline' ) ? 'block' : 'inline-block',
-                cursor: 'text',
-                userSelect: 'text',
-            }, this.get( 'layout' ) );
-        }.property( 'layout', 'positioning' ),
 
         /**
             Method: O.TextView#draw
@@ -13860,8 +14469,8 @@
         Extends: ButtonView,
 
         className: 'v-ClearSearchButton',
-        positioning: 'absolute',
         shortcut: 'Ctrl-/',
+        shortcutWhenInputFocused: ACTIVE_IN_INPUT,
     });
 
     var SearchTextView = Class({
@@ -13891,7 +14500,7 @@
 
         reset: function reset () {
             this.set( 'value', '' )
-                .blur();
+                .focus();
         },
     });
 
@@ -13941,6 +14550,7 @@
                 controller.on( 'done', this, 'blur' );
             } else {
                 controller.off( 'done', this, 'blur' );
+                controller.set( 'isFiltering', false );
             }
         }.observes( 'isInDocument' ),
 
@@ -13948,6 +14558,10 @@
 
         didFocus: function () {
             this.get( 'controller' ).set( 'isFiltering', true );
+            var scrollView = this.getParent( ScrollView );
+            if ( scrollView ) {
+                scrollView.scrollTo( 0, 0, false );
+            }
         }.on( 'focus' ),
 
         handler: function () {
@@ -13975,6 +14589,7 @@
 
         keydown: function ( event ) {
             var controller = this.get( 'controller' );
+            var scrollView;
             switch ( lookupKey( event ) ) {
             case 'Escape':
                 if ( controller.get( 'search' ) ) {
@@ -14003,6 +14618,10 @@
                 }
                 break;
             default:
+                scrollView = this.getParent( ScrollView );
+                if ( scrollView ) {
+                    scrollView.scrollTo( 0, 0, false );
+                }
                 return;
             }
             event.stopPropagation();
@@ -14102,6 +14721,10 @@
             layer.addEventListener( 'mousemove', this, false );
             layer.addEventListener( 'mouseout', this, false );
 
+            if ( !this.showFilter ) {
+                this.scrollView.focus();
+            }
+
             return this;
         },
 
@@ -14192,8 +14815,8 @@
                 break;
             default:
                 if ( !this.get( 'showFilter' ) ) {
-                    var handler = ViewEventsController
-                        .kbShortcuts.getHandlerForKey( key );
+                    var kbShortcuts = ViewEventsController.kbShortcuts;
+                    var handler = kbShortcuts.getHandlerForKey( key );
                     var parent, object, method;
                     if ( handler ) {
                         parent = object = handler[0];
@@ -14788,7 +15411,7 @@
                 }),
                 create( 'p.u-alignRight', [
                     new ButtonView({
-                        type: 'v-Button--destructive v-Button--size13',
+                        type: 'v-Button--standard v-Button--size13',
                         label: loc( 'Cancel' ),
                         target: popOver,
                         method: 'hide',
@@ -14809,8 +15432,6 @@
                     start: 0,
                     end: this.get( 'value' ).length,
                 }).focus();
-                // IE8 and Safari 6 don't fire this event for some reason.
-                this._input.fire( 'focus' );
             }
         }.nextFrame().observes( 'isInDocument' ),
 
@@ -15171,6 +15792,10 @@
 
         // ---
 
+        getIcon: function getIcon () {
+            return null;
+        },
+
         toolbarConfig: {
             left: [
                 'bold', 'italic', 'underline', 'strikethrough', '-',
@@ -15207,7 +15832,7 @@
                 bold: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-bold',
+                    icon: this.getIcon( 'bold' ),
                     isActive: bind( this, 'isBold' ),
                     label: loc( 'Bold' ),
                     tooltip: loc( 'Bold' ) + '\n' +
@@ -15224,7 +15849,7 @@
                 italic: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-italic',
+                    icon: this.getIcon( 'italic' ),
                     isActive: bind( this, 'isItalic' ),
                     label: loc( 'Italic' ),
                     tooltip: loc( 'Italic' ) + '\n' +
@@ -15241,7 +15866,7 @@
                 underline: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-underline',
+                    icon: this.getIcon( 'underline' ),
                     isActive: bind( this, 'isUnderlined' ),
                     label: loc( 'Underline' ),
                     tooltip: loc( 'Underline' ) + '\n' +
@@ -15258,7 +15883,7 @@
                 strikethrough: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-strikethrough',
+                    icon: this.getIcon( 'strikethrough' ),
                     isActive: bind( this, 'isStriked' ),
                     label: loc( 'Strikethrough' ),
                     tooltip: loc( 'Strikethrough' ) + '\n' +
@@ -15275,7 +15900,7 @@
                 size: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-font-size',
+                    icon: this.getIcon( 'size' ),
                     label: loc( 'Font Size' ),
                     tooltip: loc( 'Font Size' ),
                     target: this,
@@ -15284,7 +15909,7 @@
                 font: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-font',
+                    icon: this.getIcon( 'font' ),
                     label: loc( 'Font Face' ),
                     tooltip: loc( 'Font Face' ),
                     target: this,
@@ -15293,7 +15918,7 @@
                 color: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-palette',
+                    icon: this.getIcon( 'color' ),
                     label: loc( 'Text Color' ),
                     tooltip: loc( 'Text Color' ),
                     target: this,
@@ -15302,7 +15927,7 @@
                 bgcolor: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-highlight',
+                    icon: this.getIcon( 'bgcolor' ),
                     label: loc( 'Text Highlight' ),
                     tooltip: loc( 'Text Highlight' ),
                     target: this,
@@ -15311,7 +15936,7 @@
                 link: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-link',
+                    icon: this.getIcon( 'link' ),
                     isActive: bind( this, 'isLink' ),
                     label: loc( 'Link' ),
                     tooltip: loc( 'Link' ) + '\n' +
@@ -15328,7 +15953,7 @@
                 code: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-code',
+                    icon: this.getIcon( 'code' ),
                     isActive: bind( this, 'isCode' ),
                     label: loc( 'Preformatted Text' ),
                     tooltip: loc( 'Preformatted Text' ) + '\n' +
@@ -15345,7 +15970,7 @@
                 image: new FileButtonView({
                     tabIndex: -1,
                     type: 'v-FileButton v-Button--iconOnly',
-                    icon: 'icon-image',
+                    icon: this.getIcon( 'image' ),
                     label: loc( 'Insert Image' ),
                     tooltip: loc( 'Insert Image' ),
                     acceptMultiple: true,
@@ -15356,7 +15981,7 @@
                 remoteImage: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-image',
+                    icon: this.getIcon( 'image' ),
                     label: loc( 'Insert Image' ),
                     tooltip: loc( 'Insert Image' ),
                     target: this,
@@ -15365,7 +15990,7 @@
                 left: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-paragraph-left',
+                    icon: this.getIcon( 'left' ),
                     isActive: bind( this, 'alignment', isEqualToValue( 'left' ) ),
                     label: loc( 'Left' ),
                     tooltip: loc( 'Left' ),
@@ -15377,7 +16002,7 @@
                 centre: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-paragraph-centre',
+                    icon: this.getIcon( 'centre' ),
                     isActive: bind( this, 'alignment', isEqualToValue( 'center' ) ),
                     label: loc( 'Center' ),
                     tooltip: loc( 'Center' ),
@@ -15389,7 +16014,7 @@
                 right: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-paragraph-right',
+                    icon: this.getIcon( 'right' ),
                     isActive: bind( this, 'alignment', isEqualToValue( 'right' ) ),
                     label: loc( 'Right' ),
                     tooltip: loc( 'Right' ),
@@ -15401,7 +16026,7 @@
                 justify: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-paragraph-justify',
+                    icon: this.getIcon( 'justify' ),
                     isActive: bind( this, 'alignment',
                         isEqualToValue( 'justify' ) ),
                     label: loc( 'Justify' ),
@@ -15414,7 +16039,7 @@
                 ltr: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-lefttoright',
+                    icon: this.getIcon( 'ltr' ),
                     isActive: bind( this, 'direction', isEqualToValue( 'ltr' ) ),
                     label: loc( 'Text Direction: Left to Right' ),
                     tooltip: loc( 'Text Direction: Left to Right' ),
@@ -15426,7 +16051,7 @@
                 rtl: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-righttoleft',
+                    icon: this.getIcon( 'rtl' ),
                     isActive: bind( this, 'direction', isEqualToValue( 'rtl' ) ),
                     label: loc( 'Text Direction: Right to Left' ),
                     tooltip: loc( 'Text Direction: Right to Left' ),
@@ -15438,7 +16063,7 @@
                 quote: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-quotes-left',
+                    icon: this.getIcon( 'quote' ),
                     label: loc( 'Quote' ),
                     tooltip: loc( 'Quote' ) + '\n' +
                         formatKeyForPlatform( 'Cmd-]' ),
@@ -15448,7 +16073,7 @@
                 unquote: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-quotes-right',
+                    icon: this.getIcon( 'unquote' ),
                     label: loc( 'Unquote' ),
                     tooltip: loc( 'Unquote' ) + '\n' +
                         formatKeyForPlatform( 'Cmd-[' ),
@@ -15458,7 +16083,7 @@
                 ul: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-list',
+                    icon: this.getIcon( 'ul' ),
                     isActive: bind( this, 'isUnorderedList' ),
                     label: loc( 'Unordered List' ),
                     tooltip: loc( 'Unordered List' ) + '\n' +
@@ -15475,7 +16100,7 @@
                 ol: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-numbered-list',
+                    icon: this.getIcon( 'ol' ),
                     isActive: bind( this, 'isOrderedList' ),
                     label: loc( 'Ordered List' ),
                     tooltip: loc( 'Ordered List' ) + '\n' +
@@ -15492,7 +16117,7 @@
                 unformat: new ButtonView({
                     tabIndex: -1,
                     type: 'v-Button--iconOnly',
-                    icon: 'icon-clear-formatting',
+                    icon: this.getIcon( 'unformat' ),
                     label: loc( 'Clear Formatting' ),
                     tooltip: loc( 'Clear Formatting' ),
                     activate: function activate () {
@@ -15981,13 +16606,6 @@
         },
     });
 
-    RichTextView.isSupported = (
-        ( 'contentEditable' in document.body ) &&
-        // WKWebView (introduced in iOS8) finally supports RTV without horrendous
-        // bugs.
-        ( !isIOS || isWKWebView )
-    );
-
     RichTextView.TOOLBAR_HIDDEN = TOOLBAR_HIDDEN;
     RichTextView.TOOLBAR_INLINE = TOOLBAR_INLINE;
     RichTextView.TOOLBAR_AT_SELECTION = TOOLBAR_AT_SELECTION;
@@ -15999,10 +16617,6 @@
         file: 1,
         submit: 1,
     };
-
-    var DEFAULT_IN_INPUT = 0;
-    var ACTIVE_IN_INPUT = 1;
-    var DISABLE_IN_INPUT = 2;
 
     var handleOnDown = {};
 
@@ -16176,14 +16790,16 @@
         trigger: function ( event ) {
             var target = event.target;
             var nodeName = target.nodeName;
-            var isSpecialKey = event.ctrlKey || event.metaKey;
+            var key = lookupKey( event );
+            var allowedInInput =
+                ( isApple ? event.metaKey : event.ctrlKey ) &&
+                /-(?:.|Enter)$/.test( key );
             var inputIsFocused = (
                 nodeName === 'TEXTAREA' ||
                 nodeName === 'SELECT' ||
                 ( nodeName === 'INPUT' && !allowedInputs[ target.type ] ) ||
                 ( event.targetView instanceof RichTextView )
             );
-            var key = lookupKey( event );
             if ( event.type === 'keydown' ) {
                 handleOnDown[ key ] = true;
             } else if ( handleOnDown[ key ] ) {
@@ -16193,7 +16809,7 @@
             if ( handler ) {
                 var ifInput = handler[2];
                 if ( inputIsFocused && ifInput !== ACTIVE_IN_INPUT &&
-                        ( !isSpecialKey || ifInput === DISABLE_IN_INPUT ) ) {
+                        ( !allowedInInput || ifInput === DISABLE_IN_INPUT ) ) {
                     return;
                 }
                 handler[0][ handler[1] ]( event );
@@ -16643,7 +17259,7 @@
             }
         }.queue( 'after' ).observes( 'encodedState', 'globalQueryStringPart' ),
 
-        // This method allows a hash to be in state, purely because in FastMail we
+        // This method allows a hash to be in state, purely because in Fastmail we
         // have a few places where we want it so—we’re not quite dealing with
         // “encoded state” there, but rather partial URLs. Still, it’s kinda nice to
         // do it here. The rest of the router doesn’t really cope with a hash at
@@ -16829,12 +17445,23 @@
 
             if ( data ) {
                 // Substitute in images.
-                data = data.replace( /url\(([^)]+)\)/g, function ( url, src ) {
+                data = data.replace( /url\("?([^)"]+)"?\)/g, function ( url, src ) {
+                    var colon = src.indexOf( ':' );
+                    var currentColor = '';
+                    if ( colon > -1 && src.slice( colon - 4, colon ) === '.svg' ) {
+                        currentColor = src.slice( colon + 1 );
+                        src = src.slice( 0, colon );
+                    }
+
                     var imageData =
                             images[ src ] ||
                             themeIndependentImages[ src ] ||
                             loc( src );
-                    if ( /\.svg$/.test( src ) ) {
+                    if ( imageData && /\.svg$/.test( src ) ) {
+                        if ( currentColor ) {
+                            imageData =
+                                imageData.replace( /currentColor/g, currentColor );
+                        }
                         imageData = 'data:image/svg+xml;charset=UTF-8,' +
                             encodeURIComponent( imageData );
                     }
@@ -18301,9 +18928,9 @@
         },
 
         reset: function reset () {
-            this._windows.length =
-            this._indexOfRequested.length =
-            this._waitingPackets.length =
+            this._windows.length = 0;
+            this._indexOfRequested.length = 0;
+            this._waitingPackets.length = 0;
             this._preemptiveUpdates.length = 0;
 
             this._isAnExplicitIdFetch = false;
@@ -19310,81 +19937,79 @@
 
         Represents an attribute on a record.
     */
-    var RecordAttribute = Class({
+    var RecordAttribute = function RecordAttribute ( mixin$$1 ) {
+        Object.assign( this, mixin$$1 );
+    };
 
-        __setupProperty__: function __setupProperty__ ( metadata, propKey, object ) {
-            var constructor = object.constructor;
-            var attrs = metadata.attrs;
-            var dependents, dependencies, l, key, AttributeErrorsType;
-            var attrErrorsMetadata;
-            if ( !metadata.hasOwnProperty( 'attrs' ) ) {
-                attrs = metadata.attrs = attrs ? Object.create( attrs ) : {};
+    RecordAttribute.prototype.__setupProperty__ = function __setupProperty__ ( metadata, propKey, object ) {
+        var constructor = object.constructor;
+        var attrs = metadata.attrs;
+        var dependents, dependencies, l, key, AttributeErrorsType;
+        var attrErrorsMetadata;
+        if ( !metadata.hasOwnProperty( 'attrs' ) ) {
+            attrs = metadata.attrs = attrs ? Object.create( attrs ) : {};
+        }
+        if ( this.isPrimaryKey ) {
+            constructor.primaryKey = propKey;
+            // Make the `id` property depend on the primary key.
+            dependents = metadata.dependents;
+            if ( !metadata.hasOwnProperty( 'dependents' ) ) {
+                dependents = metadata.dependents = clone( dependents );
+                metadata.allDependents = {};
             }
-            if ( this.isPrimaryKey ) {
-                constructor.primaryKey = propKey;
-                // Make the `id` property depend on the primary key.
-                dependents = metadata.dependents;
-                if ( !metadata.hasOwnProperty( 'dependents' ) ) {
-                    dependents = metadata.dependents = clone( dependents );
-                    metadata.allDependents = {};
-                }
-                ( dependents[ propKey ] ||
-                    ( dependents[ propKey ] = [] ) ).push( 'id' );
-            }
-            attrs[ this.key || propKey ] = propKey;
-            constructor.clientSettableAttributes = null;
+            ( dependents[ propKey ] ||
+                ( dependents[ propKey ] = [] ) ).push( 'id' );
+        }
+        attrs[ this.key || propKey ] = propKey;
+        constructor.clientSettableAttributes = null;
 
-            if ( this.validate ) {
+        if ( this.validate ) {
+            if ( !metadata.hasObserver( propKey, attributeErrorsObserver ) ) {
                 metadata.addObserver( propKey, attributeErrorsObserver );
-                dependencies = this.validityDependencies;
-                if ( dependencies ) {
-                    AttributeErrorsType = object.AttributeErrorsType;
-                    if ( AttributeErrorsType.forRecordType !== constructor ) {
-                        AttributeErrorsType = object.AttributeErrorsType =
-                            Class({
-                                Extends: AttributeErrorsType,
-                            });
-                        AttributeErrorsType.forRecordType = constructor;
-                        attrErrorsMetadata = meta( AttributeErrorsType.prototype );
-                        dependents = attrErrorsMetadata.dependents =
-                            clone( attrErrorsMetadata.dependents );
-                    } else {
-                        attrErrorsMetadata = meta( AttributeErrorsType.prototype );
-                        dependents = attrErrorsMetadata.dependents;
-                    }
-                    l = dependencies.length;
-                    while ( l-- ) {
-                        key = dependencies[l];
-                        if ( !dependents[ key ] ) {
-                            dependents[ key ] = [];
+            }
+            dependencies = this.validityDependencies;
+            if ( dependencies ) {
+                AttributeErrorsType = object.AttributeErrorsType;
+                if ( AttributeErrorsType.forRecordType !== constructor ) {
+                    AttributeErrorsType = object.AttributeErrorsType =
+                        Class({
+                            Extends: AttributeErrorsType,
+                        });
+                    AttributeErrorsType.forRecordType = constructor;
+                    attrErrorsMetadata = meta( AttributeErrorsType.prototype );
+                    dependents = attrErrorsMetadata.dependents =
+                        clone( attrErrorsMetadata.dependents );
+                } else {
+                    attrErrorsMetadata = meta( AttributeErrorsType.prototype );
+                    dependents = attrErrorsMetadata.dependents;
+                }
+                l = dependencies.length;
+                while ( l-- ) {
+                    key = dependencies[l];
+                    if ( !dependents[ key ] ) {
+                        dependents[ key ] = [];
+                        if ( !metadata
+                                .hasObserver( key, attributeErrorsObserver ) ) {
                             metadata
                                 .addObserver( key, attributeErrorsObserver );
                         }
-                        dependents[ key ].push( propKey );
                     }
+                    dependents[ key ].push( propKey );
                 }
             }
-        },
+        }
+    };
 
-        __teardownProperty__: function __teardownProperty__ ( metadata, propKey, object ) {
-            var attrs = metadata.attrs;
-            if ( !metadata.hasOwnProperty( 'attrs' ) ) {
-                attrs = metadata.attrs = Object.create( attrs );
-            }
-            attrs[ this.key || propKey ] = null;
-            object.constructor.clientSettableAttributes = null;
-        },
+    RecordAttribute.prototype.__teardownProperty__ = function __teardownProperty__ ( metadata, propKey, object ) {
+        var attrs = metadata.attrs;
+        if ( !metadata.hasOwnProperty( 'attrs' ) ) {
+            attrs = metadata.attrs = Object.create( attrs );
+        }
+        attrs[ this.key || propKey ] = null;
+        object.constructor.clientSettableAttributes = null;
+    };
 
-        /**
-            Constructor: O.RecordAttribute
-
-            Parameters:
-                mixin - {Object} (optional) Override the default properties.
-        */
-        init: function ( mixin$$1 ) {
-            Object.assign( this, mixin$$1 );
-        },
-
+    Object.assign( RecordAttribute.prototype, {
         /**
             Property (private): O.RecordAttribute#isProperty
             Type: Boolean
@@ -19774,17 +20399,17 @@
         }.observes( '*' ),
     });
 
-    var ToOneAttribute = Class({
+    var ToOneAttribute = /*@__PURE__*/(function (RecordAttribute$$1) {
+        function ToOneAttribute () {
+            RecordAttribute$$1.apply(this, arguments);
+        }
 
-        Extends: RecordAttribute,
+        if ( RecordAttribute$$1 ) ToOneAttribute.__proto__ = RecordAttribute$$1;
+        ToOneAttribute.prototype = Object.create( RecordAttribute$$1 && RecordAttribute$$1.prototype );
+        ToOneAttribute.prototype.constructor = ToOneAttribute;
 
-        // Referenced record may be garbage collected independently of this record,
-        // so always ask store for the value.
-        isVolatile: true,
-
-        willSet: function willSet ( propValue, propKey, record ) {
-            if ( ToOneAttribute.parent.willSet.call(
-                    this, propValue, propKey, record ) ) {
+        ToOneAttribute.prototype.willSet = function willSet ( propValue, propKey, record ) {
+            if ( RecordAttribute$$1.prototype.willSet.call( this, propValue, propKey, record ) ) {
                 if ( record.get( 'storeKey' ) &&
                         propValue && !propValue.get( 'storeKey' ) ) {
                     throw new Error( 'O.ToOneAttribute: ' +
@@ -19793,20 +20418,25 @@
                 return true;
             }
             return false;
-        },
+        };
 
-        call: function call ( record, propValue, propKey ) {
-            var result = ToOneAttribute.parent.call.call(
-                this, record, propValue, propKey );
+        ToOneAttribute.prototype.call = function call ( record, propValue, propKey ) {
+            var result = RecordAttribute$$1.prototype.call.call( this, record, propValue, propKey );
             if ( result && typeof result === 'string' ) {
                 result = record.get( 'store' ).getRecordFromStoreKey( result );
             }
             return result || null;
-        },
-    });
+        };
 
-    var toOne = function ( mixin$$1 ) {
-        return new ToOneAttribute( mixin$$1 );
+        return ToOneAttribute;
+    }(RecordAttribute));
+
+    // Referenced record may be garbage collected independently of this record,
+    // so always ask store for the value.
+    ToOneAttribute.prototype.isVolatile = true;
+
+    var toOne = function ( mixin ) {
+        return new ToOneAttribute( mixin );
     };
 
     var READY_NEW_DIRTY = (READY|NEW|DIRTY);
@@ -20372,10 +21002,39 @@
                 } else {
                     list = list.slice();
                 }
-
-                this.set( '[]', list );
+                RecordArray$1.parent[ '[]' ].call( this, list );
             }
         },
+
+        updateRecord: function updateRecord () {
+            var record = this.get( 'record' );
+            var propKey = this.get( 'propKey' );
+            var attr$$1 = record[ propKey ];
+            var value = this._array;
+            this._updatingStore = true;
+            if ( !value.length && attr$$1.isNullable ) {
+                value = null;
+            } else if ( attr$$1.Type === Object ) {
+                value = value.reduce( mapToTrue, {} );
+            } else {
+                value = value.slice();
+            }
+            record[ propKey ].setRaw( record, propKey, value );
+            this._updatingStore = false;
+        },
+
+        '[]': function ( array ) {
+            if ( array ) {
+                RecordArray$1.parent[ '[]' ].call(
+                    this,
+                    array.map( function (x) { return x.get( 'storeKey' ); } )
+                );
+                this.updateRecord();
+            } else {
+                array = this.map( function (x) { return x; } );
+            }
+            return array;
+        }.property(),
 
         getObjectAt: function getObjectAt ( index ) {
             var storeKey = RecordArray$1.parent.getObjectAt.call( this, index );
@@ -20391,28 +21050,13 @@
 
         replaceObjectsAt: function replaceObjectsAt ( index, numberRemoved, newItems ) {
             newItems = newItems ? slice$4.call( newItems ) : [];
-
-            var record = this.get( 'record' );
-            var propKey = this.get( 'propKey' );
             var store = this.get( 'store' );
             var oldItems = RecordArray$1.parent.replaceObjectsAt.call(
-                    this, index, numberRemoved, newItems.map( function ( record ) {
-                        return record.get( 'storeKey' );
-                    })
-                ).map( function ( storeKey ) {
-                    return store.getRecordFromStoreKey( storeKey );
-                });
-            var value = this._array;
-
-            this._updatingStore = true;
-            if ( record[ propKey ].Type === Object ) {
-                value = value.reduce( mapToTrue, {} );
-            } else {
-                value = value.slice();
-            }
-            record[ propKey ].setRaw( record, propKey, value );
-            this._updatingStore = false;
-
+                this, index, numberRemoved, newItems.map( function (x) { return x.get( 'storeKey' ); } )
+            ).map(
+                function (storeKey) { return store.getRecordFromStoreKey( storeKey ); }
+            );
+            this.updateRecord();
             return oldItems;
         },
 
@@ -20442,26 +21086,26 @@
         method: 'notifyRecordArray',
     };
 
-    var ToManyAttribute = Class({
+    var ToManyAttribute = /*@__PURE__*/(function (RecordAttribute$$1) {
+        function ToManyAttribute () {
+            RecordAttribute$$1.apply(this, arguments);
+        }
 
-        Extends: RecordAttribute,
+        if ( RecordAttribute$$1 ) ToManyAttribute.__proto__ = RecordAttribute$$1;
+        ToManyAttribute.prototype = Object.create( RecordAttribute$$1 && RecordAttribute$$1.prototype );
+        ToManyAttribute.prototype.constructor = ToManyAttribute;
 
-        __setupProperty__: function __setupProperty__ ( metadata, propKey, object ) {
-            ToManyAttribute.parent
-                .__setupProperty__.call( this, metadata, propKey, object );
+        ToManyAttribute.prototype.__setupProperty__ = function __setupProperty__ ( metadata, propKey, object ) {
+            RecordAttribute$$1.prototype.__setupProperty__.call( this, metadata, propKey, object );
             metadata.addObserver( propKey, notifyRecordArrayObserver );
-        },
+        };
 
-        __teardownProperty__: function __teardownProperty__ ( metadata, propKey, object ) {
-            ToManyAttribute.parent
-                .__teardownProperty__.call( this, metadata, propKey, object );
+        ToManyAttribute.prototype.__teardownProperty__ = function __teardownProperty__ ( metadata, propKey, object ) {
+            RecordAttribute$$1.prototype.__teardownProperty__.call( this, metadata, propKey, object );
             metadata.removeObserver( propKey, notifyRecordArrayObserver );
-        },
+        };
 
-        Type: Array,
-        recordType: null,
-
-        call: function call ( record, propValue, propKey ) {
+        ToManyAttribute.prototype.call = function call ( record, propValue, propKey ) {
             var arrayKey = '_' + propKey + 'RecordArray';
             var recordArray = record[ arrayKey ];
             if ( !recordArray ) {
@@ -20479,18 +21123,21 @@
                     );
             }
             return recordArray;
-        },
+        };
 
-        getRaw: function getRaw ( record, propKey ) {
-            return ToManyAttribute.parent.call.call(
-                this, record, undefined, propKey );
-        },
+        ToManyAttribute.prototype.getRaw = function getRaw ( record, propKey ) {
+            return RecordAttribute$$1.prototype.call.call( this, record, undefined, propKey );
+        };
 
-        setRaw: function setRaw ( record, propKey, data ) {
-            return ToManyAttribute.parent.call.call(
-                this, record, data, propKey );
-        },
-    });
+        ToManyAttribute.prototype.setRaw = function setRaw ( record, propKey, data ) {
+            return RecordAttribute$$1.prototype.call.call( this, record, data, propKey );
+        };
+
+        return ToManyAttribute;
+    }(RecordAttribute));
+
+    ToManyAttribute.prototype.Type = Array;
+    ToManyAttribute.prototype.recordType = null;
 
     var toMany = function ( mixin$$1 ) {
         return new ToManyAttribute( mixin$$1 );
@@ -20517,92 +21164,76 @@
         When an error is “caught” (that is, error propagation is stopped), the
         changes in the store are not reverted.
     */
-    var RecordResult = Class({
+    var RecordResult = function RecordResult ( record, callback, mixin ) {
+        this._callback = callback;
 
-        /**
-            Property: O.RecordResult#error
-            Type: {O.Event|null}
+        this.record = record;
+        this.error = null;
 
-            Set for any commit error that occurs (whether a handled error or not).
-        */
+        record
+            .on( 'record:commit:error', this, 'onError' )
+            .addObserverForKey( 'status', this, 'statusDidChange' );
 
-        /**
-            Property: O.RecordResult#record
-            Type: {O.Record}
+        Object.assign( this, mixin );
+        this.statusDidChange( record, 'status', 0, record.get( 'status' ) );
+    };
 
-            The record being observed
-        */
+    RecordResult.prototype.done = function done () {
+        this.record
+            .removeObserverForKey( 'status', this, 'statusDidChange' )
+            .off( 'record:commit:error', this, 'onError' );
+        this._callback( this );
+    };
 
-        init: function ( record, callback, mixin$$1 ) {
-            this._callback = callback;
-
-            this.record = record;
-            this.error = null;
-
-            record
-                .on( 'record:commit:error', this, 'onError' )
-                .addObserverForKey( 'status', this, 'statusDidChange' );
-
-            Object.assign( this, mixin$$1 );
-            this.statusDidChange( record, 'status', 0, record.get( 'status' ) );
-        },
-
-        done: function done () {
-            this.record
-                .removeObserverForKey( 'status', this, 'statusDidChange' )
-                .off( 'record:commit:error', this, 'onError' );
-            this._callback( this );
-        },
-
-        statusDidChange: function statusDidChange ( record, key, _, newStatus ) {
-            if ( !( newStatus & (EMPTY|NEW|DIRTY|COMMITTING) ) ) {
-                this.done();
-            }
-        },
-
-        onError: function onError ( event ) {
-            this.error = event;
-            if ( this.shouldStopErrorPropagation( event ) ) {
-                event.stopPropagation();
-            }
+    RecordResult.prototype.statusDidChange = function statusDidChange ( record, key, _, newStatus ) {
+        if ( !( newStatus & (EMPTY|NEW|DIRTY|COMMITTING) ) ) {
             this.done();
-        },
+        }
+    };
 
-        /**
-            Property: O.RecordResult#handledErrorTypes
-            Type: {Array<string>|HANDLE_NO_ERRORS|HANDLE_ALL_ERRORS}
-            Default: HANDLE_NO_ERRORS
+    RecordResult.prototype.onError = function onError ( event ) {
+        this.error = event;
+        if ( this.shouldStopErrorPropagation( event ) ) {
+            event.stopPropagation();
+        }
+        this.done();
+    };
 
-            Either one of the two constants (available on the RecordResult
-            constructor), or an array of error types to handle, e.g.
-            `[ 'alreadyExists' ]`. (Where “handle” means “stop propagation on”.)
-        */
-        handledErrorTypes: HANDLE_NO_ERRORS,
+    /**
+        Method: O.RecordResult#shouldStopErrorPropagation
 
-        /**
-            Method: O.RecordResult#shouldStopErrorPropagation
+        When an error occurs, should its propagation be stopped? If propagation
+        is stopped, the changes will not be reverted in the store, and the
+        crafter of the RecordResult is responsible for resolving the state in
+        the store.
 
-            When an error occurs, should its propagation be stopped? If propagation
-            is stopped, the changes will not be reverted in the store, and the
-            crafter of the RecordResult is responsible for resolving the state in
-            the store.
+        Instances should normally be able to set `handledErrorTypes`, but if
+        more complex requirements come up this method can also be overridden.
 
-            Instances should normally be able to set `handledErrorTypes`, but if
-            more complex requirements come up this method can also be overridden.
+        Parameters:
+            event - {O.Event} The commit error object.
 
-            Parameters:
-                event - {O.Event} The commit error object.
+        Returns:
+            {Boolean} Stop propagation of the event?
+    */
+    RecordResult.prototype.shouldStopErrorPropagation = function shouldStopErrorPropagation ( event ) {
+        var handledErrorTypes = this.handledErrorTypes;
+        return handledErrorTypes !== HANDLE_NO_ERRORS &&
+            ( handledErrorTypes === HANDLE_ALL_ERRORS ||
+                handledErrorTypes.indexOf( event.type ) !== -1 );
+    };
 
-            Returns:
-                {Boolean} Stop propagation of the event?
-        */
-        shouldStopErrorPropagation: function shouldStopErrorPropagation ( event ) {
-            var handledErrorTypes = this.handledErrorTypes;
-            return handledErrorTypes !== HANDLE_NO_ERRORS &&
-                ( handledErrorTypes === HANDLE_ALL_ERRORS ||
-                    handledErrorTypes.indexOf( event.type ) !== -1 );
-        },
-    });
+    /**
+        Property: O.RecordResult#handledErrorTypes
+        Type: {Array<string>|HANDLE_NO_ERRORS|HANDLE_ALL_ERRORS}
+        Default: HANDLE_NO_ERRORS
+
+        Either one of the two constants (available on the RecordResult
+        constructor), or an array of error types to handle, e.g.
+        `[ 'alreadyExists' ]`. (Where “handle” means “stop propagation on”.)
+    */
+    RecordResult.prototype.handledErrorTypes = HANDLE_NO_ERRORS;
+
     RecordResult.HANDLE_ALL_ERRORS = HANDLE_ALL_ERRORS;
     RecordResult.HANDLE_NO_ERRORS = HANDLE_NO_ERRORS;
 
@@ -20635,10 +21266,10 @@
                         }
                     });
         */
-        getResult: function getResult ( mixin$$1 ) {
+        getResult: function getResult ( mixin ) {
             var this$1 = this;
 
-            return new Promise( function (resolve) { return new RecordResult( this$1, resolve, mixin$$1 ); }
+            return new Promise( function (resolve) { return new RecordResult( this$1, resolve, mixin ); }
             );
         },
 
@@ -20680,7 +21311,7 @@
                         })
 
         */
-        ifSuccess: function ifSuccess ( mixin$$1 ) {
+        ifSuccess: function ifSuccess ( mixin ) {
             var this$1 = this;
 
             return new Promise( function ( resolve, reject ) { return new RecordResult( this$1, function (result) {
@@ -20690,7 +21321,7 @@
                     } else {
                         resolve( record );
                     }
-                }, mixin$$1 ); }
+                }, mixin ); }
             );
         },
     });
@@ -20948,7 +21579,7 @@
             var callbackAfterAll;
             if ( callback ) {
                 callbackAfterAll = function () {
-                    if ( !( waiting-= 1 ) ) {
+                    if ( !( waiting -= 1 ) ) {
                         callback();
                     }
                 };
@@ -20977,201 +21608,146 @@
         breached.
     */
 
-    var MemoryManager = Class({
+    var MemoryManager = function MemoryManager ( store, restrictions, frequency ) {
+        this._index = 0;
+        this._store = store;
+        this._restrictions = restrictions;
 
-        /**
-            Property (private): O.MemoryManager#_index
-            Type: Number
+        this.isPaused = false;
+        this.frequency = frequency || 30000;
 
-            Keeps track of which record type we need to examine next.
-        */
+        RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
+    };
 
-        /**
-            Property (private): O.MemoryManager#_store
-            Type: O.Store
+    /**
+        Method: O.MemoryManager#addRestriction
 
-            The store where the records are stored.
-        */
+        Parameters:
+            restriction - {Object} An object describing the restriction for a
+                          type (see constructor for format).
 
-        /**
-            Property (private): O.MemoryManager#_restrictions
-            Type: Array
+        Adds a restriction for a new type after initialisation.
 
-            An array of objects, each containing the properties:
-            - Type: The constructor for the Record or Query subclass.
-            - max: The maximum number allowed.
-            - afterCleanup: An optional callback after cleanup, which will be given
-              an array of removed objects of the given type, every time some are
-              removed from the store.
-        */
+        Returns:
+            {O.MemoryManager} Returns self.
+    */
+    MemoryManager.prototype.addRestriction = function addRestriction ( restriction ) {
+        this._restrictions.push( restriction );
+        return this;
+    };
 
-        /**
-            Property: O.MemoryManager#frequency
-            Type: Number
-            Default: 30000 (30 seconds)
+    /**
+        Method: O.MemoryManager#cleanup
 
-            The time in milliseconds between running the cleanup function.
-        */
+        Examines the store to see how many entries of each record type are
+        present and removes references to the least recently accessed records
+        until the number is under the set limit for that type. This is
+        automatically called periodically by the memory manager.
+    */
+    MemoryManager.prototype.cleanup = function cleanup () {
+        var index = this._index;
+        var restrictions = this._restrictions[ index ];
+        var Type = restrictions.Type;
+        var ParentType = Type;
+        var max = restrictions.max;
+        var afterFn = restrictions.afterCleanup;
+        var deleted;
 
-        /**
-            Constructor: O.MemoryManager
-
-            Parameters:
-                store        - {Store} The store to be memory managed.
-                restrictions - {Array} An array of objects, each containing the
-                               properties:
-                               * Type: The constructor for the Record or Query
-                                 subclass.
-                               * max: The maximum number allowed.
-                               * afterCleanup: An optional callback after cleanup,
-                                 which will be given an array of removed objects of
-                                 the given type, every time some are removed from
-                                 the store.
-                frequency    - {Number} (optional) How frequently the cleanup
-                               function is called in milliseconds. Default is 30000,
-                               i.e. every 30 seconds.
-        */
-        init: function ( store, restrictions, frequency ) {
-            this._index = 0;
-            this._store = store;
-            this._restrictions = restrictions;
-
-            this.isPaused = false;
-            this.frequency = frequency || 30000;
-
+        if ( this.isPaused ) {
             RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
-        },
+            return;
+        }
 
-        /**
-            Method: O.MemoryManager#addRestriction
-
-            Parameters:
-                restriction - {Object} An object describing the restriction for a
-                              type (see constructor for format).
-
-            Adds a restriction for a new type after initialisation.
-
-            Returns:
-                {O.MemoryManager} Returns self.
-        */
-        addRestriction: function addRestriction ( restriction ) {
-            this._restrictions.push( restriction );
-            return this;
-        },
-
-        /**
-            Method: O.MemoryManager#cleanup
-
-            Examines the store to see how many entries of each record type are
-            present and removes references to the least recently accessed records
-            until the number is under the set limit for that type. This is
-            automatically called periodically by the memory manager.
-        */
-        cleanup: function cleanup () {
-            var index = this._index;
-            var restrictions = this._restrictions[ index ];
-            var Type = restrictions.Type;
-            var ParentType = Type;
-            var max = restrictions.max;
-            var afterFn = restrictions.afterCleanup;
-            var deleted;
-
-            if ( this.isPaused ) {
-                RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
-                return;
+        do {
+            if ( ParentType === Record ) {
+                deleted = this.cleanupRecordType( Type, max );
+                break;
+            } else if ( ParentType === Query ) {
+                deleted = this.cleanupQueryType( Type, max );
+                break;
             }
+        } while ( ParentType = ParentType.parent.constructor );
 
-            do {
-                if ( ParentType === Record ) {
-                    deleted = this.cleanupRecordType( Type, max );
-                    break;
-                } else if ( ParentType === Query ) {
-                    deleted = this.cleanupQueryType( Type, max );
-                    break;
-                }
-            } while ( ParentType = ParentType.parent.constructor );
+        if ( afterFn ) {
+            afterFn( deleted );
+        }
 
-            if ( afterFn ) {
-                afterFn( deleted );
-            }
+        this._index = index = ( index + 1 ) % this._restrictions.length;
 
-            this._index = index = ( index + 1 ) % this._restrictions.length;
+        // Yield between examining types so we don't hog the event queue.
+        if ( index ) {
+            RunLoop.invokeInNextEventLoop( this.cleanup, this );
+        } else {
+            RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
+        }
+    };
 
-            // Yield between examining types so we don't hog the event queue.
-            if ( index ) {
-                RunLoop.invokeInNextEventLoop( this.cleanup, this );
-            } else {
-                RunLoop.invokeAfterDelay( this.cleanup, this.frequency, this );
-            }
-        },
+    /**
+        Method: O.MemoryManager#cleanupRecordType
 
-        /**
-            Method: O.MemoryManager#cleanupRecordType
+        Parameters:
+            Type - {O.Class} The record type.
+            max  - {Number} The maximum number allowed.
 
-            Parameters:
-                Type - {O.Class} The record type.
-                max  - {Number} The maximum number allowed.
+        Removes excess records from the store.
+    */
+    MemoryManager.prototype.cleanupRecordType = function cleanupRecordType ( Type, max ) {
+        var store = this._store;
+        var _skToLastAccess = store._skToLastAccess;
+        var _skToData = store._skToData;
+        var storeKeys =
+            Object.keys( store._typeToSKToId[ guid( Type ) ] || {} );
+        var l = storeKeys.length;
+        var numberToDelete = l - max;
+        var deleted = [];
 
-            Removes excess records from the store.
-        */
-        cleanupRecordType: function cleanupRecordType ( Type, max ) {
-            var store = this._store;
-            var _skToLastAccess = store._skToLastAccess;
-            var _skToData = store._skToData;
-            var storeKeys =
-                Object.keys( store._typeToSKToId[ guid( Type ) ] || {} );
-            var l = storeKeys.length;
-            var numberToDelete = l - max;
-            var deleted = [];
+        storeKeys.sort( function ( a, b ) {
+            return _skToLastAccess[b] - _skToLastAccess[a];
+        });
 
-            storeKeys.sort( function ( a, b ) {
-                return _skToLastAccess[b] - _skToLastAccess[a];
-            });
-
-            while ( numberToDelete > 0 && l-- ) {
-                var storeKey = storeKeys[l];
-                var data = _skToData[ storeKey ];
-                if ( store.unloadRecord( storeKey ) ) {
-                    numberToDelete -= 1;
-                    if ( data ) {
-                        deleted.push( data );
-                    }
+        while ( numberToDelete > 0 && l-- ) {
+            var storeKey = storeKeys[l];
+            var data = _skToData[ storeKey ];
+            if ( store.unloadRecord( storeKey ) ) {
+                numberToDelete -= 1;
+                if ( data ) {
+                    deleted.push( data );
                 }
             }
-            return deleted;
-        },
+        }
+        return deleted;
+    };
 
-        /**
-            Method: O.MemoryManager#cleanupQueryType
+    /**
+        Method: O.MemoryManager#cleanupQueryType
 
-            Parameters:
-                Type - {O.Class} The query type.
-                max  - {Number} The maximum number allowed.
+        Parameters:
+            Type - {O.Class} The query type.
+            max  - {Number} The maximum number allowed.
 
-            Removes excess remote queries from the store.
-        */
-        cleanupQueryType: function cleanupQueryType ( Type, max ) {
-            var queries = this._store.getAllQueries().filter( function ( query ) {
-                return query instanceof Type;
-            });
-            var l = queries.length;
-            var numberToDelete = l - max;
-            var deleted = [];
+        Removes excess remote queries from the store.
+    */
+    MemoryManager.prototype.cleanupQueryType = function cleanupQueryType ( Type, max ) {
+        var queries = this._store.getAllQueries().filter( function ( query ) {
+            return query instanceof Type;
+        });
+        var l = queries.length;
+        var numberToDelete = l - max;
+        var deleted = [];
 
-            queries.sort( function ( a, b ) {
-                return b.lastAccess - a.lastAccess;
-            });
-            while ( numberToDelete > 0 && l-- ) {
-                var query = queries[l];
-                if ( !query.hasObservers() && !query.hasRangeObservers() ) {
-                    query.destroy();
-                    deleted.push( query );
-                    numberToDelete -= 1;
-                }
+        queries.sort( function ( a, b ) {
+            return b.lastAccess - a.lastAccess;
+        });
+        while ( numberToDelete > 0 && l-- ) {
+            var query = queries[l];
+            if ( !query.hasObservers() && !query.hasRangeObservers() ) {
+                query.destroy();
+                deleted.push( query );
+                numberToDelete -= 1;
             }
-            return deleted;
-        },
-    });
+        }
+        return deleted;
+    };
 
     /*global JSON */
 
@@ -24642,6 +25218,7 @@
                     var view = this.getNearestDragView( this._targetView );
                     if ( view ) {
                         new Drag({
+                            pointerType: 'mouse',
                             dragSource: view,
                             event: event,
                             startPosition: {
@@ -24686,11 +25263,12 @@
             var touchEvent = new TouchDragEvent( touch );
             var view = this.getNearestDragView( touchEvent.targetView );
             if ( view && !isControl[ touchEvent.target.nodeName ] ) {
-                this.set( 'drag', new Drag({
+                this._touchId = touch.identifier;
+                new Drag({
+                    pointerType: 'touch',
                     dragSource: view,
                     event: touchEvent,
-                }));
-                this._touchId = touch.identifier;
+                });
             }
         }.on( 'hold' ),
 
@@ -24772,6 +25350,7 @@
                 event.preventDefault();
             } else {
                 new Drag({
+                    pointerType: 'unknown',
                     event: event,
                     isNative: true,
                 });
@@ -24805,6 +25384,7 @@
                 }
                 // Drag from external source
                 drag = new Drag({
+                    pointerType: 'unknown',
                     event: event,
                     isNative: true,
                     allowedEffects: effectToString$1.indexOf( effectAllowed ),
@@ -25928,7 +26508,14 @@
         into the more fully featured <O.HttpRequest> class; you should use that
         class for most things.
     */
-    var XHR = Class({
+    var XHR = function XHR ( io ) {
+        this._isRunning = false;
+        this._status = 0;
+        this.io = io || null;
+        this.xhr = null;
+    };
+
+    Object.assign( XHR.prototype, {
         /**
             Property: O.XHR#io
             Type: (O.Object|null)
@@ -25942,31 +26529,6 @@
 
             Is a request in progress?
         */
-
-        /**
-            Property: O.XHR#makeAsyncRequests
-            Type: Boolean
-            Default: true
-
-            If changed to false, the connections will be synchronous rather than
-            async. This should *only* ever be set during the onunload event,
-            where you need to make a request synchronous to ensure it completes
-            before the tab process is killed.
-        */
-        makeAsyncRequests: true,
-
-        /**
-            Constructor: O.XHR
-
-            Parameters:
-                io - {O.Object} (optional).
-        */
-        init: function ( io ) {
-            this._isRunning = false;
-            this._status = 0;
-            this.io = io || null;
-            this.xhr = null;
-        },
 
         destroy: function destroy () {
             this.abort();
@@ -26075,7 +26637,7 @@
                 io.fire( 'io:begin' );
             }
 
-            xhr.open( method, url, this.makeAsyncRequests );
+            xhr.open( method, url, true );
             xhr.withCredentials = !!withCredentials;
             responseType = responseType || '';
             xhr.responseType = responseType;
@@ -26334,8 +26896,8 @@
                 this._then = now;
                 this._tick =
                     RunLoop.invokeAfterDelay( this._check, 60000, this );
-                // Chrome occasionally closes the event source without firing an
-                // event. Resync readyState here to work around.
+                // Chrome occasionally closes the event source without firing
+                // an event. Resync readyState here to work around.
                 this.set( 'readyState', this._eventSource.readyState );
             }
         },
@@ -26370,25 +26932,17 @@
         */
         open: function open () {
             var this$1 = this;
-            var url = this.get( 'url' );
 
-            if ( url && this.get( 'readyState' ) === CLOSED ) {
-                var eventSource = null;
-                try {
-                    new NativeEventSource( url );
-                } catch ( error ) {}
-                if ( eventSource ) {
-                    this._eventSource = eventSource;
-
-                    this._eventTypes.forEach(
-                        function (type) { return eventSource.addEventListener( type, this$1, false ); }
-                    );
-
-                    this.set( 'readyState', eventSource.readyState );
-                }
+            if ( this.get( 'readyState' ) === CLOSED ) {
+                var eventSource = new NativeEventSource( this.get( 'url' ) );
+                this._eventSource = eventSource;
+                this._eventTypes.forEach(
+                    function (type) { return eventSource.addEventListener( type, this$1, false ); }
+                );
+                this.set( 'readyState', eventSource.readyState );
             }
             return this;
-        }.observes( 'url' ),
+        },
 
         /**
             Method: O.EventSource#close
@@ -26466,8 +27020,8 @@
             var xhr = this._xhr;
             // Must start with text/event-stream (i.e. indexOf must === 0)
             // If it doesn't, fail the connection.
-            // IE doesn't let you read headers in the loading phase, so if we don't
-            // know the response type, we'll just presume it's correct.
+            // IE doesn't let you read headers in the loading phase, so if we
+            // don't know the response type, we'll just presume it's correct.
             var contentType = xhr.getHeader( 'Content-type' );
             if ( contentType && contentType.indexOf( 'text/event-stream' ) !== 0 ) {
                 this._failConnection();
@@ -26511,8 +27065,8 @@
             var lastIndex = this._lastNewLineIndex;
             var newLine = /\r\n?|\n/g;
 
-            // One leading U+FEFF BYTE ORDER MARK character must be ignored if any
-            // are present.
+            // One leading U+FEFF BYTE ORDER MARK character must be ignored if
+            // any are present.
             if ( !lastIndex && text.charAt( 0 ) === '\ufeff' ) {
                 lastIndex = 1;
             }
@@ -27190,19 +27744,17 @@
     // TODO(cmorgan/modulify): do something about these exports: Date#relativeTo,
     // Date.formatDuration
 
-    var Parse = Class({
-        init: function ( string, tokens ) {
-            this.string = string;
-            this.tokens = tokens || [];
-        },
-        clone: function clone$$1 () {
-            return new Parse( this.string, this.tokens.slice() );
-        },
-        assimilate: function assimilate ( parse ) {
-            this.string = parse.string;
-            this.tokens = parse.tokens;
-        },
-    });
+    var Parse = function Parse ( string, tokens ) {
+        this.string = string;
+        this.tokens = tokens || [];
+    };
+    Parse.prototype.clone = function clone () {
+        return new Parse( this.string, this.tokens.slice() );
+    };
+    Parse.prototype.assimilate = function assimilate ( parse ) {
+        this.string = parse.string;
+        this.tokens = parse.tokens;
+    };
 
     var define = function ( name, regexp, context ) {
         return function ( parse ) {
@@ -27935,6 +28487,14 @@
             }
         },
 
+        destroy: function destroy () {
+            var content = this.get( 'content' );
+            if ( content ) {
+                content.off( 'query:updated', this, 'contentWasUpdated' );
+            }
+            SelectionController.parent.destroy.call( this );
+        },
+
         contentDidChange: function ( _, __, oldContent, newContent ) {
             if ( oldContent ) {
                 oldContent.off( 'query:updated', this, 'contentWasUpdated' );
@@ -27993,7 +28553,8 @@
         // ---
 
         selectStoreKeys: function selectStoreKeys ( storeKeys, isSelected, _selectionId ) {
-            if ( _selectionId && _selectionId !== this._selectionId ) {
+            if ( _selectionId && _selectionId !== this._selectionId ||
+                    isDestroyed( this ) ) {
                 return;
             }
             // Make sure we've got a boolean
@@ -28121,12 +28682,28 @@
         },
 
         recordAtIndexDidChange: function () {
-            if ( !this.get( 'record' ) ) {
-                var content = this.get( 'content' );
-                this.set( 'record', content &&
-                    content.getObjectAt( this.get( 'index' ) ) ||
-                    null
-                );
+            var record = this.get( 'record' );
+            var content = this.get( 'content' );
+            var recordAtIndex = content &&
+                content.getObjectAt( this.get( 'index' ) ) ||
+                null;
+            if ( !record ) {
+                this.set( 'record', recordAtIndex );
+            } else if ( recordAtIndex !== record ) {
+                // See if we have the new index if list did not fire query:updated
+                // We don't do `this._recordDidChange()` because this will ask the
+                // server for the index if it's not there, which gets expensive in
+                // some common use cases, like an unread filter where everytime you
+                // open a message it disappears from the list. And we don't set it
+                // if the index is -1, because we might be delaying processing a
+                // query update and this will lose the information we need… it's
+                // all a bit messy.
+                var index = content.indexOfStoreKey( record.get( 'storeKey' ) );
+                if ( index > -1 ) {
+                    this._ignore = true;
+                    this.set( 'index', index );
+                    this._ignore = false;
+                }
             }
         }.queue( 'before' ),
 
@@ -28546,66 +29123,84 @@
         return string.replace( /[+-]/, function (sign) { return ( sign === '+' ? '-' : '+' ); } );
     };
 
-    var TimeZone = Class({
-        init: function ( id, periods ) {
-            var name = id.replace( /_/g, ' ' );
-            // The IANA ids have the +/- the wrong way round for historical reasons.
-            // Display correctly for the user.
-            if ( /GMT[+-]/.test( name ) ) {
-                name = switchSign( name );
-            }
+    var TimeZone = function TimeZone ( id, periods ) {
+        var name = id.replace( /_/g, ' ' );
+        // The IANA ids have the +/- the wrong way round for historical reasons.
+        // Display correctly for the user.
+        if ( /GMT[+-]/.test( name ) ) {
+            name = switchSign( name );
+        }
 
-            this.id = id;
-            this.name = name;
-            this.periods = periods;
-        },
+        this.id = id;
+        this.name = name;
+        this.periods = periods;
+    };
 
-        convert: function convert ( date, toTimeZone ) {
-            var period = getPeriod( this.periods, date );
-            var offset = period[1];
-            var rule = getRule( TimeZone.rules[ period[2] ] || [],
-                offset, date, toTimeZone, true );
-            if ( rule ) {
-                offset += rule[9];
-            }
-            if ( !toTimeZone ) {
-                offset = -offset;
-            }
-            return new Date( +date + offset * 1000 );
-        },
-        convertDateToUTC: function convertDateToUTC ( date ) {
-            return this.convert( date, false );
-        },
-        convertDateToTimeZone: function convertDateToTimeZone ( date ) {
-            return this.convert( date, true );
-        },
-        getSuffix: function getSuffix ( date ) {
-            var period = getPeriod( this.periods, date, false );
-            var offset = period[1];
-            var rule = getRule( TimeZone.rules[ period[2] ],
-                    offset, date, false, true );
-            var suffix = period[3];
-            var slashIndex = suffix.indexOf( '/' );
-            // If there's a slash, e.g. "GMT/BST", presume first if no time offset,
-            // second if time offset.
-            if ( rule && slashIndex > - 1 ) {
-                suffix = rule[9] ?
-                    suffix.slice( slashIndex + 1 ) : suffix.slice( 0, slashIndex );
-                rule = null;
-            }
-            return suffix.format( rule ? rule[10] : '' );
-        },
-        toJSON: function toJSON () {
-            return this.id;
-        },
-    });
+    TimeZone.prototype.convert = function convert ( date, toTimeZone ) {
+        var period = getPeriod( this.periods, date );
+        var offset = period[1];
+        var rule = getRule( TimeZone.rules[ period[2] ] || [],
+            offset, date, toTimeZone, true );
+        if ( rule ) {
+            offset += rule[9];
+        }
+        if ( !toTimeZone ) {
+            offset = -offset;
+        }
+        return new Date( +date + offset * 1000 );
+    };
+    TimeZone.prototype.convertDateToUTC = function convertDateToUTC ( date ) {
+        return this.convert( date, false );
+    };
+    TimeZone.prototype.convertDateToTimeZone = function convertDateToTimeZone ( date ) {
+        return this.convert( date, true );
+    };
+    TimeZone.prototype.getSuffix = function getSuffix ( date ) {
+        var period = getPeriod( this.periods, date, false );
+        var offset = period[1];
+        var rule = getRule( TimeZone.rules[ period[2] ],
+                offset, date, false, true );
+        var suffix = period[3];
+        var slashIndex = suffix.indexOf( '/' );
+        // If there's a slash, e.g. "GMT/BST", presume first if no time offset,
+        // second if time offset.
+        if ( rule && slashIndex > - 1 ) {
+            suffix = rule[9] ?
+                suffix.slice( slashIndex + 1 ) : suffix.slice( 0, slashIndex );
+            rule = null;
+        }
+        return suffix.format( rule ? rule[10] : '' );
+    };
+    TimeZone.prototype.toJSON = function toJSON () {
+        return this.id;
+    };
 
-    TimeZone.fromJSON = function ( id ) {
+    TimeZone.fromJSON = function fromJSON ( id ) {
         return TimeZone[ id ] || null;
     };
 
-    TimeZone.isEqual = function ( a, b ) {
+    TimeZone.isEqual = function isEqual ( a, b ) {
         return a.id === b.id;
+    };
+
+    TimeZone.load = function load ( json ) {
+        var zones = json.zones;
+        var link = json.link;
+        var alias = json.alias;
+
+        for ( var id in zones ) {
+            addTimeZone( new TimeZone( id, zones[ id ] ) );
+        }
+        for ( var id$1 in link ) {
+            addTimeZone( new TimeZone(
+                id$1,
+                zones[ link[ id$1 ] ] || TimeZone[ link[ id$1 ] ].periods
+            ));
+        }
+        for ( var id$2 in alias ) {
+            TimeZone[ id$2 ] = TimeZone[ alias[ id$2 ] ];
+        }
+        Object.assign( TimeZone.rules, json.rules );
     };
 
     var addTimeZone = function ( timeZone ) {
@@ -28625,26 +29220,6 @@
         '-': [],
     };
     TimeZone.areas = {};
-
-    TimeZone.load = function ( json ) {
-        var zones = json.zones;
-        var link = json.link;
-        var alias = json.alias;
-
-        for ( var id in zones ) {
-            addTimeZone( new TimeZone( id, zones[ id ] ) );
-        }
-        for ( var id$1 in link ) {
-            addTimeZone( new TimeZone(
-                id$1,
-                zones[ link[ id$1 ] ] || TimeZone[ link[ id$1 ] ].periods
-            ));
-        }
-        for ( var id$2 in alias ) {
-            TimeZone[ id$2 ] = TimeZone[ alias[ id$2 ] ];
-        }
-        Object.assign( TimeZone.rules, json.rules );
-    };
 
     var HoldEvent = /*@__PURE__*/(function (Event$$1) {
         function HoldEvent ( touch ) {
@@ -28815,7 +29390,7 @@
             var index = this.get( 'layoutIndex' );
             return {
                 visibility: index < 0 ? 'hidden' : 'visible',
-                top: index < 0 ? 0 : itemHeight * index,
+                marginTop: index < 0 ? 0 : itemHeight * index,
                 height: itemHeight,
             };
         }.property( 'itemHeight', 'layoutIndex' ),
@@ -28826,7 +29401,6 @@
             for ( var key in keys ) {
                 shortcuts.register( key, this, keys[ key ] );
             }
-            this.checkInitialScroll();
             return ListKBFocusView.parent.didEnterDocument.call( this );
         },
         willLeaveDocument: function willLeaveDocument () {
@@ -28839,18 +29413,21 @@
         },
 
         // Scroll to centre widget on screen with no animation
-        checkInitialScroll: function () {
-            if ( this.get( 'distanceFromVisRect' ) ) {
-                this.scrollIntoView( 0, false );
-            }
-        }.queue( 'after' ),
+        recordDidChange: function () {
+            this._animateIntoView = this.get( 'isInDocument' );
+            this.checkScroll();
+        }.observes( 'record' ),
 
         checkScroll: function () {
             var distance = this.get( 'distanceFromVisRect' );
+            var animateIntoView = this._animateIntoView;
             if ( distance ) {
-                this.scrollIntoView( distance < 0 ? -0.6 : 0.6, true );
+                this.scrollIntoView(
+                    !animateIntoView ? 0 : distance < 0 ? -0.6 : 0.6,
+                    animateIntoView
+                );
             }
-        }.queue( 'after' ).observes( 'record' ),
+        }.queue( 'after' ),
 
         distanceFromVisRect: function () {
             var layoutIndex = this.get( 'layoutIndex' );
@@ -29156,7 +29733,7 @@
         /**
             Property: O.SplitViewController#maxStaticPaneLength
             Type: Number
-            Default: 0
+            Default: 32767
 
             The maximum width/height (in pixels) that the static pane may be resized
             to.
@@ -29707,6 +30284,14 @@
         */
         options: [],
 
+        /**
+            Property: O.SelectView#inputAttributes
+            Type: Object|null
+
+            Extra attributes to add to the <select> element, if provided.
+        */
+       inputAttributes: null,
+
         // --- Render ---
 
         type: '',
@@ -29734,6 +30319,10 @@
         draw: function draw ( layer ) {
             var control = this._domControl =
                 this._drawSelect( this.get( 'options' ) );
+            var inputAttributes = this.get( 'inputAttributes' );
+            if ( inputAttributes ) {
+                this.redrawInputAttributes();
+            }
             return [
                 SelectView.parent.draw.call( this, layer ),
                 control ];
@@ -29778,7 +30367,20 @@
         */
         selectNeedsRedraw: function ( self, property, oldValue ) {
             return this.propertyNeedsRedraw( self, property, oldValue );
-        }.observes( 'options', 'value' ),
+        }.observes( 'options', 'value', 'inputAttributes' ),
+
+        /**
+            Method: O.SelectView#redrawInputAttributes
+
+            Updates any other properties of the `<input>` element.
+        */
+        redrawInputAttributes: function redrawInputAttributes () {
+            var inputAttributes = this.get( 'inputAttributes' );
+            var control = this._domControl;
+            for ( var property in inputAttributes ) {
+                control.set( property, inputAttributes[ property ] );
+            }
+        },
 
         /**
             Method: O.SelectView#redrawOptions
@@ -29891,6 +30493,7 @@
     exports.ObservableProps = ObservableProps;
     exports.ObservableRange = ObservableRange;
     exports.RunLoop = RunLoop;
+    exports.Color = Color;
     exports.AnimatableView = AnimatableView;
     exports.Animation = Animation;
     exports.Easing = Easing;
@@ -29949,6 +30552,7 @@
     exports.SwitchView = SwitchView;
     exports.when = when;
     exports.unless = unless;
+    exports.choose = choose;
     exports.ToolbarView = ToolbarView;
     exports.TrueVisibleRect = TrueVisibleRect;
     exports.ScrollView = ScrollView;

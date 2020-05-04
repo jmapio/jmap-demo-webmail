@@ -294,7 +294,7 @@ var MessageView = O.Class({
     toggleFlagged: function () {
         var isFlagged = !this.get( 'isFlagged' ),
             message = this.get( 'content' );
-        JMAP.mail.setFlagged( [ message ], isFlagged, false );
+        JMAP.mail.setKeyword( [ message ], '$flagged', isFlagged, false );
     },
 
     markRead: function () {

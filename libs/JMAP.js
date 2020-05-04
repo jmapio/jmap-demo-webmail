@@ -83,6 +83,7 @@ const RunLoop = O.RunLoop;
 // ---
 
 const MAIL_DATA = 'urn:ietf:params:jmap:mail';
+const SUBMISSION_DATA = 'urn:ietf:params:jmap:submission';
 const CONTACTS_DATA = 'urn:ietf:params:jmap:contacts';
 const CALENDARS_DATA = 'urn:ietf:params:jmap:calendars';
 
@@ -117,6 +118,7 @@ const auth = new Obj({
     eventSourceUrl: '',
 
     MAIL_DATA: MAIL_DATA,
+    SUBMISSION_DATA: SUBMISSION_DATA,
     CONTACTS_DATA: CONTACTS_DATA,
     CALENDARS_DATA: CALENDARS_DATA,
 
@@ -200,8 +202,8 @@ const auth = new Obj({
 
             onSuccess: function ( event ) {
                 auth.set( 'authenticationUrl', authenticationUrl )
-                    .set( 'accessToken', accessToken );
-                auth.didAuthenticate( event.data );
+                    .set( 'accessToken', accessToken )
+                    .didAuthenticate( event.data );
             }.on( 'io:success' ),
         }).send();
 
@@ -909,6 +911,7 @@ const Connection = Class({
                 method: 'POST',
                 url: auth.get( 'apiUrl' ),
                 headers: headers,
+                withCredentials: true,
                 responseType: 'json',
                 data: this.willSendRequest({
                     using: Object.keys( capabilities ),
@@ -939,9 +942,14 @@ const Connection = Class({
             handler = handlers[ response[0] ];
             if ( handler ) {
                 id = response[2];
-                request = remoteCalls[+id];
+                request = id && remoteCalls[+id] || null;
                 try {
-                    handler.call( this, response[1], request[0], request[1] );
+                    handler.call(
+                        this,
+                        response[1],
+                        request ? request[0] : '',
+                        request ? request[1] : {}
+                    );
                 } catch ( error ) {
                     RunLoop.didError( error );
                 }
@@ -1434,11 +1442,21 @@ const Connection = Class({
     },
 
     didFetchUpdates: function ( Type, args, hasDataForUpdated ) {
+        var created = args.created;
+        var updated = null;
+        if ( !hasDataForUpdated ) {
+            if ( updated ) {
+                updated = args.updated;
+            }
+            if ( created ) {
+                updated = updated ? updated.concat( created ) : created;
+            }
+        }
         this.get( 'store' )
             .sourceDidFetchUpdates(
                 args.accountId,
                 Type,
-                hasDataForUpdated ? null : args.updated || null,
+                updated,
                 args.destroyed || null,
                 args.oldState,
                 args.newState
@@ -1861,6 +1879,7 @@ const LocalFile = Class({
                     headers: {
                         'Authorization': auth.get( 'accessToken' ),
                     },
+                    withCredentials: true,
                     responseType: 'json',
                     data: this.file,
                 })
@@ -1969,11 +1988,16 @@ JMAP.LocalFile = LocalFile;
 
 ( function ( JMAP ) {
 
+const Class = O.Class;
+const Obj = O.Object;
+
+// ---
+
 const noop = function () {};
 
-const Sequence = O.Class({
+const Sequence = Class({
 
-    Extends: O.Object,
+    Extends: Obj,
 
     init: function () {
         this.queue = [];
@@ -3334,6 +3358,8 @@ const CalendarEvent = Class({
 
     // locale: attr( String ),
     // localizations: attr( Object ),
+    // NOTE: If adding support for localizations, you need to handle this in
+    // the mayPatchKey function too, because you can't patch a patch.
 
     // keywords: attr( Object ),
     // categories: attr( Object ),
@@ -3865,9 +3891,11 @@ const normaliseRecurrenceRule = function ( recurrenceRuleJSON ) {
     }
 };
 
-const mayPatchKey = function ( path, original, current ) {
-    if ( path.startsWith( 'recurrenceOverrides/' ) &&
-            ( original.excluded || current.excluded ) ) {
+const mayPatchKey = function ( path/*, original, current*/ ) {
+    // We can't patch inside a patch as there's no way to distinguish whether
+    // patch { "recurrenceOverrides/2000-01-01T00:00:00/key~1bar": null } is
+    // deleting "bar" from the master or deleting the key~1bar patch.
+    if ( path.startsWith( 'recurrenceOverrides/' ) ) {
         return false;
     }
     return true;
@@ -5075,24 +5103,27 @@ JMAP.NonEmptyDateSource = NonEmptyDateSource;
 
 ( function ( JMAP ) {
 
-const AmbiguousDate = O.Class({
+const i18n = O.i18n;
 
-    init: function ( day, month, year ) {
+// ---
+
+class AmbiguousDate {
+    constructor ( day, month, year ) {
         this.day = day || 0;
         this.month = month || 0;
         this.year = year || 0;
-    },
+    }
 
-    toJSON: function () {
+    toJSON () {
         return "%'04n-%'02n-%'02n".format(
             this.year, this.month, this.day );
-    },
+    }
 
-    hasValue: function () {
+    hasValue () {
         return !!( this.day || this.month || this.year );
-    },
+    }
 
-    yearsAgo: function () {
+    yearsAgo () {
         if ( !this.year ) { return -1; }
         var now = new Date(),
             ago = now.getFullYear() - this.year,
@@ -5103,17 +5134,17 @@ const AmbiguousDate = O.Class({
             ago -= 1;
         }
         return ago;
-    },
+    }
 
-    prettyPrint: function () {
+    prettyPrint () {
         var day = this.day,
             month = this.month,
             year = this.year,
-            dateElementOrder = O.i18n.get( 'dateElementOrder' ),
+            dateElementOrder = i18n.get( 'dateElementOrder' ),
             dayString = day ?
                 day + ( year && dateElementOrder === 'mdy' ? ', ' : ' ' ) : '',
             monthString = month ?
-                O.i18n.get( 'monthNames' )[ month - 1 ] + ' ' : '',
+                i18n.get( 'monthNames' )[ month - 1 ] + ' ' : '',
             yearString = year ? year + ' '  : '';
 
         return (
@@ -5124,13 +5155,13 @@ const AmbiguousDate = O.Class({
                 ( dayString + monthString + yearString )
         ).trim();
     }
-});
 
-AmbiguousDate.fromJSON = function ( json ) {
-    var parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec( json || '' );
-    return parts ?
-        new AmbiguousDate( +parts[3], +parts[2], +parts[1] ) : null;
-};
+    static fromJSON ( json ) {
+        var parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec( json || '' );
+        return parts ?
+            new AmbiguousDate( +parts[3], +parts[2], +parts[1] ) : null;
+    }
+}
 
 JMAP.AmbiguousDate = AmbiguousDate;
 
@@ -5416,6 +5447,7 @@ const ContactGroup = Class({
     contacts: Record.toMany({
         recordType: Contact,
         key: 'contactIds',
+        isNullable: false,
         defaultValue: [],
         willSet: function () {
             return true;
@@ -5514,6 +5546,8 @@ const StoreUndoManager = O.StoreUndoManager;
 
 const Contact = JMAP.Contact;
 const ContactGroup = JMAP.ContactGroup;
+const auth = JMAP.auth;
+const CONTACTS_DATA = JMAP.auth.CONTACTS_DATA;
 const store = JMAP.store;
 const contacts = JMAP.contacts;
 
@@ -5597,13 +5631,18 @@ const vips = new Obj({
     getGroup: function ( storeForContact, createIfNotFound ) {
         var group = this._group;
         var groupCacheState = this._groupCacheState;
+        var primaryAccountId;
         if ( groupCacheState === CACHED && ( group || !createIfNotFound ) ) {
             // Nothing to do
         } else if ( groupCacheState === REVALIDATE &&
                 group && group.is( READY ) ) {
             this._groupCacheState = CACHED;
         } else {
-            group = store.getOne( ContactGroup, data => data.uid === 'vips' );
+            primaryAccountId = auth.get( 'primaryAccounts' )[ CONTACTS_DATA ];
+            group = store.getOne( ContactGroup, data =>
+                data.accountId === primaryAccountId &&
+                data.uid === 'vips'
+            );
             if ( !group && createIfNotFound ) {
                 group = new ContactGroup( store )
                     .set( 'name', loc( 'VIPS' ) )
@@ -5754,7 +5793,7 @@ const Identity = Class({
     }.property( 'name', 'email' ),
 });
 Identity.__guid__ = 'Identity';
-Identity.dataGroup = 'urn:ietf:params:jmap:mail';
+Identity.dataGroup = 'urn:ietf:params:jmap:submission';
 
 JMAP.mail.handle( Identity, {
 
@@ -5825,16 +5864,25 @@ const makeSetRequest = JMAP.Connection.makeSetRequest;
 
 // ---
 
+const roleSortOrder = {
+    inbox: 1,
+    snoozed: 2,
+    archive: 3,
+    drafts: 4,
+    xtemplates: 5,
+    sent: 6,
+    junk: 7,
+    trash: 8,
+    all: 9,
+};
+
 const bySortOrderRoleOrName = function ( a, b ) {
-    var aRole = a.role;
-    var bRole = b.role;
     return (
         a.sortOrder - b.sortOrder
     ) || (
-        aRole === 'inbox' ? -1 :
-        bRole === 'inbox' ? 1 :
-        aRole && !bRole ? -1 :
-        bRole && !aRole ? 1 :
+        ( roleSortOrder[ a.role ] || 99 ) -
+        ( roleSortOrder[ b.role ] || 99 )
+    ) || (
         i18n.compare( a.name, b.name )
     ) || (
         a.id < b.id ? -1 : 1
@@ -6136,6 +6184,7 @@ connection.handle( Mailbox, {
         this.didCommit( Mailbox, args );
     },
 });
+Mailbox.roleSortOrder = roleSortOrder;
 Mailbox.bySortOrderRoleOrName = bySortOrderRoleOrName;
 
 // --- Export
@@ -6174,13 +6223,6 @@ const mail = JMAP.mail;
 
 // ---
 
-const bodyType = {
-    'text/plain': 'text',
-    'text/enriched': 'text',
-    'text/richtext': 'text',
-    'text/html': 'html',
-};
-
 const parseStructure = function  ( parts, multipartType, inAlternative,
         htmlParts, textParts, fileParts ) {
 
@@ -6192,13 +6234,13 @@ const parseStructure = function  ( parts, multipartType, inAlternative,
     for ( i = 0; i < parts.length; i += 1 ) {
         var part = parts[i];
         var type = part.type;
-        var isTextOrHTML = false;
+        var isText = false;
         var isMultipart = false;
         var isImage = false;
         var isInline, subMultiType;
 
-        if ( bodyType[ type ] ) {
-            isTextOrHTML = true;
+        if ( type.startsWith( 'text/' ) ) {
+            isText = true;
         } else if ( type.startsWith( 'multipart/' ) ) {
             isMultipart = true;
         } else if ( type.startsWith( 'image/' ) ) {
@@ -6208,7 +6250,7 @@ const parseStructure = function  ( parts, multipartType, inAlternative,
         // Is this a body part rather than an attachment
         isInline =
             // Must be one of the allowed body types
-            ( isTextOrHTML || isImage ) &&
+            ( isText || isImage ) && type !== 'text/calendar' &&
             // Must not be explicitly marked as an attachment
             part.disposition !== 'attachment' &&
             // If multipart/related, only the first part can be inline
@@ -6224,26 +6266,26 @@ const parseStructure = function  ( parts, multipartType, inAlternative,
                 htmlParts, textParts, fileParts );
         } else if ( isInline ) {
             if ( multipartType === 'alternative' ) {
-                switch ( bodyType[ type ] ) {
-                case 'text':
-                    textParts.push( part );
-                    break;
-                case 'html':
+                if ( type === 'text/html' ) {
                     htmlParts.push( part );
-                    break;
-                default:
+                } else if ( isText && textParts.length === textLength ) {
+                    textParts.push( part );
+                } else if ( type === 'text/plain' ) {
+                    // We've found a text/plain but already chose a text part.
+                    // Replace it and move the other part to files instead.
+                    fileParts.push( textParts.pop() );
+                    textParts.push( part );
+                } else {
                     fileParts.push( part );
-                    break;
                 }
                 continue;
             } else if ( inAlternative ) {
-                switch ( bodyType[ type ] ) {
-                case 'text':
-                    htmlParts = null;
-                    break;
-                case 'html':
-                    textParts = null;
-                    break;
+                if ( isText ) {
+                    if ( type === 'text/html' ) {
+                        textParts = null;
+                    } else {
+                        htmlParts = null;
+                    }
                 }
             }
             if ( textParts ) {
@@ -6310,6 +6352,7 @@ const Message = Class({
         recordType: Mailbox,
         key: 'mailboxIds',
         Type: Object,
+        isNullable: false,
     }),
 
     keywords: attr( Object, {
@@ -6505,7 +6548,8 @@ const Message = Class({
 
     hasTextBody: function () {
         return this.get( 'bodyParts' ).text.some( function ( part ) {
-            return bodyType[ part.type ] === 'text';
+            const type = part.type;
+            return type.startsWith( 'text/' ) && type !== 'text/html';
         });
     }.property( 'bodyParts' ),
 
@@ -6975,6 +7019,7 @@ const Thread = Class({
     messages: Record.toMany({
         recordType: Message,
         key: 'emailIds',
+        isNullable: false,
         noSync: true,
     }),
 
@@ -7221,12 +7266,15 @@ const MessageList = Class({
 
     sort: [{ property: 'receivedAt', isAscending: false }],
     collapseThreads: true,
+    findAllInThread: false,
 
     Type: Message,
 
     init: function ( options ) {
         this._snippets = {};
         this._snippetsNeeded = [];
+
+        this.threadIdToEmailIds = {};
 
         MessageList.parent.constructor.call( this, options );
     },
@@ -7373,6 +7421,7 @@ JMAP.mail.handle( MessageList, {
         var where = query.get( 'where' );
         var sort = query.get( 'sort' );
         var collapseThreads = query.get( 'collapseThreads' );
+        var findAllInThread = query.get( 'findAllInThread' );
         var canGetDeltaUpdates = query.get( 'canGetDeltaUpdates' );
         var queryState = query.get( 'queryState' );
         var request = query.sourceWillFetchQuery();
@@ -7410,6 +7459,7 @@ JMAP.mail.handle( MessageList, {
                 filter: where,
                 sort: sort,
                 collapseThreads: collapseThreads,
+                findAllInThread: findAllInThread,
                 sinceQueryState: queryState,
                 upToId: upToId ?
                     this.get( 'store' ).getIdFromStoreKey( upToId ) : null,
@@ -7444,6 +7494,7 @@ JMAP.mail.handle( MessageList, {
                 filter: where,
                 sort: sort,
                 collapseThreads: collapseThreads,
+                findAllInThread: findAllInThread,
                 position: start,
                 anchor: anchor,
                 anchorOffset: offset,
@@ -7490,7 +7541,7 @@ JMAP.mail.handle( MessageList, {
 
     'Email/query': function ( args, _, reqArgs ) {
         const query = this.get( 'store' ).getQuery( getId( reqArgs ) );
-        var total, hasTotal, numIds;
+        var total, hasTotal, numIds, threadIdToEmailIds;
         if ( query ) {
             if ( args.total === undefined ) {
                 total = query.get( 'length' );
@@ -7508,6 +7559,11 @@ JMAP.mail.handle( MessageList, {
             } else {
                 hasTotal = true;
             }
+            threadIdToEmailIds = args.threadIdToEmailIds;
+            if ( threadIdToEmailIds ) {
+                Object.assign( query.threadIdToEmailIds, threadIdToEmailIds );
+            }
+            query.set( 'error', null );
             query.set( 'hasTotal', hasTotal );
             query.set( 'canGetDeltaUpdates', args.canCalculateChanges );
             query.sourceDidFetchIds( args );
@@ -7523,6 +7579,7 @@ JMAP.mail.handle( MessageList, {
     'error_Email/query': function ( args, requestName, requestArgs ) {
         var query = this.get( 'store' ).getQuery( getId( requestArgs ) );
         if ( query ) {
+            query.set( 'error', args.type );
             query.sourceDidFetchIds({
                 ids: [],
                 position: 0,
@@ -7534,6 +7591,10 @@ JMAP.mail.handle( MessageList, {
     'Email/queryChanges': function ( args, _, reqArgs ) {
         const query = this.get( 'store' ).getQuery( getId( reqArgs ) );
         if ( query ) {
+            const threadIdToEmailIds = args.threadIdToEmailIds;
+            if ( threadIdToEmailIds ) {
+                Object.assign( query.threadIdToEmailIds, threadIdToEmailIds );
+            }
             args.upToId = reqArgs.upToId;
             query.sourceDidFetchUpdate( args );
         }
@@ -7666,7 +7727,7 @@ const MessageSubmission = Class({
     onSuccess: attr( Object ),
 });
 MessageSubmission.__guid__ = 'EmailSubmission';
-MessageSubmission.dataGroup = 'urn:ietf:params:jmap:mail';
+MessageSubmission.dataGroup = 'urn:ietf:params:jmap:submission';
 
 MessageSubmission.makeEnvelope = function ( message, extraRecipients ) {
     var sender = message.get( 'sender' );
@@ -7836,9 +7897,8 @@ mail.handle( MessageSubmission, {
                 update ? clone( update ) : {}
             );
             var onSuccessUpdateEmail = reqArgs.onSuccessUpdateEmail;
-            var onSuccessDestroyEmail = reqArgs.onSuccessDestroyEmail;
+            var updated = args.updated;
             var updates = {};
-            var destroyed = [];
             var emailId, storeKey, path, id, patch, data;
             for ( id in changes ) {
                 emailId = changes[ id ].emailId;
@@ -7853,15 +7913,18 @@ mail.handle( MessageSubmission, {
                     }
                     storeKey = store.getStoreKey( accountId, Message, emailId );
                 }
-                if ( onSuccessUpdateEmail &&
-                        ( patch = onSuccessUpdateEmail[ id ] )) {
+                if (
+                    updated &&
+                    updated[ emailId ] &&
+                    onSuccessUpdateEmail &&
+                    ( patch = onSuccessUpdateEmail[ id ] )
+                ) {
                     // If we've made further changes since this commit, bail
                     // out. This is just an optimisation, and we'll fetch the
                     // real changes from the source instead automatically if
                     // we don't do it.
                     if ( store.getStatus( storeKey ) !== READY ) {
-                        updates = null;
-                        break;
+                        continue;
                     }
                     data = store.getData( storeKey );
                     data = {
@@ -7879,18 +7942,19 @@ mail.handle( MessageSubmission, {
                     for ( path in patch ) {
                         applyPatch( data, path, patch[ path ] );
                     }
+                    delete updated[ emailId ];
                     updates[ emailId ] = data;
-                } else if ( onSuccessDestroyEmail &&
-                        onSuccessDestroyEmail.contains( id ) ) {
-                    destroyed.push( emailId );
                 }
             }
-            if ( updates ) {
-                store.sourceDidFetchUpdates( accountId,
-                    Message, [], destroyed, args.oldState, args.newState );
-                store.sourceDidFetchPartialRecords( accountId,
-                    Message, updates );
-            }
+            store.sourceDidFetchUpdates(
+                accountId,
+                Message,
+                updated && Object.keys( updated ),
+                args.destroyed,
+                args.oldState,
+                args.newState
+            );
+            store.sourceDidFetchPartialRecords( accountId, Message, updates );
             // And we invalidate all MessageList queries, as some may be
             // invalid and we don't know which ones.
             this.get( 'store' )
@@ -8591,12 +8655,43 @@ const roleIndex = new O.Object({
 });
 store.on( Mailbox, roleIndex, 'clearIndex' );
 
-const getMailboxForRole = function ( accountId, role ) {
+const getMailboxForRole = function ( accountId, role, createWithProps ) {
     if ( !accountId ) {
         accountId = auth.get( 'primaryAccounts' )[ auth.MAIL_DATA ];
     }
     var accountIndex = roleIndex.getIndex()[ accountId ];
-    return accountIndex && accountIndex[ role ] || null;
+    var mailbox = accountIndex && accountIndex[ role ] || null;
+    if ( !mailbox && createWithProps ) {
+        // The other role names are not localised over IMAP, so I guess
+        // we don't with this one either?
+        var name = role.capitalise();
+        var nameClashes = store.getAll( Mailbox, data =>
+            data.accountId === accountId &&
+            !data.parentId &&
+            data.name.startsWith( name )
+        ).reduce( ( nameClashes, mailbox ) => {
+            var name = mailbox.get( 'name' );
+            nameClashes[ name ] = mailbox;
+            return nameClashes;
+        }, {} );
+        var index, property;
+        mailbox = nameClashes[ name ];
+        if ( mailbox ) {
+            index = 2;
+            while ( nameClashes[ name + ' ' + index ] ) {
+                index += 1;
+            }
+            mailbox.set( 'name', name + ' ' + index );
+        }
+        mailbox = new Mailbox( store )
+            .set( 'role', role )
+            .set( 'name', name );
+        for ( property in createWithProps ) {
+            mailbox.set( property, createWithProps[ property ] );
+        }
+        mailbox.saveToStore();
+    }
+    return mailbox;
 };
 
 // ---
@@ -9448,7 +9543,9 @@ Object.assign( connection, {
         var envelope = {
             mailFrom: {
                 email: auth.get( 'username' ),
-                parameters: null,
+                parameters: {
+                    resent: null,
+                },
             },
             rcptTo: to.map( function ( address ) {
                 return {
