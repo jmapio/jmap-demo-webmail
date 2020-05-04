@@ -94,6 +94,10 @@ store.on( Mailbox, allMailboxes, 'contentDidChange' );
 
 App.state = new O.Router({
 
+    baseUrl: location.origin === 'https://jmap.io' ?
+        'https://jmap.io/jmap-demo-webmail/' :
+        location.origin + '/',
+
     routes: [
         // Selected conversation
         {
