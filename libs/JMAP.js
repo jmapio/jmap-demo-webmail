@@ -7459,7 +7459,7 @@ JMAP.mail.handle( MessageList, {
                 filter: where,
                 sort: sort,
                 collapseThreads: collapseThreads,
-                findAllInThread: findAllInThread,
+                findAllInThread: findAllInThread || undefined,
                 sinceQueryState: queryState,
                 upToId: upToId ?
                     this.get( 'store' ).getIdFromStoreKey( upToId ) : null,
@@ -7494,7 +7494,7 @@ JMAP.mail.handle( MessageList, {
                 filter: where,
                 sort: sort,
                 collapseThreads: collapseThreads,
-                findAllInThread: findAllInThread,
+                findAllInThread: findAllInThread || undefined,
                 position: start,
                 anchor: anchor,
                 anchorOffset: offset,
