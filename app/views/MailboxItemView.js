@@ -231,8 +231,8 @@ var MailboxItemView = O.Class({
 
         // Pin button -> Pin/unflag message
         if ( target.nodeName === 'BUTTON' ) {
-            JMAP.mail.setFlagged(
-                [ message ], !message.get( 'isFlagged' ), false );
+            JMAP.mail.setKeyword(
+                [ message ], '$flagged', !message.get( 'isFlagged' ), false );
             return;
         }
 
