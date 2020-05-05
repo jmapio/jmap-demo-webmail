@@ -6,8 +6,6 @@
 
 /*global O, App */
 
-"use strict";
-
 ( function () {
 
 const el = O.Element.create;
@@ -19,7 +17,7 @@ var ThreadMessageView = O.Class({
 
     Extends: O.View,
 
-    className:'v-ThreadMessage',
+    className: 'v-ThreadMessage',
 
     destroy: function () {
         var content = this.get( 'content' );
@@ -34,7 +32,7 @@ var ThreadMessageView = O.Class({
         if ( content && content.is( READY ) ) {
             var view = new App.MessageView({
                 content: content,
-                isLast: this.get( 'isLast' )
+                isLast: this.get( 'isLast' ),
             });
             this.insertView( view );
         } else {
@@ -71,7 +69,7 @@ var ThreadMessageView = O.Class({
             // Only the last child is last!
             isLast = false;
         }
-    }.observes( 'index', 'isLast', 'childViews' )
+    }.observes( 'index', 'isLast', 'childViews' ),
 });
 
 App.ThreadMessageView = ThreadMessageView;

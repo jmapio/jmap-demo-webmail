@@ -6,8 +6,6 @@
 
 /*global O, App */
 
-"use strict";
-
 ( function () {
 
 const el = O.Element.create;
@@ -45,14 +43,14 @@ var MailboxSourceView = O.Class({
                 title: O.bind( mailbox, 'totalThreads', function ( total ) {
                     return O.i18n.localise(
                         '[*2,_1,1 conversation,%n conversations]', total );
-                })
+                }),
             }),
             badgeProperty ?
             el( 'div.v-MailboxSource-count', {
                 text: O.bind( mailbox, badgeProperty, function ( count ) {
                     return count ? count + '' : '';
-                })
-            }) : null
+                }),
+            }) : null,
         ];
     },
 
@@ -63,7 +61,7 @@ var MailboxSourceView = O.Class({
     // --- DropTarget ---
 
     dropAcceptedDataTypes: {
-        MessageStoreKeys: true
+        MessageStoreKeys: true,
     },
 
     dropEntered: function ( drag ) {
@@ -85,7 +83,7 @@ var MailboxSourceView = O.Class({
                 }
             });
         }
-    }
+    },
 });
 
 App.MailboxSourceView = MailboxSourceView;

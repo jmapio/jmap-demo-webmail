@@ -6,8 +6,6 @@
 
 /*global O, JMAP, App */
 
-"use strict";
-
 O.RunLoop.invoke( function () {
 
 const el = O.Element.create;
@@ -15,21 +13,21 @@ const el = O.Element.create;
 // ---
 
 App.views = {
-    mainWindow: new O.RootView( document )
+    mainWindow: new O.RootView( document ),
 };
 
 var EmptyView = O.Class({
     Extends: O.LabelView,
     layerTag: 'h1',
     className: 'v-Empty',
-    positioning: 'absolute'
+    positioning: 'absolute',
 });
 
 var sidebarSplitController = new O.SplitViewController({
     flex: O.SplitViewController.BOTTOM_RIGHT,
     staticPaneLength: 180,
     minStaticPaneLength: 150,
-    maxStaticPaneLength: Math.max( 320 )
+    maxStaticPaneLength: Math.max( 320 ),
 });
 
 var contentSplitController = new O.SplitViewController({
@@ -37,7 +35,7 @@ var contentSplitController = new O.SplitViewController({
     staticPaneLength: 320,
     minStaticPaneLength: 250,
     maxStaticPaneLength: Math.max( 500,
-        App.views.mainWindow.get( 'pxWidth' ) - 700 )
+        App.views.mainWindow.get( 'pxWidth' ) - 700 ),
 });
 
 var today = new Date();
@@ -54,7 +52,7 @@ var agendaView = new O.View({
         top: 0,
         bottom: 0,
         right: 15,
-        width: 250
+        width: 250,
     },
     className: 'v-Agenda',
     date: today,
@@ -72,23 +70,23 @@ var agendaView = new O.View({
             el( 'div.v-Agenda-header', [
                 this._prev = el( 'a.v-Agenda-prev', [
                     'Previous day',
-                    el( 'b.v-Agenda-arrow' )
+                    el( 'b.v-Agenda-arrow' ),
                 ]),
                 this._now = el( 'a.v-Agenda-when', {
                     text: O.bind( this, 'date', function ( date ) {
                         return date.format( '%a, %d %b %Y', true );
-                    })
+                    }),
                 }),
                 this._next = el( 'a.v-Agenda-next', [
                     'Next day',
-                    el( 'b.v-Agenda-arrow' )
-                ])
+                    el( 'b.v-Agenda-arrow' ),
+                ]),
             ]),
             new O.ListView({
                 content: O.bind( this, 'events' ),
                 ItemView: App.EventItemView,
-                destroyItemView: function () {}
-            })
+                destroyItemView: function () {},
+            }),
         ];
     },
     changeDate: function ( event ) {
@@ -103,7 +101,7 @@ var agendaView = new O.View({
         } else if ( contains( this._now, target ) ) {
             this.set( 'date', today );
         }
-    }.on( 'click' )
+    }.on( 'click' ),
 });
 
 var mailboxView = new O.ScrollView({
@@ -118,25 +116,25 @@ var mailboxView = new O.ScrollView({
                 }),
             views: [
                 new EmptyView({
-                    value: 'Loading…'
+                    value: 'Loading…',
                 }),
                 new EmptyView({
-                    value: 'No Conversations'
+                    value: 'No Conversations',
                 }),
                 new O.ProgressiveListView({
                     content: O.bind( App.state, 'mailboxMessageList' ),
                     ItemView: App.MailboxItemView,
                     itemHeight: 96,
                     selection: App.state.selection,
-                    destroyItemView: function () {}
-                })
-            ]
-        })
+                    destroyItemView: function () {},
+                }),
+            ],
+        }),
     ],
     selectNone: function () {
         App.state.selection.selectNone();
         App.state.selectedMessage.set( 'record', null );
-    }.on( 'click' )
+    }.on( 'click' ),
 });
 
 var threadView = new O.ScrollView({
@@ -157,10 +155,10 @@ var threadView = new O.ScrollView({
             }.property( 'list', 'length', 'hasSelection' ),
             views: [
                 new EmptyView({
-                    value: 'Loading…'
+                    value: 'Loading…',
                 }),
                 new EmptyView({
-                    value: 'No Conversation Selected'
+                    value: 'No Conversation Selected',
                 }),
                 new O.View({
                     className: O.bind( App.state, 'showAgenda',
@@ -172,16 +170,16 @@ var threadView = new O.ScrollView({
                         new O.LabelView({
                             layerTag: 'h1',
                             className: 'v-Thread-title',
-                            value: O.bind( App.state, 'subject' )
+                            value: O.bind( App.state, 'subject' ),
                         }),
                         new O.ListView({
                             content: O.bind( App.state, 'threadMessageList' ),
-                            ItemView: App.ThreadMessageView
+                            ItemView: App.ThreadMessageView,
                         }),
                         O.when( App.state, 'showAgenda' ).show([
-                            agendaView
-                        ]).end()
-                    ]
+                            agendaView,
+                        ]).end(),
+                    ],
                 }),
                 new O.LabelView({
                     layerTag: 'h1',
@@ -190,11 +188,11 @@ var threadView = new O.ScrollView({
                     value: O.bind( App.state.selection, 'length',
                     function ( length ) {
                         return length + ' Conversations Selected';
-                    })
-                })
-            ]
-        })
-    ]
+                    }),
+                }),
+            ],
+        }),
+    ],
 });
 
 var main = new O.View({
@@ -208,7 +206,7 @@ var main = new O.View({
                 top: 0,
                 left: 0,
                 right: 0,
-                height: 50
+                height: 50,
             },
             childViews: [
                 new O.View({
@@ -218,17 +216,17 @@ var main = new O.View({
                     draw: function ( layer ) {
                         return [
                             el( 'div.v-MailboxTitle-name', {
-                                text: O.bind( App.state, 'mailboxName' )
+                                text: O.bind( App.state, 'mailboxName' ),
                             }),
                             el( 'div.v-MailboxTitle-total', {
                                 text: O.bind( App.state,
                                     'mailboxMessageList.length',
                                 function ( total ) {
                                     return total != null ? total + '' : '';
-                                })
-                            })
+                                }),
+                            }),
                         ];
-                    }
+                    },
                 }),
                 new O.View({
                     className: 'v-Toolbar',
@@ -240,57 +238,57 @@ var main = new O.View({
                             new O.ButtonView({
                                 label: 'Archive',
                                 target: App.actions,
-                                method: 'archive'
+                                method: 'archive',
                             }),
                             new O.ButtonView({
                                 label: 'Delete',
                                 target: App.actions,
-                                method: 'deleteToTrash'
+                                method: 'deleteToTrash',
                             }),
                             new O.ButtonView({
                                 label: 'Mark as Read',
                                 target: App.actions,
-                                method: 'read'
+                                method: 'read',
                             }),
                             new O.ButtonView({
                                 label: 'Mark as Unread',
                                 target: App.actions,
-                                method: 'unread'
+                                method: 'unread',
                             }),
                             new O.ButtonView({
                                 label: 'Undo',
                                 target: JMAP.mail.undoManager,
-                                method: 'undo'
+                                method: 'undo',
                             }),
                             new O.ButtonView({
                                 positioning: 'absolute',
                                 layout: {
-                                    right: 15
+                                    right: 15,
                                 },
                                 label: 'Agenda',
                                 isActive: O.bind( App.state, 'showAgenda' ),
                                 target: App.state,
-                                method: 'toggleAgenda'
-                            })
+                                method: 'toggleAgenda',
+                            }),
                         ];
-                    }
-                })
-            ]
+                    },
+                }),
+            ],
         }),
         new O.View({
             positioning: 'absolute',
             layout: O.extend({
-                top: 50
+                top: 50,
             }, O.View.LAYOUT_FILL_PARENT, true ),
             childViews: [
                 mailboxView,
                 threadView,
                 new O.SplitDividerView({
-                    controller: contentSplitController
-                })
-            ]
-        })
-    ]
+                    controller: contentSplitController,
+                }),
+            ],
+        }),
+    ],
 });
 
 var sidebar = new O.View({
@@ -304,29 +302,29 @@ var sidebar = new O.View({
                 top: 0,
                 left: 0,
                 right: 0,
-                height: 50
+                height: 50,
             },
             draw: function ( layer ) {
                 return el( 'div.v-MailboxTitle', { style: 'display:block' }, [
                     el( 'b', { style: 'font-weight:600' }, [ 'JMAP' ]),
-                    ' / Mail'
+                    ' / Mail',
                 ]);
-            }
+            },
         }),
         new O.ScrollView({
             className: 'v-Sidebar',
             positioning: 'absolute',
             layout: O.extend({
-                top: 50
+                top: 50,
             }, O.View.LAYOUT_FILL_PARENT, true ),
             childViews: [
                 new O.ListView({
                     content: App.state.allMailboxes,
-                    ItemView: App.MailboxSourceView
-                })
-            ]
-        })
-    ]
+                    ItemView: App.MailboxSourceView,
+                }),
+            ],
+        }),
+    ],
 });
 
 var loginView = new O.View({
@@ -371,12 +369,12 @@ App.views.mail = new O.View({
         main,
         sidebar,
         new O.SplitDividerView({
-            controller: sidebarSplitController
+            controller: sidebarSplitController,
         }),
         O.when( JMAP.auth, 'isAuthenticated', O.Transform.invert ).show([
             loginView,
         ]).end(),
-    ]
+    ],
 });
 
 App.views.mainWindow.insertView( App.views.mail );

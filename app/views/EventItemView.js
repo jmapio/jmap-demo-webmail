@@ -6,8 +6,6 @@
 
 /*global O, App */
 
-"use strict";
-
 ( function () {
 
 const el = O.Element.create;
@@ -15,15 +13,15 @@ const el = O.Element.create;
 // ---
 
 var left = {
-    transform: 'translate3d(-100%,0,0)'
+    transform: 'translate3d(-100%,0,0)',
 };
 
 var centre = {
-    transform: 'translate3d(0,0,0)'
+    transform: 'translate3d(0,0,0)',
 };
 
 var right = {
-    transform: 'translate3d(100%,0,0)'
+    transform: 'translate3d(100%,0,0)',
 };
 
 var EventItemView = O.Class({
@@ -71,10 +69,10 @@ var EventItemView = O.Class({
         return [
             el( 'h3.v-EventItem-title', {
                 style: 'color:' + event.get( 'calendar' ).get( 'color' ),
-                text: title || ' ' // nbsp;
+                text: title || ' ', // nbsp;
             }),
             el( 'h4.v-EventItem-time', [ time ] ),
-            location ? el( 'p.v-EventItem-location', [ location ] ) : null
+            location ? el( 'p.v-EventItem-location', [ location ] ) : null,
         ];
     },
 
@@ -86,7 +84,7 @@ var EventItemView = O.Class({
         var isInDocument = this.get( 'isInDocument' ),
             done = this._done;
         this.set( 'layout', O.extend({
-            top: this.get( 'index' ) * 60
+            top: this.get( 'index' ) * 60,
         }, isInDocument ? done ? right : centre : left ) );
     }.observes( 'index' ),
 
@@ -109,7 +107,7 @@ var EventItemView = O.Class({
             EventItemView.parent.detach.call( this );
             this.destroy();
         }
-    }
+    },
 });
 
 App.EventItemView = EventItemView;

@@ -6,8 +6,6 @@
 
 /*global O, App, JMAP */
 
-"use strict";
-
 ( function () {
 
 const el = O.Element.create;
@@ -21,7 +19,7 @@ var drawNames = function ( people ) {
         }
         result.push( O.Element.create( 'span', {
             text: person.name || person.email.split( '@' )[0],
-            title: person.email
+            title: person.email,
         }));
         return result;
     }, [] );
@@ -145,11 +143,11 @@ var MessageView = O.Class({
                 el( 'img.v-Message-avatar', {
                     src: 'https://secure.gravatar.com/avatar/' +
                         email.trim().toLowerCase().md5() +
-                        '/?s=100&d=monsterid'
+                        '/?s=100&d=monsterid',
                 }),
                 el( 'div.v-Message-first', [
                     el( 'h2.v-Message-from', [
-                        fromName
+                        fromName,
                     ]),
                     el( 'div.v-Message-mailboxes', {
                         children: bind( message, 'mailboxes',
@@ -157,22 +155,22 @@ var MessageView = O.Class({
                             return [
                                 mailboxes.map( function (mailbox ) {
                                     return mailbox.get( 'name' );
-                                }).join( ', ' )
+                                }).join( ', ' ),
                             ];
-                        })
+                        }),
                     }),
                     el( 'div.v-Message-time', [
                         receivedAt.isToday() ?
                             O.i18n.date( receivedAt, 'time' ) :
-                            O.i18n.date( receivedAt, 'date' )
-                    ])
+                            O.i18n.date( receivedAt, 'date' ),
+                    ]),
                 ]),
                 el( 'div.v-Message-to', [
                     ' to ',
-                    drawNames( message.get( 'to' ) )
+                    drawNames( message.get( 'to' ) ),
                 ]),
                 el( 'div.v-Message-preview', [
-                    message.get( 'preview' )
+                    message.get( 'preview' ),
                 ]),
                 new O.ButtonView({
                     icon: 'icon-star',
@@ -182,14 +180,14 @@ var MessageView = O.Class({
                     }),
                     positioning: 'absolute',
                     target: this,
-                    method: 'toggleFlagged'
-                })
+                    method: 'toggleFlagged',
+                }),
             ]),
             detailsAreLoaded && this.get( 'isExpanded' ) ?
                 this._drawBody() :
                 this._loading = el( 'div.v-Message-body', [
-                    'Loading…'
-                ])
+                    'Loading…',
+                ]),
         ];
     },
     // #end
@@ -282,7 +280,9 @@ var MessageView = O.Class({
 
     onClick: function ( event ) {
         // Ignore right clicks
-        if ( event.button || event.metaKey || event.ctrlKey ) { return; }
+        if ( event.button || event.metaKey || event.ctrlKey ) {
+            return;
+        }
 
         if ( !( event.targetView instanceof O.ButtonView ) &&
                 O.Element.contains( this._header, event.target ) &&
@@ -299,7 +299,7 @@ var MessageView = O.Class({
 
     markRead: function () {
         JMAP.mail.setUnread( [ this.get( 'content' ) ], false, false );
-    }
+    },
 });
 
 App.MessageView = MessageView;

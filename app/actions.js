@@ -6,8 +6,6 @@
 
 /*global JMAP, App */
 
-"use strict";
-
 ( function () {
 
 var NO = 0;
@@ -109,7 +107,7 @@ var actions = {
                 messages, destination, App.state.get( 'mailbox' ), true );
         });
         return this;
-    }
+    },
 };
 
 App.actions = actions;

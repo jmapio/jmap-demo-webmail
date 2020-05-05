@@ -6,8 +6,6 @@
 
 /*global O, App, JMAP */
 
-"use strict";
-
 ( function () {
 
 const el = O.Element.create;
@@ -156,7 +154,7 @@ var MailboxItemView = O.Class({
         return {
             top: ( index - ( isAdded ? 1 : 0 ) ) * itemHeight,
             left: 0,
-            opacity: isRemoved ? 0 : 1
+            opacity: isRemoved ? 0 : 1,
         };
     }.property( 'index', 'itemHeight', 'isAdded', 'isRemoved' ),
 
@@ -195,24 +193,24 @@ var MailboxItemView = O.Class({
         }
         return [
             el( 'span.v-MailboxItem-name', [
-                name
+                name,
             ]),
             el( 'time.v-MailboxItem-time', [
                 receivedAt.isToday() ?
                     O.i18n.date( receivedAt, 'time' ) :
-                    O.i18n.date( receivedAt, 'date' )
+                    O.i18n.date( receivedAt, 'date' ),
             ]),
             el( 'span.v-MailboxItem-subject', [
-                subject
+                subject,
             ]),
             total > 1 ?
             el( 'span.v-MailboxItem-total', [
-                total + ''
+                total + '',
             ]) : null,
             el( 'span.v-MailboxItem-preview', [
-                message.get( 'preview' )
+                message.get( 'preview' ),
             ]),
-            el( 'button.v-MailboxItem-flagButton.icon-star' )
+            el( 'button.v-MailboxItem-flagButton.icon-star' ),
         ];
     },
 
@@ -274,7 +272,7 @@ var MailboxItemView = O.Class({
             drag._draggedStoreKey = storeKey;
             drag.set( 'dragImage', el( 'div.v-MailboxItem-drag', [
                 O.i18n.localise(
-                    '[*2,_1,1 conversation,%n conversations]', count )
+                    '[*2,_1,1 conversation,%n conversations]', count ),
             ]));
         } else {
             drag.endDrag();
@@ -292,7 +290,7 @@ var MailboxItemView = O.Class({
             return selection.isStoreKeySelected( storeKey ) ?
                 selection.get( 'selectedStoreKeys' ) : [ storeKey ];
         }
-    }
+    },
 });
 
 App.MailboxItemView = MailboxItemView;

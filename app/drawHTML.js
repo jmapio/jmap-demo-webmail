@@ -6,8 +6,6 @@
 
 /*global O, App, DOMPurify, document */
 
-"use strict";
-
 ( function () {
 
 // --- CSS Sanitiser ---
@@ -15,7 +13,7 @@
 var counter = 0;
 var id = '';
 
-var addToSet = function(set, array) {
+var addToSet = function (set, array) {
     var l = array.length;
     while (l--) {
         set[array[l]] = true;
@@ -241,7 +239,7 @@ var ALLOWED_CSS_PROPERTY = addToSet( {}, [
 
     // Columns
     'columns',
-    'column-'
+    'column-',
     // e.g.
     // 'column-count',
     // 'column-fill',
@@ -430,7 +428,7 @@ var drawHTML = function ( html ) {
         ALLOW_DATA_ATTR: false,
         WHOLE_DOCUMENT: true,
         RETURN_DOM: true,
-        SANITIZE_DOM: true
+        SANITIZE_DOM: true,
     });
 
     // Now create our custom element and move the children across

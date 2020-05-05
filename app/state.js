@@ -4,9 +4,7 @@
 // Requires: namespace.js                                                     \\
 // -------------------------------------------------------------------------- \\
 
-/*global O, App, JMAP, JSON */
-
-"use strict";
+/*global O, App, JMAP, btoa, location */
 
 O.RunLoop.invoke( function () {
 
@@ -80,13 +78,13 @@ var rootMailboxes = store.getQuery( 'rootMailboxes', O.LocalQuery, {
 
 var allMailboxes = new O.ObservableArray( null, {
     content: store.getQuery( 'allMailboxes', O.LocalQuery, {
-        Type: Mailbox
+        Type: Mailbox,
     }),
     contentDidChange: function () {
         var mailboxes = this.get( 'content' ).get( '[]' );
         mailboxes.sort( byMailSourceOrder );
         return this.set( '[]', mailboxes );
-    }.queue( 'before' )
+    }.queue( 'before' ),
 }).contentDidChange();
 store.on( Mailbox, allMailboxes, 'contentDidChange' );
 
@@ -107,7 +105,7 @@ App.state = new O.Router({
                 this.beginPropertyChanges()
                     .set( 'emailId', emailId )
                     .endPropertyChanges();
-            }
+            },
         },
         // Default
         {
@@ -117,8 +115,8 @@ App.state = new O.Router({
                 this.beginPropertyChanges()
                     .set( 'emailId', '' )
                     .endPropertyChanges();
-            }
-        }
+            },
+        },
     ],
 
     encodedState: function () {
@@ -141,7 +139,7 @@ App.state = new O.Router({
             accountId: this.get( 'mailbox' ).get( 'accountId' ),
             where: { inMailbox: mailboxId },
             sort: [{ property: 'receivedAt', isAscending: false }],
-            collapseThreads: true
+            collapseThreads: true,
         };
         var id = MessageList.getId( args );
         return store.getQuery( id, MessageList, args );
@@ -237,7 +235,7 @@ App.state = new O.Router({
     // --- Selection ---
 
     selection: new O.SelectionController({
-        content: O.bind( App, 'state*mailboxMessageList' )
+        content: O.bind( App, 'state*mailboxMessageList' ),
     }),
 
     // --- Initial data ---
@@ -253,7 +251,7 @@ rootMailboxes.addObserverForKey( '[]', {
         rootMailboxes.removeObserverForKey( key, this, 'go' );
         App.state.set( 'mailbox',
             JMAP.mail.getMailboxForRole( null, 'inbox' ) );
-    }
+    },
 }, 'go' );
 
 App.state.selectedMessage = new O.SingleSelectionController({
@@ -294,7 +292,7 @@ App.state.selectedMessage = new O.SingleSelectionController({
 
     _range: {
         start: -1,
-        end: -1
+        end: -1,
     },
 
     observeList: function ( _, __, oldList ) {
@@ -334,7 +332,7 @@ App.state.selectedMessage = new O.SingleSelectionController({
                 list.getObjectAt( nextIndex ) )
             .set( 'prev', index < 0 || !list ? null :
                 list.getObjectAt( prevIndex ) );
-    }.queue( 'middle' ).observes( 'index' )
+    }.queue( 'middle' ).observes( 'index' ),
 }).setSelection().observeList();
 
 App.kbshortcuts = new O.GlobalKeyboardShortcuts();
@@ -359,7 +357,7 @@ App.push = new O.EventSource({
             O.RunLoop.didError({
                 name: 'JMAP.EventSource#onStateChange',
                 message: 'Invalid JSON',
-                details: 'Arg:\n' + JSON.stringify( event ) + '\n\n'
+                details: 'Arg:\n' + JSON.stringify( event ) + '\n\n',
             });
         }
         if ( !changed ) {
