@@ -377,8 +377,15 @@ App.push = new O.EventSource({
                     accountId, Type, accountChanges[ type ] );
             }
         }
-    }.on( 'state' )
-}).open();
+    }.on( 'state' ),
+
+    openIfUrl: function () {
+        if ( this.get( 'url' ) ) {
+            this.open();
+        }
+        return this;
+    }.observes( 'url' ),
+}).openIfUrl();
 
 // ---
 
