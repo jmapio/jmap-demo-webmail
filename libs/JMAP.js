@@ -138,6 +138,14 @@ const auth = new Obj({
         return null;
     },
 
+    getUrlForBlob(accountId, blobId, type, name) {
+        return this.get('downloadUrl')
+            .replace('{accountId}', encodeURIComponent(accountId))
+            .replace('{blobId}', encodeURIComponent(blobId))
+            .replace('{type}', encodeURIComponent(type))
+            .replace('{name}', encodeURIComponent(name));
+    },
+
     // ---
 
     didAuthenticate: function ( data ) {
