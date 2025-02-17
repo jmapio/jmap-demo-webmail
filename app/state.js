@@ -347,7 +347,11 @@ App.kbshortcuts
 // --- Connect to the push service ---
 
 App.push = new O.EventSource({
-    url: O.bind( JMAP.auth, 'eventSourceUrl' ),
+    url: O.bind( JMAP.auth, 'eventSourceUrl', url =>
+        url.replace('{types}', '*')
+           .replace('{closeafter}', 'no')
+           .replace('{ping}', '30')
+    ),
 
     onStateChange: function ( event ) {
         var changed, accountId, accountChanges, Type, type;
