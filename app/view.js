@@ -277,9 +277,10 @@ var main = new O.View({
         }),
         new O.View({
             positioning: 'absolute',
-            layout: O.extend({
+            layout: {
+                ...O.View.LAYOUT_FILL_PARENT,
                 top: 50,
-            }, O.View.LAYOUT_FILL_PARENT, true ),
+            },
             childViews: [
                 mailboxView,
                 threadView,
@@ -314,9 +315,10 @@ var sidebar = new O.View({
         new O.ScrollView({
             className: 'v-Sidebar',
             positioning: 'absolute',
-            layout: O.extend({
+            layout: {
+                ...O.View.LAYOUT_FILL_PARENT,
                 top: 50,
-            }, O.View.LAYOUT_FILL_PARENT, true ),
+            },
             childViews: [
                 new O.ListView({
                     content: App.state.allMailboxes,
@@ -341,17 +343,38 @@ var loginView = new O.View({
                     value: O.bindTwoWay( App.credentials, 'server' ),
                 }),
                 el( 'h2.v-Login-title', [
-                    'Username',
+                    'Authentication',
                 ]),
-                new O.TextView({
-                    value: O.bindTwoWay( App.credentials, 'username' ),
+                new O.SelectView({
+                    value: O.bindTwoWay( App.credentials, 'authMode' ),
+                    options: [
+                        { text: 'Basic Auth (username/password)', value: 'basic' },
+                        { text: 'Bearer Token', value: 'bearer' },
+                    ],
                 }),
-                el( 'h2.v-Login-title', [
-                    'Password',
-                ]),
-                new O.TextView({
-                    value: O.bindTwoWay( App.credentials, 'password' ),
-                }),
+                O.when( App.credentials, 'authMode', function ( mode ) {
+                    return mode === 'basic';
+                }).show([
+                    el( 'h2.v-Login-title', [
+                        'Username',
+                    ]),
+                    new O.TextView({
+                        value: O.bindTwoWay( App.credentials, 'username' ),
+                    }),
+                    el( 'h2.v-Login-title', [
+                        'Password',
+                    ]),
+                    new O.TextView({
+                        value: O.bindTwoWay( App.credentials, 'password' ),
+                    }),
+                ]).otherwise([
+                    el( 'h2.v-Login-title', [
+                        'Bearer Token',
+                    ]),
+                    new O.TextView({
+                        value: O.bindTwoWay( App.credentials, 'bearerToken' ),
+                    }),
+                ]).end(),
                 new O.ButtonView({
                     label: 'Log in',
                     target: App.credentials,

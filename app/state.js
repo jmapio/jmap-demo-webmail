@@ -397,11 +397,20 @@ App.credentials = new O.LocalStorage( 'credentials', false, {
     password: '',
 });
 
+// authMode and bearerToken are not persisted to LocalStorage
+App.credentials.set( 'authMode', 'basic' );
+App.credentials.set( 'bearerToken', '' );
+
 App.credentials.login = function () {
     var server = this.get( 'server' );
-    var username = this.get( 'username' );
-    var password = this.get( 'password' );
-    var accessToken = 'Basic ' + btoa( username + ':' + password );
+    var accessToken;
+    if ( this.get( 'authMode' ) === 'bearer' ) {
+        accessToken = 'Bearer ' + this.get( 'bearerToken' );
+    } else {
+        var username = this.get( 'username' );
+        var password = this.get( 'password' );
+        accessToken = 'Basic ' + btoa( username + ':' + password );
+    }
     JMAP.auth.fetchSession( server, accessToken );
 };
 
