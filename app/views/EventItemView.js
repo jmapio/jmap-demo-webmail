@@ -83,9 +83,10 @@ var EventItemView = O.Class({
     setLayout: function () {
         var isInDocument = this.get( 'isInDocument' ),
             done = this._done;
-        this.set( 'layout', O.extend({
+        this.set( 'layout', {
             top: this.get( 'index' ) * 60,
-        }, isInDocument ? done ? right : centre : left ) );
+            ...(isInDocument ? done ? right : centre : left),
+        });
     }.observes( 'index' ),
 
     didEnterDoc: function () {
