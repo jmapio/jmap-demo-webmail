@@ -201,7 +201,7 @@ App.state = new O.Router({
     refresh: function () {
         var list = this.get( 'mailboxMessageList' );
         if ( list ) {
-            list.refresh( true );
+            list.fetch( true );
         }
         store.fetchAll( Mailbox, true )
              .fetchAll( Message, true )
