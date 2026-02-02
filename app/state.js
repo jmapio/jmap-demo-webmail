@@ -344,6 +344,72 @@ App.kbshortcuts
     .register( 'cmd-shift-z', JMAP.mail.undoManager, 'redo' )
     .register( 'cmd-a', App.state.selection, 'selectAll' );
 
+// --- Polling fallback when EventSource is not available ---
+
+App.poll = new O.Object({
+    interval: 30000,  // 30 seconds
+    _timer: null,
+    _isTabVisible: true,
+
+    // Should we be polling? (computed fresh each call)
+    shouldPoll: function () {
+        return JMAP.auth.get( 'isAuthenticated' ) &&
+               !JMAP.auth.get( 'eventSourceUrl' ) &&
+               this._isTabVisible;
+    },
+
+    start: function () {
+        if ( !this._timer && this.shouldPoll() ) {
+            this._schedulePoll();
+        }
+    },
+
+    stop: function () {
+        if ( this._timer ) {
+            O.RunLoop.cancel( this._timer );
+            this._timer = null;
+        }
+    },
+
+    _schedulePoll: function () {
+        this._timer = O.RunLoop.invokeAfterDelay(
+            this._poll, this.interval, this
+        );
+    },
+
+    _poll: function () {
+        this._timer = null;
+        if ( this.shouldPoll() ) {
+            store.fetchAll( Mailbox, true )
+                 .fetchAll( Message, true )
+                 .fetchAll( Thread, true );
+            this._schedulePoll();
+        }
+    },
+
+    // React to auth/eventSourceUrl changes
+    _checkShouldPoll: function () {
+        if ( this.shouldPoll() ) {
+            this.start();
+        } else {
+            this.stop();
+        }
+    },
+});
+
+// Page Visibility API integration
+document.addEventListener( 'visibilitychange', function () {
+    App.poll.set( '_isTabVisible', !document.hidden );
+    if ( !document.hidden ) {
+        // Immediate poll on tab visible, then resume schedule
+        App.poll._poll();
+    }
+});
+
+// Notify App.poll when auth state changes
+JMAP.auth.addObserverForKey( 'isAuthenticated', App.poll, '_checkShouldPoll' );
+JMAP.auth.addObserverForKey( 'eventSourceUrl', App.poll, '_checkShouldPoll' );
+
 // --- Connect to the push service ---
 
 App.push = new O.EventSource({
@@ -384,6 +450,9 @@ App.push = new O.EventSource({
     openIfUrl: function () {
         if ( this.get( 'url' ) ) {
             this.open();
+            App.poll.stop();  // Stop polling, push is available
+        } else {
+            App.poll.start(); // No push URL, start polling
         }
         return this;
     }.observes( 'url' ),
